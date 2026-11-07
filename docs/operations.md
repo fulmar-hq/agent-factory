@@ -40,6 +40,72 @@ A stable claim is committed before spawning. An atomic supervisor claim prevents
 
 `prepare` writes absolute-path plists under the private installation; existing files are preserved. It does not bootstrap jobs. After review, install uses `launchctl bootstrap gui/UID PATH`. Undo loaded jobs with `launchctl bootout gui/UID/com.agent-factory.tick` and the corresponding `.board` label. Archive plists and private state rather than deleting them. To undo source changes, make signed revert commits; retain public history. Stop the manually started board with SIGTERM to its process. Archive worktrees only after custody acceptance. Caps and the schedule are never changed by installation or rollback.
 
-Qualification still needs actual live-meter, stop/descendant, isolated-policy and phone steering rehearsals. Tailscale, phone access, Telegram, production workflow enforcement, AWS billing ingestion and external brakes are not installed or represented as passed.
+Qualification still needs actual live-meter, stop/descendant, isolated-policy and phone steering rehearsals. Remote phone access, the reviewed Telegram hook, production workflow enforcement, AWS billing ingestion and external brakes are not activated or represented as passed; the preparation path is documented below.
 
 Primary interface references: [Bun SQLite](https://bun.sh/docs/api/sqlite), [Codex non-interactive execution](https://developers.openai.com/codex/noninteractive/), [Claude CLI](https://code.claude.com/docs/en/cli-reference). Installed local help is checked for supported flags; runtime qualification, not vendor documentation, decides admission.
+
+## Telegram backup controls
+
+After Quality reviews the source, Coordinator runs `bun scripts/prepare-telegram.ts`
+once against the existing Alido Mail database. It installs an additive SQLite
+intake trigger and a private `telegram-mail.sqlite` symlink; it never polls
+Telegram, loads a job, replays old messages or creates a bot. The existing
+mail-operator-receiver checks Vincent's chat ID **and** sender ID before inserting
+a root. Only private verified roots enter the factory queue; forwarded mail,
+agent mail and group messages do not. `status`, `pause`, `resume` and `stop
+owner/repo#123` (or `stop 123` if unique) are consumed on the next launcher tick,
+without a model. Commands are case insensitive. Other mail keeps its existing
+routing. Installation requires the existing receiver's normal recipient/operator
+registration to remain valid; the bridge remains the authority for sender checks.
+
+The original mail remains acked with no pending chat wake, alongside a durable
+command queue. Each controller decision and reply is keyed by the root ID. A
+restart after applying a command reuses its recorded answer rather than applying
+it again; concurrent ticks queue one reply. Replies use mail-telegram-sender's
+normal outbound queue and transport retry semantics, not a second sender. Resume
+never clears stopped custody, qualifications, wallet stops or other gates. Status
+reports retained sessions and the last heartbeat, including missing evidence.
+No existing command or historical message is processed by setup itself.
+
+Undo: first pause/reconcile commands, archive the private symlink, export/archive
+the `factory_command_intake` trigger SQL, then disable that trigger. Retain
+`factory_commands`, messages, replies and controller events. Disable the trigger
+before retiring the tick; otherwise commands remain safely queued without a
+reply. Restore the archived trigger SQL/symlink to re-enable. Source undo is a
+signed revert; keep branches and worktrees. The same-user filesystem limitation
+above also applies to mail: a forged SQLite write by the same OS user is not an
+independently verified transport origin.
+
+## Private phone board
+
+The listener remains `127.0.0.1:4318`. The proposed hostname is
+`factory.goalido.com`. [The tunnel template](../cloudflared/config.yaml.example)
+rewrites the origin Host to the exact loopback value, preserving the board's
+Host check, and ends in a 404 catch-all. Keep the filled tunnel UUID and credential
+JSON in the private installation. Use the existing `~/bin/cloudflared` binary;
+Vincent's one-time authorization is pending. **Do not run tunnel login or start a
+tunnel during implementation.** No launchd job is loaded by these changes.
+
+Before any DNS route/tunnel is enabled, configure a Cloudflare Access self-hosted
+application covering **all paths** on `factory.goalido.com`, with one Allow policy:
+Include → Emails → Vincent's exact verified email (take it from the private
+existing QA Access policy, never guess or publish it). Keep default deny; no
+Everyone, email-domain allow, Bypass or service-token policy. Reuse the existing
+QA identity provider and session policy. Confirm an unauthenticated request gets
+the Access login, a different identity is denied, and Vincent alone can read the
+board. Until those checks pass, the remote board is unverified and stays off.
+
+Only after that review set `FACTORY_PUBLIC_ORIGIN=https://factory.goalido.com`
+for the board. This permits that exact browser Origin for writes; the private
+owner bearer token remains required. An Access email header alone never grants
+board actions. The setting is optional; absent it, controls remain loopback-only.
+Verify remote read, pause/resume and phone controls after activation without
+exposing owner briefs or tokens in screenshots. The board relies on Access for
+remote read authentication; it is not safe to publish without that policy.
+
+Cloudflare references: [origin Host override](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/),
+[self-hosted applications](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)
+and [email policies](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/).
+Undo: stop only this tunnel, archive its private config/credentials, remove the
+public-Origin setting and retain the Access application protecting the hostname.
+Archive DNS/tunnel metadata before any later retirement; do not delete assets.

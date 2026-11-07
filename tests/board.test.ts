@@ -49,3 +49,53 @@ test("board binds loopback, shows local data, rejects helper and cross-origin wr
     rmSync(dir, { recursive: true });
   }
 });
+
+test("tunnel origin is explicit, host stays loopback and owner token is still required", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-tunnel-"));
+  writeFileSync(join(dir, "config.yaml"), JSON.stringify(config()));
+  writeFileSync(join(dir, "owner-token"), "b".repeat(64));
+  const b = await board(dir, 0, "https://factory.goalido.com");
+  try {
+    const base = `http://127.0.0.1:${b.server.port}`;
+    const post = (origin: string, token: string) =>
+      fetch(base + "/api/pause", {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ paused: false }),
+      });
+    expect(
+      (await post("https://factory.goalido.com", "b".repeat(64))).status,
+    ).toBe(200);
+    expect((await post("https://factory.goalido.com", "wrong")).status).toBe(
+      403,
+    );
+    expect((await post("https://other.invalid", "b".repeat(64))).status).toBe(
+      403,
+    );
+    expect(
+      (await fetch(base, { headers: { Host: "factory.goalido.com" } })).status,
+    ).toBe(403);
+    const template = Bun.YAML.parse(
+      await Bun.file(
+        join(import.meta.dir, "../cloudflared/config.yaml.example"),
+      ).text(),
+    ) as {
+      ingress: {
+        originRequest?: { httpHostHeader: string };
+        service: string;
+      }[];
+    };
+    expect(template.ingress[0]!.originRequest!.httpHostHeader).toBe(
+      "127.0.0.1:4318",
+    );
+    expect(template.ingress[0].service).toBe("http://127.0.0.1:4318");
+    expect(template.ingress[1].service).toBe("http_status:404");
+  } finally {
+    b.close();
+    rmSync(dir, { recursive: true });
+  }
+});

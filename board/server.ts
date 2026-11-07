@@ -13,7 +13,12 @@ import { Engine } from "../launcher/engine";
 import { available } from "../wallet/ledger";
 const same = (a: string, b: string) =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-export async function board(dir = root, port = 4318) {
+export async function board(dir = root, port = 4318, publicOrigin?: string) {
+  if (
+    publicOrigin !== undefined &&
+    publicOrigin !== "https://factory.goalido.com"
+  )
+    throw Error("unsupported public origin");
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite")),
     e = new Engine(s, c);
@@ -42,7 +47,10 @@ export async function board(dir = root, port = 4318) {
         return json({ error: "loopback host required" }, 403);
       if (req.method === "POST") {
         if (
-          req.headers.get("origin") !== `http://127.0.0.1:${server.port}` ||
+          ![
+            `http://127.0.0.1:${server.port}`,
+            ...(publicOrigin ? [publicOrigin] : []),
+          ].includes(req.headers.get("origin") ?? "") ||
           !same(req.headers.get("authorization") ?? "", `Bearer ${token}`)
         )
           return json({ error: "owner authorization required" }, 403);
@@ -170,6 +178,6 @@ export async function board(dir = root, port = 4318) {
   };
 }
 if (import.meta.main) {
-  const b = await board();
+  const b = await board(root, 4318, process.env.FACTORY_PUBLIC_ORIGIN);
   console.log(`Board: http://127.0.0.1:${b.server.port}`);
 }
