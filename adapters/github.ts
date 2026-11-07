@@ -54,12 +54,12 @@ export function issueTicket(repo: string, i: Issue): Ticket | null {
     title: i.title,
   });
 }
-export async function reconcile(s: Store, c: Config, now = Date.now()) {
+export async function reconcile(s: Store, c: Config, now = Date.now(), execute = command) {
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
       const issues = JSON.parse(
-        await command([
+        await execute([
           "gh",
           "issue",
           "list",
