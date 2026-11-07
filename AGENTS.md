@@ -1,0 +1,7 @@
+# Agent Factory
+
+Read README.md and docs/operations.md before changes. Keep this controller small. Private config, operational data, owner records, native transcripts and credentials never enter Git history. Fixtures are fictional. Never load launchd during implementation; Coordinator enables it after review. Archive rather than delete operational assets; log changes with undo.
+
+Bun 1.3.14, strict TypeScript, native SQLite, Zod and the existing plain board are deliberate. Run `bun run typecheck` and `bun test`. Signed commits only. Preserve the first commit's original README and Apache license history. Worker qualification must remain fail-closed; do not turn missing evidence into synthetic success.
+
+Shared standards authority: https://github.com/vincentmessina/working-standards at c8dd539da85903dd76dd2d6f991d0a5ee5415a89. Adopted scope: authority workflow, strict types, Bun, validation, signed/reviewable changes, accessible responsive UI, EN/FR control copy and secret-free examples. Task-specific exceptions: SQLite and plain HTML/CSS/JS instead of the usual web stack, Bun's built-in test runner and no cloud infrastructure, to meet the explicitly minimal local-controller brief. Design is independent/simple; the requested mockup was absent and the styling question was sent before board implementation. Revisit styling when an owner supplies a reference. Do not infer Fisher branding or silently adopt newer upstream standards.

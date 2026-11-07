@@ -1,0 +1,1 @@
+Run `bun run prepare:local` to write absolute-path, private plists. The tick plist has StartInterval=60; board has KeepAlive. Neither is loaded by preparation. After Coordinator review, scripts/install.sh --after-review bootstraps them. A one-shot tick can launch no helper twice; workers have independent supervisors. Jobs and private state remain outside the checkout.
