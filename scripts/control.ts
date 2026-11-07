@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { configAt, root } from "../launcher/config";
 import { Store } from "../tracking/store";
+import { approveIntake } from "../adapters/github";
 import { Engine } from "../launcher/engine";
 // Local protected executor interface. Never give this token to workers.
 const expected = (await Bun.file(join(root, "owner-token")).text()).trim(),
@@ -17,6 +18,9 @@ try {
   const [action, ...args] = process.argv.slice(2);
   if (action === "pause" || action === "resume")
     e.pause(action === "pause", "owner");
+  else if (action === "approve-intake")
+    await approveIntake(args[0], Number(args[1]), s, args[2]);
+  else if (action === "archive") e.archive(args[0], args[1], "owner");
   else if (action === "qa-accepted") {
     const [revision, day, receipt] = args;
     if (
@@ -61,7 +65,7 @@ try {
     });
   } else
     throw Error(
-      "supported: pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
+      "supported: approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
     );
 } finally {
   s.close();

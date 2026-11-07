@@ -22,6 +22,8 @@ const words = {
     seconds: "seconds ago",
     answer: "Answer",
     stop: "Stop and preserve",
+    archive: "Archive reconciled session",
+    custody: "Custody receipt",
     proof: "Proof",
     source: "Sources",
     error: "Unable to read local evidence",
@@ -52,6 +54,8 @@ const words = {
     seconds: "secondes",
     answer: "Répondre",
     stop: "Arrêter et conserver",
+    archive: "Archiver la session réconciliée",
+    custody: "Preuve de garde",
     proof: "Preuve",
     source: "Sources",
     error: "Lecture des données locales impossible",
@@ -228,7 +232,26 @@ function render() {
         2,
       ),
     );
-    d.append(button(t.stop, () => action("/api/stop", { id: x.id })));
+    if (x.status !== "archived")
+      d.append(button(t.stop, () => action("/api/stop", { id: x.id })));
+    if (["unknown", "paused", "finished"].includes(x.status)) {
+      const form = document.createElement("form"),
+        input = document.createElement("input");
+      input.required = true;
+      input.maxLength = 4000;
+      input.setAttribute("aria-label", t.custody);
+      input.placeholder = t.custody;
+      const submit = node("button", t.archive);
+      submit.type = "submit";
+      form.append(input, submit);
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        action("/api/archive", { id: x.id, receipt: input.value }).catch(
+          (e) => ($("auth-result").textContent = e.message),
+        );
+      };
+      d.append(form);
+    }
   }
   for (const r of data.releases)
     detail(

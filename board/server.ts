@@ -76,6 +76,14 @@ export async function board(dir = root, port = 4318) {
             );
             return json({ ok: true });
           }
+          if (
+            url.pathname === "/api/archive" &&
+            typeof body.id === "string" &&
+            typeof body.receipt === "string"
+          ) {
+            e.archive(body.id, body.receipt, "owner");
+            return json({ ok: true });
+          }
           if (url.pathname === "/api/stop" && typeof body.id === "string") {
             const id = body.id;
             s.atomic(() => {

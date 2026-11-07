@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { board } from "../board/server";
+import { Store } from "../tracking/store";
+import { Engine } from "../launcher/engine";
+import { ticket, admission } from "./fixtures";
 import { config } from "./fixtures";
 test("board binds loopback, shows local data, rejects helper and cross-origin writes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-board-"));
@@ -37,6 +40,32 @@ test("board binds loopback, shows local data, rejects helper and cross-origin wr
       false,
     );
     expect((await post("a".repeat(64), base, "/api/fund")).status).toBe(400);
+    const s = new Store(join(dir, "controller.sqlite")),
+      e = new Engine(s, config());
+    const x = e.admit(ticket(), admission());
+    e.finish(x.id, false);
+    const archive = (token: string, origin: string) =>
+      fetch(base + "/api/archive", {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: x.id,
+          receipt: "fixture reconciled custody",
+        }),
+      });
+    expect((await archive("helper", base)).status).toBe(403);
+    expect((await archive("a".repeat(64), "https://evil.invalid")).status).toBe(
+      403,
+    );
+    expect((await archive("a".repeat(64), base)).status).toBe(200);
+    expect(e.sessions()[0].status).toBe("archived");
+    expect(e.active()).toHaveLength(0);
+    expect(s.rows("debits")).toHaveLength(1);
+    s.close();
     expect(
       (await fetch(base + "/api/state", { headers: { Host: "evil.invalid" } }))
         .status,

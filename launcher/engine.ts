@@ -10,7 +10,7 @@ import {
   type Qualification,
 } from "./config";
 import { Store } from "../tracking/store";
-import { available, debit } from "../wallet/ledger";
+import { available, debit, awsRefusal } from "../wallet/ledger";
 export type Session = {
   id: string;
   ticket: string;
@@ -53,6 +53,23 @@ export function usageGate(raw: unknown, high: boolean, now: number, c: Config) {
   const used = Math.max(...m.windows.map((w) => w.used));
   if (used >= c.usage_gates.stop_at) blocked("usage stop");
   if (used >= c.usage_gates.admit_below && !high) blocked("high benefit only");
+}
+// Claims are compared conservatively across case-insensitive workspaces, including old rows.
+function claimPath(path: string): string {
+  if (
+    path.startsWith("/") ||
+    /[\\\x00-\x1f*?\[\]{}:]/.test(path) ||
+    path.split("/").some((x) => x === ".." || x === "")
+  )
+    blocked("invalid paths");
+  const normalized = path
+    .split("/")
+    .filter((x) => x !== ".")
+    .join("/")
+    .normalize("NFC")
+    .toLowerCase();
+  if (!normalized) blocked("invalid paths");
+  return normalized;
 }
 export class Engine {
   constructor(
@@ -97,15 +114,7 @@ export class Engine {
         blocked("unenrolled owner or repo");
       if (this.c.owners[t.owner].harness !== t.provider)
         blocked("provider mismatch");
-      if (
-        t.paths.some(
-          (p) =>
-            p.startsWith("/") ||
-            p.split("/").some((x) => x === ".." || x === "") ||
-            /[\x00-\x1f*?\[\]{}]/.test(p),
-        )
-      )
-        blocked("invalid paths");
+      const normalizedPaths = [...new Set(t.paths.map(claimPath))];
       usageGate(a.meter, t.benefit === "high", a.now, this.c);
       const q = QualificationSchema.safeParse(a.qualification);
       const model = t.model ?? this.c.owners[t.owner].model,
@@ -132,16 +141,20 @@ export class Engine {
         )
         .all() as { path: string }[];
       if (
-        t.paths.some((p) =>
+        normalizedPaths.some((p) =>
           paths.some(
             (x) =>
-              p === x.path ||
-              p.startsWith(x.path + "/") ||
-              x.path.startsWith(p + "/"),
+              p === claimPath(x.path) ||
+              p.startsWith(claimPath(x.path) + "/") ||
+              claimPath(x.path).startsWith(p + "/"),
           ),
         )
       )
         blocked("path claimed");
+      if (t.wallet === "aws") {
+        const refusal = awsRefusal(this.s, this.c, a.now, a.billing);
+        if (refusal) blocked(refusal);
+      }
       if (t.costCents > available(this.s, this.c, t.wallet, a.now, a.billing))
         blocked("wallet empty");
       this.s.event(
@@ -163,7 +176,7 @@ export class Engine {
           "reserved",
           JSON.stringify({ ...t, model, effort }),
         );
-      for (const p of t.paths)
+      for (const p of normalizedPaths)
         this.s.db.query("INSERT INTO claims VALUES(?,?)").run(p, id);
       debit(this.s, id, t.wallet, t.costCents, a.now);
       return this.sessions().find((x) => x.id === id)!;
@@ -261,6 +274,33 @@ export class Engine {
       { id, ok },
       "Preserve workspace and logs; failed/uncertain work is never automatically retried",
     );
+  }
+  archive(id: string, receipt: string, actor: string) {
+    if (actor !== "owner") blocked("owner only");
+    if (!receipt?.trim() || receipt.length > 4000)
+      blocked("custody receipt required");
+    this.s.atomic(() => {
+      const x = this.sessions().find((x) => x.id === id);
+      if (!x || !["unknown", "paused", "finished"].includes(x.status))
+        blocked("session not archivable");
+      if (x.pid !== null) {
+        try {
+          process.kill(x.pid, 0);
+          blocked("supervisor still alive");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+      this.s.db
+        .query("UPDATE sessions SET status='archived' WHERE id=?")
+        .run(id);
+      this.s.event(
+        randomUUID(),
+        "session-archive",
+        { id, receipt, previousStatus: x.status },
+        "Preserve native session, worktree, claims and debits. Reconcile custody before a bounded continuation; never reset the ticket claim or refund.",
+      );
+    });
   }
   release(
     stage: "qa" | "production",
