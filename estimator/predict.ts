@@ -13,7 +13,7 @@ type Dimension = typeof dimensions[number];
 export function history(s: Store): History[] {
   const rows = [...(s.get<unknown[]>("estimate-history") ?? [])];
   for (const x of s.rows("sessions") as {ticket: string; status: string; brief: string; started: number | null; actual_seconds: number; actual_tokens: number}[]) {
-    if (x.status !== "finished" || !x.started) continue;
+    if (!x.started) continue;
     const t = JSON.parse(x.brief);
     // Completion receipt is required: polling/elapsed time is not inferred as active work.
     const actual = s.get<{completed: number; seconds: number; tokens: number}>(`actual:${x.ticket}`);

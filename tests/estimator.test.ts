@@ -53,5 +53,7 @@ test("reservation freezes pre-start forecast; completion stores native actuals, 
     expect(s.get(`actual:${t.repo}#${t.number}`)).toMatchObject({seconds:2,tokens:20});
     expect(JSON.parse(e.sessions()[0].brief).estimateSeconds).toBe(t.estimateSeconds);
     expect(history(s).some(r=>r.id===`${t.repo}#${t.number}`)).toBe(true);
+    e.archive(x.id,"synthetic completed custody","owner");
+    expect(history(s).some(r=>r.id===`${t.repo}#${t.number}`)).toBe(true);
   } finally {s.close();}
 });
