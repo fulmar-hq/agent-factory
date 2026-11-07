@@ -1,3 +1,5 @@
+import { issueTicket } from "../adapters/github";
+import { estimate, history, score } from "../estimator/predict";
 import { join } from "node:path";
 import { readFile, readdir } from "node:fs/promises";
 import { timingSafeEqual, randomUUID } from "node:crypto";
@@ -121,12 +123,31 @@ export async function board(dir = root, port = 4318) {
           } catch {}
           owners.push({ name, ...role, brief });
         }
+        const past = history(s).filter(r => r.completed < now), evaluation = score(past);
+        const evaluations = new Map<string, ReturnType<typeof score>>();
         return json({
           now,
           paused: s.get("paused"),
           heartbeat: s.get("heartbeat"),
           versions: s.get("versions"),
           usage: r,
+          estimator: {evaluation, source:s.get("estimate-history-source")},
+          estimates: Object.fromEntries((s.rows("tickets") as {id:string;snapshot:string}[]).filter(row => JSON.parse(row.snapshot).state === "OPEN").map(row => {
+            const i = JSON.parse(row.snapshot);
+            const session = e.sessions().find(x => x.ticket === row.id);
+            let t = session ? JSON.parse(session.brief) : {};
+            if (!session) {
+              try {t = issueTicket(row.id.slice(0,row.id.lastIndexOf("#")), i) ?? {};} catch {}
+            }
+            const target = {
+              area:t.area ?? i.labels.find((l:{name:string}) => l.name.startsWith("area:"))?.name ?? "unknown",
+              kind:t.kind ?? i.labels.find((l:{name:string}) => l.name.startsWith("kind:"))?.name ?? "unknown",
+              provider:t.provider ?? "unknown",
+            };
+            const key = JSON.stringify(target);
+            if (!evaluations.has(key)) evaluations.set(key, score(past.filter(r => r.provider === target.provider && r.area === target.area && r.kind === target.kind)));
+            return [row.id, s.get(`estimate:${row.id}`) ?? estimate(past,target,now,evaluations.get(key)!)];
+          })),
           wallet: {
             awsCents: available(s, c, "aws", now, r.billing),
             otherCents: available(s, c, "other", now),

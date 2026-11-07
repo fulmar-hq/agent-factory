@@ -41,6 +41,8 @@ export const config = () =>
 export const ticket = (n = 1): Ticket => ({
   repo: "example/demo",
   number: n,
+  area: "unknown",
+  kind: "unknown",
   title: "Synthetic work",
   owner: "builder",
   creator: "fixture",

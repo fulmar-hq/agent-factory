@@ -16,6 +16,12 @@ const words = {
     none: "No records",
     unknown: "Unverified",
     usage: "usage",
+    stale: "Stale — starts blocked",
+    blocked: "Starts blocked",
+    highOnly: "High benefit only",
+    open: "Below 70%",
+    age: "minutes old",
+    estimator: "Estimator vs mean",
     wallet: "Available wallet",
     slots: "Slots",
     heartbeat: "Heartbeat",
@@ -48,6 +54,12 @@ const words = {
     none: "Aucun enregistrement",
     unknown: "Non vérifié",
     usage: "utilisation",
+    stale: "Périmé — démarrages bloqués",
+    blocked: "Démarrages bloqués",
+    highOnly: "Bénéfice élevé seulement",
+    open: "Moins de 70 %",
+    age: "minutes écoulées",
+    estimator: "Estimation / moyenne",
     wallet: "Budget disponible",
     slots: "Places",
     heartbeat: "Dernier signal",
@@ -134,10 +146,10 @@ function render() {
       provider + " " + t.usage,
       m
         ? m.windows.map((x) => Math.round(x.used * 100) + "%").join(" / ") +
-          (fresh ? "" : " · " + t.unknown)
-        : t.unknown,
+          (fresh ? " · " + (Math.max(...m.windows.map(x=>x.used)) >= .9 ? t.blocked : Math.max(...m.windows.map(x=>x.used)) >= .7 ? t.highOnly : t.open) : " · " + t.stale)
+        : t.unknown + " · " + t.blocked,
       m
-        ? new Date(m.observedAt).toLocaleString(lang) +
+        ? Math.max(0,Math.floor((data.now-m.observedAt)/60000)) + " " + t.age + " · " + new Date(m.observedAt).toLocaleString(lang) +
           " · " +
           m.windows
             .map((x) => new Date(x.resetsAt).toLocaleString(lang))
@@ -145,6 +157,7 @@ function render() {
         : data.qualifications[provider],
     ]);
   }
+  cards.push([t.estimator, data.estimator.evaluation.status, JSON.stringify(data.estimator.evaluation.ratios)]);
   cards.push(
     [
       t.wallet,
@@ -203,6 +216,7 @@ function render() {
           state: i.state,
           labels: i.labels.map((l) => l.name),
           decision: row.decision,
+          estimate: data.estimates[row.id],
           observed: new Date(row.observed).toLocaleString(lang),
         },
         null,

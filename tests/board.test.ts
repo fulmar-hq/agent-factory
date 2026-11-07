@@ -21,6 +21,8 @@ test("board binds loopback, shows local data, rejects helper and cross-origin wr
     expect(state.paused).toBe(true);
     expect(state.owners[0].brief).toBe("Synthetic custody brief");
     expect(state.usage).toEqual({});
+    expect(state.estimator.evaluation.status).toBe("not-better");
+    expect(state.estimates).toEqual({});
     const post = (token: string, origin: string, path = "/api/pause") =>
       fetch(base + path, {
         method: "POST",

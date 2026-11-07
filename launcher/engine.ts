@@ -1,3 +1,4 @@
+import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
 import {
   TicketSchema,
@@ -157,6 +158,7 @@ export class Engine {
       }
       if (t.costCents > available(this.s, this.c, t.wallet, a.now, a.billing))
         blocked("wallet empty");
+      this.s.set(`estimate:${ticketId(t)}`, estimate(history(this.s), t, a.now));
       this.s.event(
         id,
         "reservation",
@@ -263,6 +265,10 @@ export class Engine {
     });
   }
   finish(id: string, ok: boolean) {
+    const current = this.sessions().find(x => x.id === id);
+    if (ok && current?.started && !["paused", "archived", "finished"].includes(current.status)) {
+      this.s.set(`actual:${current.ticket}`, {completed:Date.now(), seconds:current.actual_seconds, tokens:current.actual_tokens});
+    }
     this.s.db
       .query(
         "UPDATE sessions SET status=? WHERE id=? AND status NOT IN ('paused','archived')",

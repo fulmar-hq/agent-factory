@@ -42,3 +42,25 @@ test("partial native usage stays real, drops content and credits, blocks missing
     rmSync(dir, { recursive: true });
   }
 });
+
+import {claudeReading, claudeMetadata} from "../adapters/usage";
+test("Claude local structured subscription windows feed 70/90 gates without model calls", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-claude-"));
+  mkdirSync(join(dir,"project"));
+  const record = (used:number, timestamp = now) => ({timestamp:new Date(timestamp).toISOString(),
+    rate_limits:{five_hour:{used_percentage:used,resets_at:now/1000+3600},seven_day:{used_percentage:12,resets_at:now/1000+604800}},
+    message:"private prompt", usage:{input_tokens:10000}});
+  try {
+    writeFileSync(join(dir,"project","session.jsonl"),[record(70),record(0,now+1000)].map(x => JSON.stringify(x)).join("\n"));
+    const reading = await claudeReading(now,dir);
+    expect(reading?.windows.map(x=>x.used)).toEqual([.7,.12]);
+    expect(JSON.stringify(reading)).not.toMatch(/private|input_tokens/);
+    expect(()=>usageGate(reading,false,now,config())).toThrow("high benefit");
+    expect(()=>usageGate(reading,true,now,config())).not.toThrow();
+    expect(()=>usageGate(claudeMetadata(record(90)),true,now,config())).toThrow("usage stop");
+    expect(()=>usageGate(claudeMetadata(record(1,now-900001)),true,now,config())).toThrow("stale");
+    expect(claudeMetadata({timestamp:new Date(now).toISOString(),message:JSON.stringify(record(1))})).toBeUndefined();
+    expect(claudeMetadata({...record(1),rate_limits:{five_hour:{used_percentage:101,resets_at:now/1000+3600}}})).toBeUndefined();
+    expect(()=>usageGate(claudeMetadata({...record(1),rate_limits:{five_hour:record(1).rate_limits.five_hour}}),true,now,config())).toThrow("window missing");
+  } finally {rmSync(dir,{recursive:true});}
+});

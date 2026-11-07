@@ -64,3 +64,51 @@ export async function codexReading(
     return undefined;
   }
 }
+
+// Claude status-line/session metadata only. Token totals and prose are never quota.
+export function claudeMetadata(x: unknown): Meter | undefined {
+  if (!x || typeof x !== "object") return;
+  const record = x as Record<string, any>;
+  const limits = record.rate_limits;
+  if (!limits || typeof limits !== "object") return;
+  const windows = [limits.five_hour, limits.seven_day].filter(Boolean).map(w => ({
+    used: w.used_percentage / 100,
+    resetsAt: typeof w.resets_at === "number" ? w.resets_at * 1000 : Date.parse(w.resets_at),
+  }));
+  const parsed = MeterSchema.safeParse({ observedAt: Date.parse(record.timestamp), windows,
+    source: "native Claude rate-limit receipt" });
+  return parsed.success ? parsed.data : undefined;
+}
+export async function claudeReading(now = Date.now(), base = join(homedir(), ".claude", "projects")): Promise<Meter | undefined> {
+  try {
+    const files: {path: string; size: number; modified: number}[] = [];
+    for (const entry of await readdir(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(base, entry.name);
+      for (const name of await readdir(dir)) {
+        if (!name.endsWith(".jsonl")) continue;
+        const path = join(dir, name), info = await stat(path);
+        files.push({path, size: info.size, modified: info.mtimeMs});
+      }
+    }
+    let best: Meter | undefined;
+    for (const file of files.sort((a,b) => b.modified-a.modified).slice(0,5)) {
+      const handle = await open(file.path, "r");
+      try {
+        const length = Math.min(file.size, 262144), buf = Buffer.alloc(length);
+        await handle.read(buf, 0, length, file.size-length);
+        for (const line of buf.toString("utf8").split("\n")) {
+          try {
+            const meter = claudeMetadata(JSON.parse(line));
+            if (meter && meter.observedAt <= now && (!best || meter.observedAt > best.observedAt)) best = meter;
+          } catch {}
+        }
+      } finally { await handle.close(); }
+    }
+    return best;
+  } catch { return undefined; }
+}
+export async function localReadings(now = Date.now()) {
+  const [codex, claude] = await Promise.all([codexReading(now), claudeReading(now)]);
+  return { codex, claude };
+}
