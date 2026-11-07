@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
 export type Issue = {
@@ -31,6 +31,16 @@ export async function command(args: string[], cwd?: string) {
     clearTimeout(timer);
   }
 }
+export function intakeLabel(repo: string, i: Issue): string {
+  const blocks = [...i.body.matchAll(/```factory\s*\n([\s\S]*?)\n```/g)];
+  if (blocks.length !== 1) throw Error("one factory intake block required");
+  return (
+    "ready:" +
+    createHash("sha256")
+      .update(`${repo}#${i.number}\n${blocks[0][1]}`)
+      .digest("base64url")
+  );
+}
 export function issueTicket(repo: string, i: Issue): Ticket | null {
   const states = i.labels.filter((x) => x.name.startsWith("state:"));
   if (
@@ -46,7 +56,10 @@ export function issueTicket(repo: string, i: Issue): Ticket | null {
     throw Error("one kind and area label required");
   const match = i.body.match(/```factory\s*\n([\s\S]*?)\n```/);
   if (!match) throw Error("factory intake block missing");
-  // An approved ready label and complete bounded intake are both required.
+  const approvals = i.labels.filter((x) => x.name.startsWith("ready:"));
+  if (approvals.length !== 1 || approvals[0].name !== intakeLabel(repo, i))
+    throw Error("approved intake changed or approval missing");
+  // Only repository triage+ can attach the content-bound approval label.
   return TicketSchema.parse({
     ...JSON.parse(match[1]),
     repo,
@@ -54,7 +67,12 @@ export function issueTicket(repo: string, i: Issue): Ticket | null {
     title: i.title,
   });
 }
-export async function reconcile(s: Store, c: Config, now = Date.now(), execute = command) {
+export async function reconcile(
+  s: Store,
+  c: Config,
+  now = Date.now(),
+  execute = command,
+) {
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
@@ -147,5 +165,84 @@ export async function markBuilding(t: Ticket, s: Store, execute = command) {
     "github-state",
     { repo: t.repo, number: t.number, state: "building" },
     "After reconciling native custody, remove state:building and restore state:ready; the stable claim still prevents a new launch",
+  );
+}
+
+// Owner-token control invokes this; label writes also require GitHub triage+ authority.
+export async function approveIntake(
+  repo: string,
+  number: number,
+  s: Store,
+  receipt: string,
+  execute = command,
+) {
+  if (
+    !/^[\w.-]+\/[\w.-]+$/.test(repo) ||
+    !Number.isSafeInteger(number) ||
+    number < 1 ||
+    !receipt?.trim()
+  )
+    throw Error("repo, issue number and owner receipt required");
+  const i = JSON.parse(
+    await execute([
+      "gh",
+      "issue",
+      "view",
+      String(number),
+      "--repo",
+      repo,
+      "--json",
+      "number,title,body,url,updatedAt,state,labels",
+    ]),
+  ) as Issue;
+  if (i.number !== number) throw Error("issue identity mismatch");
+  const label = intakeLabel(repo, i);
+  const labels = i.labels.filter(
+    (x) => !x.name.startsWith("ready:") && !x.name.startsWith("state:"),
+  );
+  if (
+    !issueTicket(repo, {
+      ...i,
+      labels: [...labels, { name: label }, { name: "state:ready" }],
+    })
+  )
+    throw Error("open issue required for approval");
+  await execute([
+    "gh",
+    "label",
+    "create",
+    label,
+    "--repo",
+    repo,
+    "--color",
+    "0E8A16",
+    "--description",
+    "Owner-approved factory intake digest",
+    "--force",
+  ]);
+  const remove = i.labels.filter(
+    (x) =>
+      (x.name.startsWith("ready:") || x.name.startsWith("state:")) &&
+      x.name !== label &&
+      x.name !== "state:ready",
+  );
+  await execute([
+    "gh",
+    "issue",
+    "edit",
+    String(number),
+    "--repo",
+    repo,
+    ...remove.flatMap((x) => ["--remove-label", x.name]),
+    "--add-label",
+    label,
+    "--add-label",
+    "state:ready",
+  ]);
+  s.event(
+    randomUUID(),
+    "intake-approval",
+    { repo, number, label, receipt },
+    "Remove the ready and digest labels to withdraw approval; retain receipt and existing custody.",
   );
 }

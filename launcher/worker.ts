@@ -148,7 +148,16 @@ export async function runWorker(id: string) {
       process.off("SIGINT", halt);
     }
     if (fd !== undefined) closeSync(fd);
-    child?.kill();
+    if (child) {
+      child.kill("SIGTERM");
+      const finalKill = setTimeout(() => child?.kill("SIGKILL"), 3000);
+      try {
+        await child.exited;
+      } finally {
+        clearTimeout(finalKill);
+      }
+    }
+    s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
     s.close();
   }
 }

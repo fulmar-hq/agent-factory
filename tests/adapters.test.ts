@@ -4,21 +4,25 @@ import {
   sessionEvent,
   subscriptionStatus,
 } from "../adapters/workers";
-import { issueTicket, type Issue } from "../adapters/github";
+import { issueTicket, intakeLabel, type Issue } from "../adapters/github";
 import { ticket } from "./fixtures";
-const issue = (): Issue => ({
-  number: 1,
-  title: "Synthetic",
-  state: "OPEN",
-  body: "```factory\n" + JSON.stringify(ticket()) + "\n```",
-  url: "https://github.com/example/demo/issues/1",
-  updatedAt: "2026-11-07",
-  labels: [
-    { name: "state:ready" },
-    { name: "kind:fix" },
-    { name: "area:demo" },
-  ],
-});
+const issue = (): Issue => {
+  const i: Issue = {
+    number: 1,
+    title: "Synthetic",
+    state: "OPEN",
+    body: "```factory\n" + JSON.stringify(ticket()) + "\n```",
+    url: "https://github.com/example/demo/issues/1",
+    updatedAt: "2026-11-07",
+    labels: [
+      { name: "state:ready" },
+      { name: "kind:fix" },
+      { name: "area:demo" },
+    ],
+  };
+  i.labels.push({ name: intakeLabel("example/demo", i) });
+  return i;
+};
 test("GitHub admits only a complete ready intake, one state/kind/area", () => {
   expect(issueTicket("example/demo", issue())?.approved).toBe(true);
   expect(issueTicket("example/demo", { ...issue(), state: "CLOSED" })).toBe(

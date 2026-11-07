@@ -1,4 +1,6 @@
 import type { Config, Billing } from "../launcher/config";
+import { randomUUID } from "node:crypto";
+import { BillingSchema } from "../launcher/config";
 import type { Store } from "../tracking/store";
 export function monthAt(now: number) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -24,16 +26,7 @@ export function available(
   ).cents;
   if (source === "other")
     return Math.max(0, Math.floor(c.wallet.other.default_usd * 100) - spent);
-  if (s.get("aws-stop-latched") === true) return 0;
-  if (
-    !b ||
-    b.month !== month ||
-    now - b.observedAt > 86400000 ||
-    b.observedAt > now ||
-    b.projectedCents >= c.wallet.aws.hold_at_projected * 100 ||
-    b.postedCents >= c.wallet.aws.stop_at_actual * 100
-  )
-    return 0;
+  if (!b || awsRefusal(s, c, now, b)) return 0;
   return Math.max(
     0,
     Math.floor(
@@ -59,6 +52,30 @@ export function debit(
     .run(id, id, source, monthAt(now), cents, now, `reserved:${id}`);
 }
 
+export function awsRefusal(
+  s: Store,
+  c: Config,
+  now: number,
+  b?: Billing,
+): string | null {
+  if (s.get("aws-stop-latched") === true) return "wallet stopped";
+  if (
+    !BillingSchema.safeParse(b).success ||
+    !b ||
+    b.month !== monthAt(now) ||
+    b.observedAt > now ||
+    now - b.observedAt > 86400000
+  )
+    return "wallet billing unknown";
+  if (
+    b.postedCents + b.unpostedCents >= c.wallet.aws.stop_at_actual * 100 ||
+    b.projectedCents >= c.wallet.aws.hold_at_projected * 100 ||
+    b.projectedCents >= c.wallet.aws.ceiling_usd_month * 100
+  )
+    return "wallet stopped";
+  return null;
+}
+
 export function observeBilling(
   s: Store,
   c: Config,
@@ -66,6 +83,7 @@ export function observeBilling(
   now: number,
 ) {
   if (
+    !BillingSchema.safeParse(b).success ||
     !b ||
     b.observedAt > now ||
     now - b.observedAt > 86400000 ||
@@ -80,10 +98,14 @@ export function observeBilling(
       "Append a correction with its own source receipt; never erase the original",
       now,
     );
-    if (b.postedCents >= c.wallet.aws.stop_at_actual * 100) {
+    if (
+      s.get("aws-stop-latched") !== true &&
+      (b.postedCents + b.unpostedCents >= c.wallet.aws.stop_at_actual * 100 ||
+        b.projectedCents >= c.wallet.aws.ceiling_usd_month * 100)
+    ) {
       s.set("aws-stop-latched", true);
       s.event(
-        `aws-stop:${b.month}`,
+        `aws-stop:${b.month}:${randomUUID()}`,
         "wallet-stop",
         { receipt: b.receipt },
         "Only owner review may clear the stop latch; caps stay in read-only policy",

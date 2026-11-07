@@ -1,6 +1,6 @@
 # Synthetic approved issue
 
-Use exactly one `state:ready`, `kind:fix` and `area:demo` label in an enrolled repository. Repository permission to approve Ready is the intake authority; free text alone cannot launch work.
+Use exactly one `state:ready`, `kind:fix` and `area:demo` label in an enrolled repository. After reviewing the block, use the owner-token command `bun scripts/control.ts approve-intake example/demo 1 OWNER-RECEIPT`. This applies a protected `ready:<digest>` label alongside `state:ready`; GitHub triage+ label authority and a matching block digest are both required. Editing the block invalidates approval; review and reapprove the new block. Free text alone cannot launch work.
 
 ```factory
 {
