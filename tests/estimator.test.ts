@@ -26,7 +26,7 @@ test("GitHub timings are elapsed only, imported issues excluded, refresh preserv
   expect(rows[0].seconds).toBeNull(); expect(rows[0].tokens).toBeNull(); expect(rows[0].elapsed).toBe(86400);
   expect(closedHistory("fictional/repo","issue",[{...issue,labels:[{name:"migrated"}]}])[0].imported).toBe(true);
   try {
-    await refreshHistory(s,async () => JSON.stringify([issue]));
+    await refreshHistory(s,async () => JSON.stringify([issue]),Date.now(),["fictional/factory","fictional/product"]);
     expect(history(s)).toHaveLength(4);
     const before = s.get("estimate-history");
     await expect(refreshHistory(s,async () => {throw Error("offline");})).rejects.toThrow("offline");

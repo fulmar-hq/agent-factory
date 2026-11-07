@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { command } from "../adapters/github";
-import { root } from "../launcher/config";
+import { root, configAt } from "../launcher/config";
 import { Store } from "../tracking/store";
 import type { History } from "./predict";
 type Closed = {number:number;createdAt:string;closedAt:string;labels:{name:string}[]; body?:string};
@@ -14,9 +14,9 @@ export function closedHistory(repo: string, kind: string, rows: Closed[]): Histo
     seconds:null, tokens:null, elapsed:(Date.parse(r.closedAt)-Date.parse(r.createdAt))/1000,
   }));
 }
-export async function refreshHistory(s: Store, execute = command, now = Date.now()) {
+export async function refreshHistory(s: Store, execute = command, now = Date.now(), repos = ["fulmar-hq/agent-factory"]) {
   const rows: History[] = [];
-  for (const repo of ["fulmar-hq/agent-factory","fulmar-hq/alido"]) {
+  for (const repo of [...new Set(repos)]) {
     for (const kind of ["issue","pr"]) {
       const result = JSON.parse(await execute(["gh",kind,"list","--repo",repo,"--state","closed","--limit","10000","--json","number,createdAt,closedAt,labels,body"])) as Closed[];
       if (result.length >= 10000) throw Error("History truncated; prior evidence retained");
@@ -33,5 +33,8 @@ export async function refreshHistory(s: Store, execute = command, now = Date.now
 }
 if (import.meta.main) {
   const s = new Store(join(root,"controller.sqlite"));
-  try { console.log(await refreshHistory(s)); } finally {s.close();}
+  try {
+    const config = await configAt();
+    console.log(await refreshHistory(s,command,Date.now(),["fulmar-hq/agent-factory",...Object.values(config.projects).map(p=>p.repo)]));
+  } finally {s.close();}
 }
