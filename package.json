@@ -18,6 +18,10 @@
     "typecheck": "tsc --noEmit",
     "tick": "bun launcher/tick.ts",
     "board": "bun board/server.ts",
-    "prepare:local": "bun scripts/prepare.ts"
+    "prepare:local": "bun scripts/prepare.ts",
+    "factory": "bun scripts/factory.ts"
+  },
+  "bin": {
+    "factory": "scripts/factory.ts"
   }
 }

@@ -4,7 +4,7 @@ The controller uses Bun's native SQLite in WAL mode, `BEGIN IMMEDIATE` for reser
 
 ## Policy and evidence
 
-`config.yaml` is read, validated and never written. Schedule is fixed to 20:00 QA and 21:30 Production, America/Toronto; another schedule is refused. Concurrency starts at the configured limit; heavy tests have their own slot. Prefix-overlapping allowed paths conflict. Unsplit work above four helper-hours or spanning backend and screen is refused. Enrollment and owner assignment come from config. GitHub state labels alone cannot supply a bounded brief: Ready also needs the complete `factory` block. GitHub refresh is bounded to 1,000 issues per enrolled repository; hitting that limit blocks that repository's admissions and marks the source truncated. API errors keep old snapshots with a visible source error.
+`config.yaml` is read and validated by the controller. Only the explicit owner-run `factory add-project` setup command appends enrollment entries. Schedule is fixed to 20:00 QA and 21:30 Production, America/Toronto; another schedule is refused. Concurrency starts at the configured limit; heavy tests have their own slot. Prefix-overlapping allowed paths conflict. Unsplit work above four helper-hours or spanning backend and screen is refused. Enrollment and owner assignment come from config. GitHub state labels alone cannot supply a bounded brief: Ready also needs the complete `factory` block. GitHub refresh is bounded to 1,000 issues per enrolled repository; hitting that limit blocks that repository's admissions and marks the source truncated. API errors keep old snapshots with a visible source error.
 
 A private `repositories.json` maps enrolled `owner/repo` names to existing local Git checkouts. Every helper gets a new branch and worktree under the private installation. Existing work is not reset or cleaned. The launcher retains stable issue custody even after completion. A new revision, duplicate event, retry or estimate change never resets that claim. Automatic rework is intentionally absent; reconcile custody and authorize a bounded continuation separately.
 
@@ -109,3 +109,11 @@ and [email policies](https://developers.cloudflare.com/cloudflare-one/access-con
 Undo: stop only this tunnel, archive its private config/credentials, remove the
 public-Origin setting and retain the Access application protecting the hostname.
 Archive DNS/tunnel metadata before any later retirement; do not delete assets.
+
+## Project enrollment
+
+`factory add-project <owner/repo> [--dry-run]` (or `bun run factory -- add-project <owner/repo>`) uses the signed-in `gh` account for read-only issue backfill. It preserves comments and unrelated policy bytes, requires a block-style `projects:` mapping, and validates the proposed config before writing. A source error or the 1,000-issue cap refuses enrollment. Existing enabled projects are refused; existing read-only entries refresh without duplication. Empty owners prevent admission on future ticks; this command never runs a tick or worker.
+
+Run setup with one policy writer at a time. Before replacing config it checks for intervening changes, archives the original under private `archive/add-project-UUID/config.yaml`, then records snapshots and an append-only undo event. Config and SQLite are separate files: interruption between writes can leave an enrolled entry without snapshots; repeat the command to recover. Undo by restoring the archived config after checking for later policy edits; retain the archive, snapshots and events. Dry run uses only an in-memory database and writes nothing, including no receipt; save its output privately when evidence is needed. To rehearse actual writes without live enrollment, copy config into a private staging directory and set `FACTORY_PRIVATE_DIR` to that directory.
+
+CI runs on GitHub-hosted Linux for pull requests and main/QA pushes: Bun 1.3.14, frozen install, strict typecheck and tests. Actions are pinned to commit SHAs; permissions are read-only and no secrets or AWS runners are used. `Verify` is the branch-protection check.
