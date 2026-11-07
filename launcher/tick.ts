@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { processTelegramMail } from "./telegram";
 import { join } from "node:path";
 import { Engine } from "./engine";
 import {
@@ -19,6 +21,8 @@ export async function tick(dir = root) {
     const e = new Engine(s, c),
       now = Date.now();
     s.set("heartbeat", { at: now, status: "reconciling" });
+    const mailPath = join(dir, "telegram-mail.sqlite");
+    if (existsSync(mailPath)) processTelegramMail(s, c, mailPath);
     const versions: Record<string, string> = { bun: Bun.version };
     for (const cmd of ["codex", "claude", "gh"])
       try {

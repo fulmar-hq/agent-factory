@@ -1,0 +1,9 @@
+# Fill from the named tunnel after Vincent completes authorization. No token in Git.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /ABSOLUTE/PRIVATE/PATH/REPLACE_WITH_TUNNEL_UUID.json
+ingress:
+  - hostname: factory.goalido.com
+    service: http://127.0.0.1:4318
+    originRequest:
+      httpHostHeader: 127.0.0.1:4318
+  - service: http_status:404
