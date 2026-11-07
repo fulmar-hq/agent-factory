@@ -8,7 +8,7 @@ import {
   type Qualification,
 } from "./config";
 import { Store } from "../tracking/store";
-import { codexReading } from "../adapters/usage";
+import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, markBuilding } from "../adapters/github";
@@ -40,9 +40,11 @@ export async function tick(dir = root) {
     }
     const ready = await reconcile(s, c, now),
       r = await inputs(dir);
-    const local = dir === root ? await codexReading(now) : undefined;
-    if (local && (!r.codex || local.observedAt > r.codex.observedAt))
-      r.codex = local;
+    const local = dir === root ? await localReadings(now) : { codex: undefined, claude: undefined };
+    for (const provider of ["codex", "claude"] as const) {
+      const meter = local[provider];
+      if (meter && (!r[provider] || meter.observedAt > r[provider]!.observedAt)) r[provider] = meter;
+    }
     s.set("readings", r);
     observeBilling(s, c, r.billing, now);
     const qualifications = ((await optionalJSON(

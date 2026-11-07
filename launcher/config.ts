@@ -69,6 +69,8 @@ export const TicketSchema = z.object({
   repo: z.string(),
   number: z.number().int().positive(),
   title: z.string(),
+  area: z.string().default("unknown"),
+  kind: z.string().default("unknown"),
   owner: z.string(),
   creator: z.string().min(1),
   source: z.string().min(1),
