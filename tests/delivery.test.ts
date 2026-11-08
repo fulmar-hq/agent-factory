@@ -44,6 +44,7 @@ test("broker fixes GitHub destination and QA base and refuses foreign changed pa
   calls.push(args);
   if(args.includes("rev-parse"))return "a".repeat(40);
   if(args.includes("diff"))return foreign ? "outside.ts\n" : ticket().paths[0]+"\n";
+  if(args.includes("--min-parents=2"))return "";
   if(args.includes("rev-list"))return "a".repeat(40);
   if(args.includes("list"))return "[]";
   if(args.includes("create"))return "https://github.com/fulmar-hq/alido/pull/1";
@@ -83,4 +84,14 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  writeFileSync(join(work,"node_modules/fixture"),"changed locally");
  expect(readFileSync(join(source,"node_modules/fixture"),"utf8")).toBe("original dependency");
  expect(readFileSync(join(dir,"archive/original-gitfile"),"utf8")).toContain("gitdir:");
+});
+
+test("trusted Git receives an immutable private bundle snapshot and refuses symlinks",async()=>{
+ const {mkdtempSync,writeFileSync,readFileSync,symlinkSync,mkdirSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {snapshotBundle}=await import("../adapters/delivery");
+ const dir=mkdtempSync(join(tmpdir(),"factory-bundle-")),source=join(dir,"worker.bundle"),target=join(dir,"private.bundle");
+ writeFileSync(source,"original");snapshotBundle(source,target);writeFileSync(source,"changed");
+ expect(readFileSync(target,"utf8")).toBe("original");
+ symlinkSync(source,join(dir,"link"));expect(()=>snapshotBundle(join(dir,"link"),join(dir,"refused"))).toThrow();
+ mkdirSync(join(dir,"directory"));expect(()=>snapshotBundle(join(dir,"directory"),join(dir,"refused"))).toThrow("regular bundle");
 });

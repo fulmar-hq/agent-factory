@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync } from "node:fs";
 import { join } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -35,6 +35,22 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   ]) await git("config","--local",key,value);
 }
 
+// Snapshot through a non-following descriptor before trusted Git reads the
+// bundle. Workers can modify their workspace while this broker is awaiting I/O.
+export function snapshotBundle(source:string, target:string) {
+  const input=openSync(source,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+  let output:number|undefined;
+  try {
+    if(!fstatSync(input).isFile())throw Error("regular bundle required");
+    output=openSync(target,"wx",0o600);
+    const chunk=Buffer.alloc(1024*1024);let total=0,n:number;
+    while((n=readSync(input,chunk,0,chunk.length,null))>0) {
+      total+=n;if(total>1024*1024*1024)throw Error("bundle exceeds 1 GiB");
+      let offset=0;while(offset<n)offset+=writeSync(output,chunk,offset,n-offset);
+    }
+  } finally {closeSync(input);if(output!==undefined)closeSync(output);}
+}
+
 export function deliveryRequest(raw:unknown) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw Error("invalid delivery request");
   const r=raw as Record<string,unknown>;
@@ -68,14 +84,22 @@ export async function deliveryBroker(t:Ticket, id:string, workspace:string, dir:
       const {title,body}=deliveryRequest(JSON.parse(text));
       const bundle=join(workspace,".factory-delivery.bundle");
       if(realpathSync(bundle)!==join(realpathSync(workspace),".factory-delivery.bundle")) throw Error("bundle symlink refused");
+      const snapshot=join(dir,`incoming-${crypto.randomUUID()}.bundle`);
+      snapshotBundle(bundle,snapshot);
       const git=(...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-C",bare,...args]);
-      await git("fetch","--no-tags",bundle,`HEAD:refs/heads/${branch}`);
+      await git("fetch","--no-tags",snapshot,`HEAD:refs/heads/${branch}`);
       const head=(await git("rev-parse",branch)).trim();
       await git("merge-base","--is-ancestor",baseline,head);
       const changed=(await git("diff","--name-only",baseline,head)).trim().split("\n").filter(Boolean);
       if(!changed.length || changed.some(p=>!t.paths.includes(p))) throw Error("delivery paths outside approved scope");
       const commits=(await git("rev-list",`${baseline}..${head}`)).trim().split("\n");
-      for(const sha of commits) await git("-c",`gpg.ssh.allowedSignersFile=${join(process.env.HOME!,".ssh/fisher_allowed_signers")}`,"verify-commit",sha);
+      const merges=(await git("rev-list","--min-parents=2",`${baseline}..${head}`)).trim();
+      if(merges)throw Error("delivery merge commits refused");
+      for(const sha of commits) {
+        const paths=(await git("diff-tree","--no-commit-id","--name-only","-r",sha)).trim().split("\n").filter(Boolean);
+        if(paths.some(p=>!t.paths.includes(p)))throw Error("commit paths outside approved scope");
+        await git("-c",`gpg.ssh.allowedSignersFile=${join(process.env.HOME!,".ssh/fisher_allowed_signers")}`,"verify-commit",sha);
+      }
       const destination=`https://github.com/${deliveryRepo}.git`;
       await git("push",destination,`refs/heads/${branch}:refs/heads/${branch}`);
       const existing=JSON.parse(await execute(["gh","pr","list","--repo",deliveryRepo,"--head",branch,"--base","QA","--json","url"]));
