@@ -21,6 +21,7 @@ export class NativeReceipt {
   constructor(readonly provider:string, readonly id:string, readonly workspace:string, readonly home:string, readonly started:number) {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("invalid native receipt ID");
   }
+  beginTurn() { this.models.clear(); this.efforts.clear(); }
   poll(accounting:WorkerAccounting) {
     if (!this.path) {
       if(this.provider==="claude") {

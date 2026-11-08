@@ -1,6 +1,10 @@
 import { prepareDelivery } from "../adapters/delivery";
 import { calibrateTokens } from "../launcher/budgets";
 import { spawnSupervisor } from "../launcher/tick";
+import {existsSync,realpathSync} from "node:fs";
+import {NativeReceipt} from "../adapters/native";
+import {WorkerAccounting} from "../adapters/workers";
+import {processIdentity} from "../launcher/process";
 import { join } from "node:path";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { configAt, root } from "../launcher/config";
@@ -21,6 +25,24 @@ try {
   const [action, ...args] = process.argv.slice(2);
   if (action === "pause" || action === "resume")
     e.pause(action === "pause", "owner");
+  else if(action==="register-owner") {
+    const [owner,path,nativeArg,pidArg,receipt]=args;
+    const role=e.c.owners[owner],native=nativeArg==="new" ? undefined : nativeArg;
+    if(!role || !path || !existsSync(path) || !receipt || !/^\d+$/.test(pidArg ?? ""))throw Error("owner, existing workspace, native ID/new, PID/0 and receipt required");
+    const workspace=realpathSync(path),pid=Number(pidArg) || undefined;
+    if(native && !/^[a-f0-9-]{36}$/.test(native))throw Error("native ID refused");
+    if(native) {
+      const started=role.harness==="codex" ? Number.parseInt(native.replaceAll("-","").slice(0,12),16) : Date.now();
+      const proof=new NativeReceipt(role.harness,native,workspace,process.env.HOME!,started),accounting=new WorkerAccounting();
+      for(let i=0;i<256;i++){proof.poll(accounting);if(proof.caughtUp)break;}
+      if(!proof.evidence(role.model,role.effort).bound || !proof.caughtUp)throw Error("owner native custody unverified");
+    }
+    const identity=pid ? processIdentity(pid) : undefined;if(pid && !identity)throw Error("owner process absent");
+    const previous=s.get<{pid?:number;identity?:string;native?:string;wake?:string}>(`owner-runtime:${owner}`);
+    if(previous?.wake){const last=s.get<{state:string;cleanupVerified?:boolean}>(`owner-wake:${previous.wake}`);if(last && (["starting","running"].includes(last.state) || last.cleanupVerified!==true))throw Error("owner wake custody unresolved");}
+    if(previous?.pid && processIdentity(previous.pid)===previous.identity && previous.native!==native)throw Error("existing owner is active");
+    s.atomic(()=>{s.set(`owner-runtime:${owner}`,{workspace,native,pid,identity});s.event(randomUUID(),"owner-registration",{owner,workspace,native,pid,identity,receipt,previous},"Reconcile active native custody before restoring prior registration; retain sessions and logs");});
+  }
   else if (action === "calibrate-tokens") {
     const [dates,receipt] = args;
     if (!receipt) throw Error("calibration receipt required");
@@ -94,7 +116,7 @@ try {
     });
   } else
     throw Error(
-      "supported: prepare-delivery SESSION RECEIPT, qualify-delivery RECEIPT, calibrate-tokens TORONTO-DAY RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
+      "supported: register-owner ROLE WORKSPACE NATIVE/new PID/0 RECEIPT, prepare-delivery SESSION RECEIPT, qualify-delivery RECEIPT, calibrate-tokens TORONTO-DAY RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
     );
 } finally {
   s.close();
