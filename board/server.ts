@@ -175,7 +175,7 @@ export async function board(dir = root, port = 4318) {
           ),
           questions: s.rows("questions"),
           tickets: s.rows("tickets"),
-          sessions: e.sessions(),
+          sessions: e.sessions().map(x=>({...x,budget:e.budget(x)})),
           releases: s.rows("releases"),
           owners,
           slots: { used: e.active().length, max: c.capacity.start_parallel },

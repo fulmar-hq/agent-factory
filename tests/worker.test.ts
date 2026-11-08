@@ -105,7 +105,7 @@ for (const detached of [false, true]) test(detached ? "supervisor survives tick 
       expect(e.sessions()[0].status).toBe("running");
       for (let i=0;i<300 && e.sessions()[0].pid!==null;i++) await Bun.sleep(20);
       expect(e.sessions()[0].pid).toBeNull();
-      expect(s.get(`stop:${x.id}`)).toBeNull();
+      expect(s.get<{reason:string}>(`stop:${x.id}`)?.reason).toContain("next turn blocked");
       expect(JSON.parse((s.rows("events").find((v:any)=>v.kind==="worker-cleanup") as any).data).verified).toBe(true);
     }
     await Promise.all(

@@ -106,6 +106,10 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
   const continuation = e.s.get<{attempt:string;native:string}>(`continuation:${id}`);
   const attempt = continuation?.attempt ?? id;
   const original = e.sessions().find(x => x.id === id)!;
+  if(original.status!=="starting" || original.pid!==process.pid)throw Error("owned starting supervisor required");
+  // Reconcile persisted usage before any next native turn can start.
+  e.account(id,original.actual_seconds,original.actual_tokens);
+  if(e.budget(original).nextTurnBlocked)throw Error("budget pause; next turn blocked");
   e.s.atomic(() => {
     const session = e.sessions().find(x => x.id === id);
     if (!session || session.pid !== process.pid || session.status !== "starting" || e.s.get("paused") !== false)
@@ -145,6 +149,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       try {
         native?.poll(accounting);
         totalTokens=accounting.tokens;
+        e.s.set(`cached-tokens:${id}`,accounting.cachedTokens);
         checkStreamModel();
         if(native) {
           const evidence=native.evidence(t.model ?? (t.provider==="codex" ? "gpt-6.1-sol" : "opus"),t.effort ?? "medium");
