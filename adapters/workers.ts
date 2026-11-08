@@ -42,7 +42,7 @@ export function claudeSettings(workspace: string, privateDir = root) {
       enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false, excludedCommands: [],
       network: { allowedDomains: [], allowLocalBinding: true, allowAllUnixSockets: false, allowUnixSockets: [] },
-      filesystem: { denyRead: [process.env.HOME ?? "/Users", ...denied], allowRead: [workspace], denyWrite: denied },
+      filesystem: { allowWrite:[workspace], denyRead: [process.env.HOME ?? "/Users", ...denied], allowRead: [workspace], denyWrite: denied },
     },
   };
 }

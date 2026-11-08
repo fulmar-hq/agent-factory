@@ -129,6 +129,8 @@ export async function board(dir = root, port = 4318) {
           now,
           paused: s.get("paused"),
           heartbeat: s.get("heartbeat"),
+          lastSuccessfulReconciliation:s.get("last-successful-reconciliation"),
+          ownerWakes:s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all().map((r:any)=>JSON.parse(r.value)),
           versions: s.get("versions"),
           usage: r,
           usageAdmission: Object.fromEntries((["codex", "claude"] as const).map(provider => {

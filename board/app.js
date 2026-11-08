@@ -29,6 +29,7 @@ const words = {
     wallet: "Available wallet",
     slots: "Slots",
     heartbeat: "Heartbeat",
+    reconciled:"Last successful reconciliation",
     seconds: "seconds ago",
     answer: "Answer",
     stop: "Stop and preserve",
@@ -71,6 +72,7 @@ const words = {
     wallet: "Budget disponible",
     slots: "Places",
     heartbeat: "Dernier signal",
+    reconciled:"Dernière synchronisation réussie",
     seconds: "secondes",
     answer: "Répondre",
     stop: "Arrêter et conserver",
@@ -141,7 +143,7 @@ function render() {
     new Date(data.now).toLocaleTimeString(lang);
   $("pause").textContent = data.paused ? t.resume : t.pause;
   empty("summary");
-  const cards = [];
+  const cards = [[t.reconciled,data.lastSuccessfulReconciliation ? new Date(data.lastSuccessfulReconciliation).toLocaleString(lang) : t.unknown, ""]];
   for (const provider of ["codex", "claude"]) {
     const m = data.usage[provider];
     const status = data.usageAdmission[provider];

@@ -13,6 +13,7 @@ import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
+import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import { qualificationAlerts } from "./alerts";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
   await validateIntake(t, execute);
@@ -50,6 +51,8 @@ export async function tick(dir = root) {
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     qualificationAlerts(s, qualifications, now);
+    localWakes(s,c,[],qualifications,now);
+    recoverWorkers(e,now);
     const versions: Record<string, string> = { bun: Bun.version };
     for (const cmd of ["codex", "claude", "gh"])
       try {
@@ -80,6 +83,14 @@ export async function tick(dir = root) {
     s.set("readings", r);
     observeBilling(s, c, r.billing, now);
     const ready = await reconcile(s, c, now);
+    localWakes(s,c,ready,{},now);
+    let ownerReconciled=true;
+    try {await githubWakes(s,c,command,now);}
+    catch(error){ownerReconciled=false;s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
+    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
+    if(ownerReconciled && Object.values(c.projects).every(p=>{
+      const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
+    }))s.set("last-successful-reconciliation",Date.now());
     const verified = new Set<string>();
     const installations = ((await optionalJSON(
       join(dir, "repositories.json"),
