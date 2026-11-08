@@ -8,6 +8,7 @@ import {
   type Qualification,
   type Ticket,
 } from "./config";
+import { branchFor } from "../adapters/delivery";
 import { Store } from "../tracking/store";
 import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
@@ -16,10 +17,17 @@ import { reconcile, command, validateIntake, setBuilding } from "../adapters/git
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import { qualificationAlerts } from "./alerts";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
+  const prior = e.retryPrior(t);
+  const retryNoPr: string[] = [];
+  for (const x of prior) {
+    const prs: unknown = JSON.parse(await execute(["gh", "pr", "list", "--repo", t.repo, "--head", branchFor(x.id), "--state", "all", "--limit", "1", "--json", "number"]));
+    if (!Array.isArray(prs) || prs.length) throw Error("retry prior PR exists or unknown");
+    retryNoPr.push(x.id);
+  }
   await validateIntake(t, execute);
   // No await between fresh validation and the atomic reservation/spawn attempt.
   const session = e.s.atomic(() => {
-    const session = e.admit(t, { ...a, now: clock() });
+    const session = e.admit(t, { ...a, retryNoPr, now: clock() });
     if (!e.claimStart(session.id)) throw Error("start refused");
     spawn(session.id);
     return session;

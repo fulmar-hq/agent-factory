@@ -15,7 +15,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,kind TEXT NOT NULL,at INTEGER NOT NULL,data TEXT NOT NULL,undo TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS no_event_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'event log is append-only'); END;
       CREATE TRIGGER IF NOT EXISTS no_event_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'event log is append-only'); END;
-      CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,ticket TEXT UNIQUE NOT NULL,owner TEXT NOT NULL,provider TEXT NOT NULL,status TEXT NOT NULL,brief TEXT NOT NULL,native_id TEXT,pid INTEGER,started INTEGER,actual_seconds REAL NOT NULL DEFAULT 0,actual_tokens REAL NOT NULL DEFAULT 0,checkpoint INTEGER NOT NULL DEFAULT 0,link_verified INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,ticket TEXT NOT NULL,owner TEXT NOT NULL,provider TEXT NOT NULL,status TEXT NOT NULL,brief TEXT NOT NULL,native_id TEXT,pid INTEGER,started INTEGER,actual_seconds REAL NOT NULL DEFAULT 0,actual_tokens REAL NOT NULL DEFAULT 0,checkpoint INTEGER NOT NULL DEFAULT 0,link_verified INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,approval_digest TEXT,UNIQUE(ticket,attempt),UNIQUE(ticket,approval_digest));
       CREATE TABLE IF NOT EXISTS claims(path TEXT NOT NULL,session TEXT NOT NULL REFERENCES sessions(id),PRIMARY KEY(path,session));
       CREATE TABLE IF NOT EXISTS debits(id TEXT PRIMARY KEY,session TEXT NOT NULL,source TEXT NOT NULL,month TEXT NOT NULL,cents INTEGER NOT NULL CHECK(cents>=0),at INTEGER NOT NULL,receipt TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS no_debit_update BEFORE UPDATE ON debits BEGIN SELECT RAISE(ABORT,'debit ledger is append-only'); END;
@@ -24,6 +24,32 @@ export class Store {
       CREATE TABLE IF NOT EXISTS releases(id TEXT PRIMARY KEY,day TEXT NOT NULL,stage TEXT NOT NULL,revision TEXT NOT NULL,receipt TEXT NOT NULL,at INTEGER NOT NULL,UNIQUE(day,stage));
       CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY,text TEXT NOT NULL,answer TEXT,at INTEGER NOT NULL);
     `);
+    this.migrateAttempts();
+  }
+  // Keep the v1 rows as a private migration archive. Rebuild only the session
+  // index: original IDs, child claims, debits and events remain unchanged.
+  private migrateAttempts() {
+    this.db.exec("PRAGMA foreign_keys=OFF");
+    try {
+      this.atomic(() => {
+        const columns = this.db.query("PRAGMA table_info(sessions)").all() as {name:string}[];
+        if (columns.some(c => c.name === "attempt")) return;
+        this.db.exec(`CREATE TABLE sessions_v1_archive AS SELECT * FROM sessions;
+          CREATE TABLE sessions_next(id TEXT PRIMARY KEY,ticket TEXT NOT NULL,owner TEXT NOT NULL,provider TEXT NOT NULL,status TEXT NOT NULL,brief TEXT NOT NULL,native_id TEXT,pid INTEGER,started INTEGER,actual_seconds REAL NOT NULL DEFAULT 0,actual_tokens REAL NOT NULL DEFAULT 0,checkpoint INTEGER NOT NULL DEFAULT 0,link_verified INTEGER NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,approval_digest TEXT,UNIQUE(ticket,attempt),UNIQUE(ticket,approval_digest));
+          INSERT INTO sessions_next SELECT *,1,NULL FROM sessions;
+          DROP TABLE sessions;
+          ALTER TABLE sessions_next RENAME TO sessions;`);
+        // Only original approval receipts preceding the reservation can identify
+        // a legacy digest. Missing provenance stays NULL and refuses retries.
+        this.db.exec(`UPDATE sessions SET approval_digest=(
+          SELECT json_extract(a.data,'$.label') FROM events a JOIN events r ON r.id=sessions.id
+          WHERE a.kind='intake-approval' AND a.at<=r.at
+            AND json_extract(a.data,'$.repo') || '#' || json_extract(a.data,'$.number')=sessions.ticket
+          ORDER BY a.at DESC LIMIT 1)`);
+        if (this.db.query("PRAGMA foreign_key_check").all().length) throw Error("attempt migration foreign key mismatch");
+        this.event("session-attempts:v2", "session-attempt-migration", {}, "Retain sessions_v1_archive and all claims/debits/events; reconcile attempts before reverting source");
+      });
+    } finally { this.db.exec("PRAGMA foreign_keys=ON"); }
   }
   get<T>(key: string): T | null {
     const row = this.db.query("SELECT value FROM kv WHERE key=?").get(key) as {

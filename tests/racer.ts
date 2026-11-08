@@ -9,7 +9,9 @@ while (!(await Bun.file(gate).exists())) await Bun.sleep(5);
 try {
   const t = ticket(Number(n));
   t.costCents = mode === "dollar" ? 100 : 0;
-  new Engine(s, c).admit(t, admission());
+  if (mode === "retry") t.approvalDigest=`ready:${"2".repeat(43)}`;
+  const e = new Engine(s,c);
+  e.admit(t, {...admission(),retryNoPr:mode === "retry" ? e.sessions().map(x=>x.id) : undefined});
   console.log("admitted");
 } catch {
   console.log("refused");

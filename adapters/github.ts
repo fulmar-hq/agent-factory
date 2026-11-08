@@ -65,6 +65,7 @@ export function issueTicket(repo: string, i: Issue): Ticket | null {
     repo,
     number: i.number,
     title: i.title,
+    approvalDigest: intakeLabel(repo, i),
   });
 }
 export async function reconcile(
