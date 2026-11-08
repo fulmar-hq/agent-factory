@@ -1,3 +1,5 @@
+import { calibrateTokens } from "../launcher/budgets";
+import { spawnSupervisor } from "../launcher/tick";
 import { join } from "node:path";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { configAt, root } from "../launcher/config";
@@ -18,6 +20,24 @@ try {
   const [action, ...args] = process.argv.slice(2);
   if (action === "pause" || action === "resume")
     e.pause(action === "pause", "owner");
+  else if (action === "calibrate-tokens") {
+    const [dates,receipt] = args;
+    if (!receipt) throw Error("calibration receipt required");
+    const calibration = calibrateTokens(process.env.HOME!,dates);
+    s.atomic(() => {
+      s.set("token-calibration:codex",calibration.tokens);
+      s.event(randomUUID(),"token-calibration",{...calibration,receipt},"Append a new owner calibration; preserve frozen original estimates");
+    });
+    console.log(JSON.stringify({...calibration,sources:calibration.sources.length}));
+  }
+  else if (action === "qualify-delivery") {
+    const evidence=await Bun.file(args[0]).json();
+    if(evidence.code!==0 || evidence.signed!==true || Date.now()-evidence.at>3600000)throw Error("fresh native signed boundary receipt required");
+    const q=await Bun.file(join(root,"qualifications.json")).json();
+    s.set("delivery-qualified",{expiresAt:q.codex.expiresAt,evidence:args[0],version:1});
+    s.event(randomUUID(),"delivery-qualification",{evidence:args[0],expiresAt:q.codex.expiresAt},"Expire delivery-qualified; retain evidence and original provider qualification");
+  }
+  else if (action === "continue-session") console.log(e.continueSession(args[0],args[1],()=>spawnSupervisor(args[0],root)));
   else if (action === "approve-intake")
     await approveIntake(args[0], Number(args[1]), s, args[2]);
   else if (action === "archive") e.archive(args[0], args[1], "owner");
@@ -65,7 +85,7 @@ try {
     });
   } else
     throw Error(
-      "supported: approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
+      "supported: calibrate-tokens DATES RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
     );
 } finally {
   s.close();

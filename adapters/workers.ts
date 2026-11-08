@@ -1,6 +1,6 @@
 import { root, type Ticket } from "../launcher/config";
 import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { join, relative, isAbsolute, resolve } from "node:path";
+import { join, relative, isAbsolute, resolve, dirname } from "node:path";
 import { command } from "./github";
 export type WorkerSpec = {
   argv: string[];
@@ -58,6 +58,7 @@ export function workerSpec(
   workspace: string,
   mode: "print" | "background" = "print",
   privateDir = root,
+  delivery?: {socket:string; native?:string},
 ): WorkerSpec {
   const selected = t.model ?? (t.provider === "codex" ? "gpt-6.1-sol" : "opus-5.5");
   const model =
@@ -76,7 +77,29 @@ export function workerSpec(
     if (process.env[key]) env[key] = process.env[key]!;
   // Explicit allowlist: never inherit API keys, provider routes, controller tokens or gh tokens.
   const prompt = `Work only this approved outcome: ${t.outcome}\nAllowed paths: ${t.paths.join(", ")}\nTest: ${t.test}\nNo helpers, funding, policy edits, releases, real messages or sign-ins. Preserve all work; signed commits only. Report receipts.\nIssue ${t.repo}#${t.number}`;
-  if (t.provider === "codex")
+  if (t.provider === "codex") {
+    const files: Record<string,string> = {":minimal":"read", ":workspace_roots":"write", "/tmp":"read", ":tmpdir":"read", "/Library/Developer":"read", "/opt/homebrew":"read"};
+    const sockets: string[] = [];
+    let deliveryPrompt = "";
+    if (delivery) {
+      if (t.repo !== "fulmar-hq/alido" || !process.env.SSH_AUTH_SOCK) throw Error("qualified delivery agent required");
+      files[join(workspace,".git")]="write";
+      files[join(workspace,".factory-tmp")]="write";
+      env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
+      env.PATH = "/Library/Developer/CommandLineTools/usr/bin:" + env.PATH;
+      env.GIT_CONFIG_GLOBAL = "/dev/null";
+      env.GIT_CONFIG_NOSYSTEM = "1";
+      env.TMPDIR = join(workspace,".factory-tmp");
+      for (const path of [process.execPath, Bun.which("node"), join(env.HOME,".ssh/fisher_commit_signing_ed25519.pub")]) {
+        if (!path || !existsSync(path)) throw Error("delivery toolchain missing");
+        files[realpathSync(path)]="read";
+        if (path !== join(env.HOME,".ssh/fisher_commit_signing_ed25519.pub")) env.PATH = dirname(realpathSync(path)) + ":" + env.PATH;
+      }
+      sockets.push(env.SSH_AUTH_SOCK,delivery.socket);
+      for (const socket of sockets) files[socket]="write";
+      deliveryPrompt = `\nContinue preserved work. Git metadata and dependencies are local. Run the approved tests; make a signed commit. Then git bundle create .factory-delivery.bundle HEAD and POST JSON {"title":"...","body":"... refs #${t.number}; test receipts ..."} using curl --unix-socket ${delivery.socket} http://localhost/deliver . The delivery broker pushes only your branch to fulmar-hq/alido and opens a PR to QA. Direct network and gh credentials are unavailable. Do not merge or activate workflows. Use TMPDIR for scratch. Ignore .factory-tmp and .factory-delivery.bundle in git status; do not commit them.`;
+    }
+    const filesystem = Object.entries(files).map(([p,a])=>`${JSON.stringify(p)}=${JSON.stringify(a)}`).join(", ");
     return {
       argv: [
         "codex",
@@ -86,18 +109,25 @@ export function workerSpec(
         "--ignore-rules",
         "-c", 'approval_policy="never"',
         "-c", 'default_permissions="factory"',
-        "-c", 'permissions.factory.filesystem={ ":minimal"="read", ":workspace_roots"="write", "/tmp"="read", ":tmpdir"="read", "/Library/Developer"="read", "/opt/homebrew"="read" }',
-        "-c", "permissions.factory.network.enabled=false",
+        "-c", `permissions.factory.filesystem={ ${filesystem} }`,
+        "-c", `permissions.factory.network.unix_sockets={ ${sockets.map(p=>`${JSON.stringify(p)}="allow"`).join(", ")} }`,
+        "-c", `permissions.factory.network.enabled=${!!delivery}`,
+        "-c", "permissions.factory.network.allowed_domains=[]",
+        "-c", `features.network_proxy.enabled=${!!delivery}`,
+        "-c", `features.network_proxy.unix_sockets={ ${sockets.map(p=>`${JSON.stringify(p)}="allow"`).join(", ")} }`,
+        "-c", "allow_login_shell=false",
+        "-c", 'shell_environment_policy.inherit="all"',
+        "-c", 'web_search="disabled"',
         "-m",
         model,
         "-c",
         `model_reasoning_effort=${effort}`,
-        "-C",
-        workspace,
-        prompt,
+        ...(delivery?.native ? ["resume",delivery.native] : ["-C",workspace]),
+        prompt + deliveryPrompt,
       ],
       env,
     };
+  }
   env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = "1";
   const nativeId = crypto.randomUUID();
   const settings = claudeSettings(workspace, privateDir);
