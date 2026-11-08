@@ -3,7 +3,7 @@ import { Engine } from "../launcher/engine";
 import { Store } from "../tracking/store";
 import { launchReady } from "../launcher/tick";
 import { TicketSchema } from "../launcher/config";
-import { intakeLabel, type Issue } from "../adapters/github";
+import { intakeLabel, issueTicket, type Issue } from "../adapters/github";
 import { config, ticket, admission, now } from "./fixtures";
 const setup = () => {
   const e = new Engine(new Store(":memory:"), config());
@@ -36,9 +36,10 @@ for (const path of ["src/straße", "src/İ", "src/ı", "src/ǅ"])
 for (const failure of ["edit", "read", "spawn"])
   test(`#9 ${failure} before spawn preserves retry, slots and wallet`, async () => {
     const e = setup();
-    const t = TicketSchema.parse({ ...ticket(), costCents: 50 });
+    let t = TicketSchema.parse({ ...ticket(), costCents: 50 });
     const issue: Issue = { number: 1, title: t.title, body: `\`\`\`factory\n${JSON.stringify(t)}\n\`\`\``, state: "OPEN", url: "fixture", updatedAt: "fixture", labels: [{name:"state:ready"}, {name:"kind:fix"}, {name:"area:demo"}] };
     issue.labels.push({ name: intakeLabel(t.repo, issue) });
+    t = issueTicket(t.repo, issue)!;
     let fail = true, spawned = 0;
     const exec = async (args: string[]) => {
       if (args.includes("view")) {
@@ -67,9 +68,10 @@ for (const failure of ["edit", "read", "spawn"])
 
 test("#9 post-spawn label failure retains custody and prevents another spawn", async () => {
   const e = setup();
-  const t = TicketSchema.parse(ticket());
+  let t = TicketSchema.parse(ticket());
   const i: Issue = { number: 1, title: t.title, body: `\`\`\`factory\n${JSON.stringify(t)}\n\`\`\``, state: "OPEN", url: "fixture", updatedAt: "fixture", labels: [{ name: "state:ready" }, { name: "kind:fix" }, { name: "area:demo" }] };
   i.labels.push({ name: intakeLabel(t.repo, i) });
+  t = issueTicket(t.repo, i)!;
   let starts = 0;
   const exec = async (args: string[]) => {
     if (args.includes("view")) return JSON.stringify(i);

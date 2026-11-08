@@ -86,6 +86,7 @@ export const TicketSchema = z.object({
   outcome: z.string().min(1),
   test: z.string().min(1),
   approved: z.literal(true),
+  approvalDigest: z.string().regex(/^ready:[A-Za-z0-9_-]{43}$/).optional(),
   benefit: z.enum(["normal", "high"]),
   estimateSeconds: finite.positive().max(14400).default(1800),
   estimateTokens: finite.positive().default(8000000),

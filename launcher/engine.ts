@@ -26,12 +26,16 @@ export type Session = {
   actual_seconds: number;
   actual_tokens: number;
   checkpoint: number;
+  attempt: number;
+  approval_digest: string | null;
 };
 export type Admission = {
   now: number;
   meter?: Meter;
   billing?: Billing;
   qualification?: Qualification;
+  // Fresh all-state GitHub PR readback for these exact retained session branches.
+  retryNoPr?: string[];
 };
 export const ticketId = (t: Ticket) => `${t.repo}#${t.number}`;
 export const eventId = (t: Ticket) =>
@@ -101,6 +105,26 @@ export class Engine {
       );
     });
   }
+  retryPrior(t: Ticket): Session[] {
+    const prior = this.sessions().filter(x => x.ticket === ticketId(t)).sort((a,b) => a.attempt-b.attempt);
+    if (!prior.length) return prior;
+    if (!t.approvalDigest || prior.some(x => !x.approval_digest || x.approval_digest === t.approvalDigest)) blocked("duplicate event: digest already claimed or prior digest unknown");
+    let lastArchive = 0;
+    for (const x of prior) {
+      if (x.status !== "archived") blocked("retry custody unresolved");
+      if (x.pid !== null) {
+        const current = processIdentity(x.pid), recorded = this.s.get<string>(`supervisor:${x.id}`);
+        if (current && (!recorded || current === recorded)) blocked("retry supervisor still alive");
+      }
+      const archive = this.s.db.query("SELECT at FROM events WHERE kind='session-archive' AND json_extract(data,'$.id')=? AND length(trim(json_extract(data,'$.receipt')))>0 ORDER BY at DESC LIMIT 1").get(x.id) as {at:number}|null;
+      if (!archive) blocked("retry custody receipt missing");
+      lastArchive = Math.max(lastArchive, archive.at);
+      if (this.s.db.query("SELECT id FROM events WHERE kind IN ('launcher-publish','worker-delivery') AND json_extract(data,'$.id')=?").get(x.id)) blocked("retry prior PR exists");
+    }
+    const approval = this.s.db.query("SELECT id FROM events WHERE kind='intake-approval' AND json_extract(data,'$.repo')=? AND json_extract(data,'$.number')=? AND json_extract(data,'$.label')=? AND length(trim(json_extract(data,'$.receipt')))>0 AND at>=?").get(t.repo,t.number,t.approvalDigest,lastArchive);
+    if (!approval) blocked("retry requires new owner approval after archive");
+    return prior;
+  }
   admit(raw: unknown, a: Admission): Session {
     const original = TicketSchema.parse(raw);
     const defaults=this.c.ticket_budget_default;
@@ -113,12 +137,14 @@ export class Engine {
     const floor = defaults ? mean ?? defaults.estimate_tokens : this.s.get<number>(`token-calibration:${original.provider}`) ?? 0;
     const proposedTokens=defaults && original.estimateTokens===defaults.estimate_tokens ? 0 : original.estimateTokens;
     const proposedSeconds=defaults && original.estimateSeconds===defaults.estimate_minutes*60 ? 0 : original.estimateSeconds;
-    const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) },
-      id = eventId(t);
+    const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) };
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
-      if (this.s.db.query("SELECT id FROM events WHERE id=?").get(id))
-        blocked("duplicate event");
+      const prior = this.retryPrior(t);
+      const attempt = prior.length ? prior[prior.length-1].attempt + 1 : 1;
+      const id = prior.length ? createHash("sha256").update(`helper:v2:${ticketId(t)}:${t.approvalDigest}`).digest("hex") : eventId(t);
+      if (this.s.db.query("SELECT id FROM events WHERE id=?").get(id)) blocked("duplicate event");
+      if (prior.length && (a.retryNoPr?.length !== prior.length || prior.some(x => !a.retryNoPr!.includes(x.id)))) blocked("retry prior PR unknown");
       const project = Object.values(this.c.projects).find(
         (p) => p.repo === t.repo,
       );
@@ -183,7 +209,7 @@ export class Engine {
       );
       this.s.db
         .query(
-          "INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)",
+          "INSERT INTO sessions(id,ticket,owner,provider,status,brief,attempt,approval_digest) VALUES(?,?,?,?,?,?,?,?)",
         )
         .run(
           id,
@@ -192,7 +218,10 @@ export class Engine {
           t.provider,
           "reserved",
           JSON.stringify({ ...t, model, effort }),
+          attempt,
+          t.approvalDigest ?? null,
         );
+      if (prior.length) this.s.event(`retry:${id}`, "session-retry", {id, ticket:ticketId(t), attempt, digest:t.approvalDigest, prior:prior.map(x=>x.id), noPr:a.retryNoPr}, "Stop and reconcile this attempt; retain all earlier sessions, claims, debits and receipts", a.now);
       for (const p of normalizedPaths)
         this.s.db.query("INSERT INTO claims VALUES(?,?)").run(p, id);
       debit(this.s, id, t.wallet, t.costCents, a.now);
