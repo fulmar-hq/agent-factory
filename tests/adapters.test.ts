@@ -138,3 +138,12 @@ test("GitHub launch transition rechecks approval and logs its undo", async () =>
   expect(calls.filter((x) => x.includes("edit"))).toHaveLength(1);
   s.close();
 });
+
+test("delivery workers get unsigned local Git, no signer or publisher endpoint",()=>{
+ const spec=workerSpec({...ticket(),repo:"fulmar-hq/alido"},"/synthetic","print","/fictional",{});
+ expect(spec.argv.find(a=>a.startsWith("permissions.factory.filesystem="))).toContain('"/synthetic/.git"="write"');
+ expect(spec.env.SSH_AUTH_SOCK).toBeUndefined();
+ expect(spec.argv).toContain("permissions.factory.network.enabled=false");
+ expect(spec.argv).toContain("permissions.factory.network.unix_sockets={  }");
+ expect(spec.argv.at(-1)).toContain("Never sign or push");
+});

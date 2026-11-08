@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync, existsSync, cpSync } from "node:fs";
 import { join } from "node:path";
+import { command } from "../adapters/github";
 import { workerSpec } from "../adapters/workers";
 import { root } from "../launcher/config";
 // Actual native command boundary, no model call and no credential contents read
@@ -35,10 +36,13 @@ for name,url in [('external_dns','https://example.com'),('external_ip','https://
  results[name]=subprocess.run(['/usr/bin/curl','--noproxy','*','--max-time','3','-ksSf',url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
 results['push_QA']=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
 open('scratch','w').write('fictional')
+commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned worker snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
+results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
 results['workspace_write']=True
 print(json.dumps(results))
 raise SystemExit(0 if all(results.values()) else 1)
 `;
+await command(["git","-C",work,"init","-q"]);
 writeFileSync(join(work,"probe.py"),probe);
 const p=Bun.spawn(["codex","sandbox",...overrides,"-P","factory","-C",work,"/usr/bin/python3","probe.py"],{cwd:work,env:spec.env,stdout:"pipe",stderr:"pipe"});
 const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
