@@ -91,3 +91,47 @@ test("Claude unified window events require an original timestamp and both window
   expect(()=>usageGate(partial,true,now,config())).toThrow("window missing");
   expect(()=>usageGate(claudeMetadata({...event,timestamp:new Date(now-900001).toISOString()}),true,now,config())).toThrow("stale");
 });
+
+import { ConfigSchema } from "../launcher/config";
+import { codexMetadata } from "../adapters/usage";
+import { Engine } from "../launcher/engine";
+import { Store } from "../tracking/store";
+import { ticket, admission } from "./fixtures";
+const exposedConfig = () => ConfigSchema.parse({...config(), usage_windows: {
+  rule: "gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse",
+}});
+const weekly = (used = 6, at = now) => codexMetadata({timestamp:new Date(at).toISOString(),payload:{rate_limits:{limit_id:"codex",
+  primary:{used_percent:used,window_minutes:10080,resets_at:now/1000+604800},secondary:null}}});
+test("configured exposed-window policy admits one fresh native weekly window", () => {
+  const s = new Store(":memory:"), e = new Engine(s, exposedConfig());
+  try {
+    e.pause(false,"owner");
+    expect(e.admit(ticket(), {...admission(),meter:weekly()}).status).toBe("reserved");
+    expect(weekly()).toMatchObject({nativeProvider:"codex",windows:[{name:"primary",durationMinutes:10080,used:.06}]});
+    expect(()=>usageGate(weekly(),false,now,config())).toThrow("window missing");
+  } finally { s.close(); }
+});
+test("exposed windows still refuse stale, future, expired, absent and non-native evidence", () => {
+  const c = exposedConfig();
+  for (const at of [now-900001,now+1]) expect(()=>usageGate(weekly(6,at),true,now,c)).toThrow("stale");
+  const expired = weekly()!; expired.windows[0].resetsAt=now;
+  expect(()=>usageGate(expired,true,now,c)).toThrow("stale");
+  expect(()=>usageGate(undefined,true,now,c)).toThrow("unknown");
+  expect(()=>usageGate({...weekly(),windows:[]},true,now,c)).toThrow("unknown");
+  expect(()=>usageGate({...weekly(),nativeProvider:undefined},true,now,c)).toThrow("native usage unknown");
+  expect(()=>usageGate(weekly(),true,now,c,"claude")).toThrow("native usage unknown");
+});
+test("70/90 thresholds apply to every exposed window, including a single weekly window", () => {
+  const c=exposedConfig();
+  expect(()=>usageGate(weekly(70),false,now,c)).toThrow("high benefit only");
+  expect(()=>usageGate(weekly(70),true,now,c)).not.toThrow();
+  expect(()=>usageGate(weekly(90),true,now,c)).toThrow("usage stop");
+  const two=weekly()!;
+  two.windows.push({used:.9,resetsAt:now+3600000,name:"secondary"});
+  expect(()=>usageGate(two,true,now,c)).toThrow("usage stop");
+  two.windows[1].used=.1; two.windows[1].resetsAt=now;
+  expect(()=>usageGate(two,true,now,c)).toThrow("stale");
+  const claude=claudeMetadata({timestamp:new Date(now).toISOString(),rate_limits:{seven_day:{used_percentage:6,resets_at:now/1000+604800}}});
+  expect(()=>usageGate(claude,false,now,c,"claude")).not.toThrow();
+  expect(claude?.windows[0].name).toBe("seven_day");
+});

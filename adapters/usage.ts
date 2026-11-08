@@ -46,11 +46,13 @@ export function codexMetadata(x: unknown): Meter | undefined {
   if (!x || typeof x !== "object") return;
   const record = x as Record<string, any>, r = record.payload?.rate_limits;
   if (!r || r.limit_id !== "codex") return;
-  const windows = [r.primary, r.secondary].filter(Boolean).map(w => ({
+  const windows = ["primary", "secondary"].filter(key => r[key]).map(key => {
+    const w = r[key];
+    return ({ name: key, durationMinutes: w.window_minutes,
     used: w.used_percent / 100, resetsAt: w.resets_at * 1000,
-  }));
+  }); });
   const parsed = MeterSchema.safeParse({ observedAt: Date.parse(record.timestamp), windows,
-    source: "native Codex rate-limit receipt" });
+    nativeProvider: "codex", source: "native Codex rate-limit receipt" });
   return parsed.success ? parsed.data : undefined;
 }
 export async function codexReading(now = Date.now(), base = join(homedir(), ".codex", "sessions")): Promise<Meter | undefined> {
@@ -70,11 +72,11 @@ export function claudeMetadata(x: unknown): Meter | undefined {
     const w = limits?.[key] ?? unified?.[key];
     if (!w) return [];
     const reset = w.resets_at ?? w.resetsAt;
-    return [{ used: limits?.[key] ? w.used_percentage / 100 : w.utilization,
+    return [{ name: key, used: limits?.[key] ? w.used_percentage / 100 : w.utilization,
       resetsAt: typeof reset === "number" ? reset * 1000 : Date.parse(reset) }];
   });
   const parsed = MeterSchema.safeParse({ observedAt: Date.parse(record.timestamp), windows,
-    source: "native Claude rate-limit receipt" });
+    nativeProvider: "claude", source: "native Claude rate-limit receipt" });
   return parsed.success ? parsed.data : undefined;
 }
 export async function claudeReading(now = Date.now(), base = join(homedir(), ".claude", "projects")): Promise<Meter | undefined> {

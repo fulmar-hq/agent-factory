@@ -41,11 +41,13 @@ export const eventId = (t: Ticket) =>
 function blocked(reason: string): never {
   throw Error(reason);
 }
-export function usageGate(raw: unknown, high: boolean, now: number, c: Config) {
+export function usageGate(raw: unknown, high: boolean, now: number, c: Config, provider?: "codex" | "claude") {
   const p = MeterSchema.safeParse(raw);
   if (!p.success) blocked("usage unknown");
   const m = p.data;
-  if (m.windows.length < 2) blocked("usage window missing");
+  if (c.usage_windows) {
+    if (!m.nativeProvider || (provider && m.nativeProvider !== provider)) blocked("native usage unknown");
+  } else if (m.windows.length < 2) blocked("usage window missing");
   if (
     m.observedAt > now ||
     now - m.observedAt > c.usage_gates.max_meter_age_minutes * 60000 ||
@@ -118,7 +120,7 @@ export class Engine {
       if (this.c.owners[t.owner].harness !== t.provider)
         blocked("provider mismatch");
       const normalizedPaths = [...new Set(t.paths.map(claimPath))];
-      usageGate(a.meter, t.benefit === "high", a.now, this.c);
+      usageGate(a.meter, t.benefit === "high", a.now, this.c, t.provider);
       const q = QualificationSchema.safeParse(a.qualification);
       const model = t.model ?? this.c.owners[t.owner].model,
         effort = t.effort ?? this.c.owners[t.owner].effort;

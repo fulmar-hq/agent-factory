@@ -4,6 +4,7 @@ schedule: {qa_window: '20:00', production_window: '21:30', missed_window: next_d
 owners:
   builder: {harness: codex, model: gpt-6.1-sol, effort: medium}
 usage_gates: {admit_below: 0.70, high_benefit_only_below: 0.90, stop_at: 0.90, max_meter_age_minutes: 15}
+usage_windows: {rule: "gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"}
 overrun: {checkpoint_at: 1.8, pause_at: 2.0}
 capacity: {start_parallel: 2, heavy_test_slots: 1}
 wallet:
