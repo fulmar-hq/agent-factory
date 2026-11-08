@@ -44,3 +44,25 @@ test("Claude transcript receipts deduplicate streamed messages and expose actual
   appendFileSync(path,JSON.stringify({type:"assistant",sessionId:"other"})+"\n");expect(()=>r.poll(a)).toThrow("custody mismatch");
  }finally{rmSync(home,{recursive:true});}
 });
+
+for(const reason of ["tokens","identity"]) test(`supervisor polls silent Codex rollout and stops on ${reason}`,async()=>{
+ const {Store}=await import("../tracking/store"),{Engine}=await import("../launcher/engine");
+ const {claimSupervisor,superviseSession}=await import("../launcher/worker"),{ticket,config}=await import("./fixtures");
+ const home=mkdtempSync(join(tmpdir(),"factory-poll-")),workspace=join(home,"workspace"),bin=join(home,"bin");
+ mkdirSync(workspace);mkdirSync(bin);
+ const day=join(home,".codex/sessions",new Date().toISOString().slice(0,10).replaceAll("-","/"));mkdirSync(day,{recursive:true});
+ const row=(x:unknown)=>JSON.stringify(x)+"\n";
+ writeFileSync(join(day,`rollout-${id}.jsonl`),row({type:"session_meta",payload:{id,cwd:workspace}})+row({type:"turn_context",payload:{model:reason==="identity"?"unexpected":"gpt-6.1-sol",effort:"medium"}})+row({type:"event_msg",payload:{type:"token_count",info:{total_token_usage:{total_tokens:100}}}}));
+ writeFileSync(join(bin,"codex"),`#!/bin/sh\necho '{"type":"thread.started","thread_id":"${id}"}'\nexec sleep 60\n`,{mode:0o700});
+ const oldPath=process.env.PATH,oldHome=process.env.HOME;
+ process.env.PATH=bin+":"+oldPath;process.env.HOME=home;
+ const s=new Store(join(home,"state.sqlite")),e=new Engine(s,config()),t={...ticket(),model:"gpt-6.1-sol",effort:"medium" as const,estimateTokens:reason==="tokens"?30:1000};
+ e.pause(false,"owner");s.db.query("INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)").run("native-poll","example/demo#1","builder","codex","reserved",JSON.stringify(t));
+ e.claimStart("native-poll");claimSupervisor(e,"native-poll");
+ try {
+  await superviseSession(e,"native-poll",t,workspace,join(home,"out.jsonl"));
+  expect(e.sessions()[0].status).toBe("paused");expect(e.sessions()[0].actual_tokens).toBe(100);
+  expect(s.get<{conflict:boolean}>("native-evidence:native-poll")?.conflict).toBe(reason==="identity");
+  expect(e.claimStart("native-poll")).toBe(false);
+ }finally{process.env.PATH=oldPath;process.env.HOME=oldHome;s.close();rmSync(home,{recursive:true});}
+},10000);
