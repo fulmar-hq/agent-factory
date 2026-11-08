@@ -21,7 +21,8 @@ test("two idle ticks and controlled relaunch call no models and preserve read-on
   const old = process.env.PATH;
   process.env.PATH = bin;
   try {
-    await tick(dir);
+    const first = await tick(dir);
+    expect(first).toMatchObject({paused:true,claimed:0,refusals:[]});
     await tick(dir);
     const text = await Bun.file(calls).text();
     expect(text).not.toMatch(/exec| -p| --bg|login|auth/);

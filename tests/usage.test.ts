@@ -64,3 +64,30 @@ test("Claude local structured subscription windows feed 70/90 gates without mode
     expect(()=>usageGate(claudeMetadata({...record(1),rate_limits:{five_hour:record(1).rate_limits.five_hour}}),true,now,config())).toThrow("window missing");
   } finally {rmSync(dir,{recursive:true});}
 });
+
+test("Codex reads active prior-day rollouts and both real windows on every poll", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-rollout-"));
+  const day = join(dir, "2020", "01", "01");
+  mkdirSync(day, {recursive:true});
+  const path = join(day, "active.jsonl");
+  const record = (used:number, at=now) => ({timestamp:new Date(at).toISOString(), payload:{rate_limits:{limit_id:"codex",
+    primary:{used_percent:used,resets_at:now/1000+3600},secondary:{used_percent:25,resets_at:now/1000+604800}}}});
+  try {
+    writeFileSync(path, JSON.stringify(record(10)));
+    expect((await codexReading(now,dir))?.windows.map(w=>w.used)).toEqual([.1,.25]);
+    writeFileSync(path, JSON.stringify(record(90)));
+    const updated = await codexReading(now,dir);
+    expect(()=>usageGate(updated,true,now,config())).toThrow("usage stop");
+    expect(updated?.observedAt).toBe(now);
+  } finally {rmSync(dir,{recursive:true});}
+});
+
+test("Claude unified window events require an original timestamp and both windows", () => {
+  const event = {type:"rate_limit_event",timestamp:new Date(now).toISOString(),rate_limit_info:{status:"allowed",unifiedWindows:{
+    five_hour:{utilization:.12,resetsAt:now/1000+3600},seven_day:{utilization:.45,resetsAt:now/1000+604800}}}};
+  expect(claudeMetadata(event)?.windows.map(w=>w.used)).toEqual([.12,.45]);
+  expect(claudeMetadata({...event,timestamp:undefined})).toBeUndefined();
+  const partial = claudeMetadata({...event,rate_limit_info:{unifiedWindows:{seven_day:event.rate_limit_info.unifiedWindows.seven_day}}});
+  expect(()=>usageGate(partial,true,now,config())).toThrow("window missing");
+  expect(()=>usageGate(claudeMetadata({...event,timestamp:new Date(now-900001).toISOString()}),true,now,config())).toThrow("stale");
+});

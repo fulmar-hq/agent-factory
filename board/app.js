@@ -157,6 +157,8 @@ function render() {
         : data.qualifications[provider],
     ]);
   }
+  cards.push([t.heartbeat, data.paused ? t.paused : t.running,
+    (data.heartbeat?.refusals ?? []).map(x => x.ticket + ": " + x.reason).join(" · ")]);
   cards.push([t.estimator, data.estimator.evaluation.status, JSON.stringify(data.estimator.evaluation.ratios)]);
   cards.push(
     [

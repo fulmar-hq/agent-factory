@@ -59,8 +59,7 @@ export async function tick(dir = root) {
           reason: "checkpoint and stop requested",
         });
     }
-    const ready = await reconcile(s, c, now),
-      r = await inputs(dir);
+    const r = await inputs(dir);
     const local = dir === root ? await localReadings(now) : { codex: undefined, claude: undefined };
     for (const provider of ["codex", "claude"] as const) {
       const meter = local[provider];
@@ -68,10 +67,13 @@ export async function tick(dir = root) {
     }
     s.set("readings", r);
     observeBilling(s, c, r.billing, now);
+    const ready = await reconcile(s, c, now);
     const verified = new Set<string>();
     const installations = ((await optionalJSON(
       join(dir, "repositories.json"),
     )) ?? {}) as Record<string, string>;
+    const refusals: { ticket: string; reason: string }[] = [];
+    let claimed = 0;
     for (const t of ready) {
       try {
         if (!installations[t.repo])
@@ -100,13 +102,16 @@ export async function tick(dir = root) {
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
           .run("claimed", session.ticket);
+        claimed++;
       } catch (error) {
+        refusals.push({ ticket: `${t.repo}#${t.number}`, reason: String(error) });
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
           .run(String(error), `${t.repo}#${t.number}`);
       }
     }
-    const heartbeat = { at: Date.now(), status: "ok", ready: ready.length };
+    const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
+      paused: s.get("paused") === true, claimed, refusals };
     s.set("heartbeat", heartbeat);
     return heartbeat;
   } finally {
@@ -114,7 +119,7 @@ export async function tick(dir = root) {
   }
 }
 // launchd routes stdout to tick.log; exactly one summary for success or error.
-export async function tickSummary(run = () => tick(), emit = console.info) {
+export async function tickSummary(run: () => Promise<{ at: number; status: string; ready: number; paused?: boolean; claimed?: number; refusals?: { ticket: string; reason: string }[] }> = () => tick(), emit = console.info) {
   try {
     const result = await run();
     emit(JSON.stringify(result));
