@@ -45,6 +45,16 @@ test("Claude transcript receipts deduplicate streamed messages and expose actual
  }finally{rmSync(home,{recursive:true});}
 });
 
+test("transcript catchup cannot redirect the active streamed message delta",()=>{
+ const a=new WorkerAccounting();
+ const ingest=(x:unknown)=>a.ingest("claude",JSON.stringify(x)).tokens;
+ ingest({type:"stream_event",event:{type:"message_start",message:{id:"a",usage:{input_tokens:10}}}});
+ ingest({type:"stream_event",event:{type:"message_start",message:{id:"b",usage:{input_tokens:20}}}});
+ ingest({type:"assistant",message:{id:"a",usage:{input_tokens:10,output_tokens:3}}});
+ expect(ingest({type:"stream_event",event:{type:"message_delta",usage:{output_tokens:7}}})).toBe(40);
+ expect(ingest({type:"stream_event",api_message_id:"a",event:{type:"message_delta",usage:{output_tokens:4}}})).toBe(41);
+});
+
 for(const reason of ["tokens","identity"]) test(`supervisor polls silent Codex rollout and stops on ${reason}`,async()=>{
  const {Store}=await import("../tracking/store"),{Engine}=await import("../launcher/engine");
  const {claimSupervisor,superviseSession}=await import("../launcher/worker"),{ticket,config}=await import("./fixtures");

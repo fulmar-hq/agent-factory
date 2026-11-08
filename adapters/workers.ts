@@ -172,7 +172,7 @@ export class WorkerAccounting {
         const event = x.type === "stream_event" ? x.event : null;
         const m = event?.type === "message_start" ? event.message : x.type === "assistant" ? x.message : null;
         if (m?.id && m.usage) {
-          this.current = m.id;
+          if(event?.type === "message_start") this.current = m.id;
           const u = m.usage;
           const values = [u.input_tokens ?? 0,u.cache_read_input_tokens ?? 0,u.cache_creation_input_tokens ?? 0,u.output_tokens ?? 0];
           if (values.every(n => Number.isSafeInteger(n) && n >= 0)) {
@@ -182,8 +182,9 @@ export class WorkerAccounting {
           }
         }
         const output = event?.type === "message_delta" ? event.usage?.output_tokens : undefined;
-        if (this.current && Number.isSafeInteger(output) && output >= 0)
-          this.messages.set(this.current,Math.max(this.messages.get(this.current) ?? 0,(this.inputs.get(this.current) ?? 0)+output));
+        const messageId = typeof x.api_message_id === "string" ? x.api_message_id : this.current;
+        if (messageId && Number.isSafeInteger(output) && output >= 0)
+          this.messages.set(messageId,Math.max(this.messages.get(messageId) ?? 0,(this.inputs.get(messageId) ?? 0)+output));
         this.tokens = Math.max(this.tokens,[...this.messages.values()].reduce((a,b)=>a+b,0));
       }
     } catch {}
