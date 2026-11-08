@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission, qualification, meter } from "./fixtures";
-test("real supervisors launch fixture once and terminate its process at 2x", async () => {
+for (const detached of [false, true]) test(detached ? "supervisor survives tick process-group teardown and still enforces 2x stop" : "real supervisors launch fixture once and terminate its process at 2x", async () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-worker-")),
     source = join(dir, "repo"),
     bin = join(dir, "bin");
@@ -33,7 +33,7 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
   }
   const time = Date.now(),
     c = config(),
-    t = { ...ticket(), estimateSeconds: 0.3 },
+    t = { ...ticket(), estimateSeconds: detached ? 2 : 0.3 },
     q = { ...qualification(), expiresAt: time + 60000 };
   writeFileSync(join(dir, "config.yaml"), JSON.stringify(c));
   writeFileSync(join(dir, "qualifications.json"), JSON.stringify({ codex: q }));
@@ -73,7 +73,11 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
     },
   });
   e.claimStart(x.id, time);
-  const children = [1, 2].map(() =>
+  const children = detached ? [Bun.spawn([process.execPath, "-e", `
+    import {spawnSupervisor} from ${JSON.stringify(join(import.meta.dir, "../launcher/tick.ts"))};
+    spawnSupervisor(${JSON.stringify(x.id)},${JSON.stringify(dir)});
+    setInterval(()=>{},1000);
+  `], {detached:true,env:{...process.env,PATH:bin+":"+process.env.PATH},stdout:"pipe",stderr:"pipe"})] : [1, 2].map(() =>
     Bun.spawn(
       [process.execPath, join(import.meta.dir, "../launcher/worker.ts"), x.id],
       {
@@ -88,10 +92,26 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
     ),
   );
   try {
+    if (detached) {
+      for (let i=0;i<100 && e.sessions()[0].status!=="running";i++) await Bun.sleep(20);
+      expect(e.sessions()[0].status).toBe("running");
+      const supervisor = e.sessions()[0].pid!;
+      const group = (pid:number) => Bun.spawnSync(["/bin/ps","-p",String(pid),"-o","pgid="]).stdout.toString().trim();
+      expect(group(supervisor)).not.toBe(group(children[0].pid));
+      // Reproduce launchd's job-exit cleanup without requiring launchd in CI.
+      process.kill(-children[0].pid,"SIGTERM");
+      await children[0].exited;
+      await Bun.sleep(350);
+      expect(e.sessions()[0].status).toBe("running");
+      for (let i=0;i<300 && e.sessions()[0].pid!==null;i++) await Bun.sleep(20);
+      expect(e.sessions()[0].pid).toBeNull();
+      expect(s.get(`stop:${x.id}`)).toBeNull();
+      expect(JSON.parse((s.rows("events").find((v:any)=>v.kind==="worker-cleanup") as any).data).verified).toBe(true);
+    }
     await Promise.all(
       children.map(async (p) => {
         const err = await new Response(p.stderr).text();
-        expect(await p.exited).toBe(0);
+        if (!detached) expect(await p.exited).toBe(0);
         expect(err).toBe("");
       }),
     );
@@ -100,10 +120,14 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
     ).toHaveLength(1);
     expect(e.sessions()[0].status).toBe("paused");
     expect(e.sessions()[0].native_id).toBe("00000000-0000-0000-0000-000000000001");
-    expect(e.sessions()[0].actual_seconds).toBeGreaterThanOrEqual(0.6);
+    expect(e.sessions()[0].actual_seconds).toBeGreaterThanOrEqual(t.estimateSeconds * 2);
     expect(s.rows("questions")).toHaveLength(1);
   } finally {
     for (const p of children) p.kill();
+    if (detached && e.sessions()[0].pid) {
+      s.set(`stop:${x.id}`, {reason:"fixture teardown"});
+      for(let i=0;i<200 && e.sessions()[0].pid!==null;i++) await Bun.sleep(20);
+    }
     s.close();
     rmSync(dir, { recursive: true });
   }

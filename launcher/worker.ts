@@ -91,7 +91,8 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
   let child: ReturnType<typeof spawnWorker> | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let fd: number | undefined;
-  let halt: (() => void) | undefined;
+  let halt: ((signal?: string) => void) | undefined;
+  const onTerm = () => halt?.("SIGTERM"), onInt = () => halt?.("SIGINT");
   try {
     const settingsPath = logPath + ".settings.json";
     const spec = materializeSettings(workerSpec(t, workspace), settingsPath);
@@ -127,15 +128,18 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       e.account(id,(Date.now()-start)/1000,totalTokens);
     };
     let stopping: Promise<void> | undefined;
-    halt = () => {
+    halt = (signal?: string) => {
       if (stop) return;
+      e.s.event(`halt:${id}`, "worker-halt", {id, signal:signal ?? null,
+        reason:e.s.get(`stop:${id}`) ?? (e.s.get("paused") !== false ? "factory paused" : "worker stop"),
+      }, "Reconcile stop evidence and preserved work before archiving custody");
       stop = true;
       stopping = child!.stop();
       // Cleanup is awaited below; attach a handler now while stdout is draining.
       void stopping.catch(() => {});
     };
-    process.on("SIGTERM", halt);
-    process.on("SIGINT", halt);
+    process.on("SIGTERM", onTerm);
+    process.on("SIGINT", onInt);
     timer = setInterval(() => {
       sample();
       const state = e.sessions().find((a) => a.id === id);
@@ -181,8 +185,8 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
   } finally {
     if (timer) clearInterval(timer);
     if (halt) {
-      process.off("SIGTERM", halt);
-      process.off("SIGINT", halt);
+      process.off("SIGTERM", onTerm);
+      process.off("SIGINT", onInt);
     }
     if (fd !== undefined) closeSync(fd);
     try {

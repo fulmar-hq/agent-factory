@@ -31,6 +31,16 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id
   }
   return session;
 }
+export function spawnSupervisor(id: string, dir: string) {
+  const p = Bun.spawn([process.execPath, join(import.meta.dir, "worker.ts"), id], {
+    env: { ...process.env, FACTORY_PRIVATE_DIR: dir },
+    // launchd terminates the tick's remaining process group when the tick exits.
+    // unref alone only releases Bun's event loop; it does not create a new group.
+    detached: true,
+    stdin: "ignore", stdout: "ignore", stderr: "ignore",
+  });
+  p.unref();
+}
 export async function tick(dir = root) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite"));
@@ -87,18 +97,7 @@ export async function tick(dir = root) {
           meter: r[t.provider],
           billing: r.billing,
           qualification: qualifications[t.provider],
-        }, (id) => {
-          const p = Bun.spawn(
-            [process.execPath, join(import.meta.dir, "worker.ts"), id],
-            {
-              env: { ...process.env, FACTORY_PRIVATE_DIR: dir },
-              stdin: "ignore",
-              stdout: "ignore",
-              stderr: "ignore",
-            },
-          );
-          p.unref();
-        });
+        }, (id) => spawnSupervisor(id, dir));
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
           .run("claimed", session.ticket);

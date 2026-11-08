@@ -2,7 +2,14 @@ import { spawn, execFileSync } from "node:child_process";
 import type { WorkerSpec } from "../adapters/workers";
 type ProcessRow = {pid:number; parent:number; group:number; state:string; identity:string};
 function processRows():ProcessRow[] {
-  return execFileSync("ps",["-axo","pid=,ppid=,pgid=,stat=,lstart="],{encoding:"utf8"}).trim().split("\n").flatMap(line=>{
+  let text:string;
+  try {
+    text=execFileSync("/bin/ps",["-axo","pid=,ppid=,pgid=,stat=,lstart="],{encoding:"utf8",env:{...process.env,LC_ALL:"C"}});
+  } catch(error) {
+    const failure=error as {status?:number|null;signal?:string|null;code?:string};
+    throw Error(`process table unavailable (status=${failure.status ?? "unknown"}, signal=${failure.signal ?? "none"}, code=${failure.code ?? "none"})`,{cause:error});
+  }
+  return text.trim().split("\n").flatMap(line=>{
     const m=line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
     return m ? [{pid:Number(m[1]),parent:Number(m[2]),group:Number(m[3]),state:m[4],identity:m[5]}] : [];
   });
