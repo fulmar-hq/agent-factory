@@ -31,13 +31,18 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
   const tracker=setInterval(()=>{try{collect();}catch(error){trackingError=error;}},100);
   tracker.unref();
   let stopping: Promise<void> | undefined;
+  const cleanup = { groups: [] as number[], deniedSignals: [] as string[], verified: false };
+  const denied = (pid: number, value: NodeJS.Signals) => {
+    const key = `${pid}:${value}`;
+    if (!cleanup.deniedSignals.includes(key)) cleanup.deniedSignals.push(key);
+  };
   const signal = (group:number,value: NodeJS.Signals) => {
     try { process.kill(-group, value); return true; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-      // macOS can return EPERM for a group containing only exiting zombies.
-      // Confirm the group has no live members; a live inaccessible group fails.
-      if ((error as NodeJS.ErrnoException).code === "EPERM" && !processRows().some(row=>row.group===group && !row.state.startsWith("Z"))) return false;
+      // A group signal can race native sandbox teardown. Keep trying individual
+      // owned processes and verify the process table instead of aborting cleanup.
+      if ((error as NodeJS.ErrnoException).code === "EPERM") { denied(-group,value); return false; }
       throw error;
     }
   };
@@ -45,6 +50,7 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
     pid: child.pid,
     stdout: child.stdout!,
     exited,
+    cleanup,
     stop: () => stopping ??= (async () => {
       try {
         const groups=new Set<number>(child.pid ? [child.pid] : []);
@@ -60,10 +66,15 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
         const terminate = (value: NodeJS.Signals) => {
           const live=owned();
           for(const group of groups)signal(group,value);
-          // Also stop owned descendants that joined a group we do not own.
-          for(const row of live)if(!groups.has(row.group)) {
-            try {process.kill(row.pid,value);}catch(error){if((error as NodeJS.ErrnoException).code!=="ESRCH")throw error;}
+          // Also target pinned individuals if a group signal was only partial,
+          // or a descendant joined a group whose leader we do not own.
+          for(const row of live) {
+            try {process.kill(row.pid,value);}catch(error){
+              if((error as NodeJS.ErrnoException).code==="EPERM")denied(row.pid,value);
+              else if((error as NodeJS.ErrnoException).code!=="ESRCH")throw error;
+            }
           }
+          cleanup.groups=[...groups];
           return live.length;
         };
         terminate("SIGTERM");
@@ -78,8 +89,11 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
           terminate("SIGKILL");
           await new Promise(resolve=>setTimeout(resolve,50));
         }
-        if(owned().length)throw Error("owned worker descendants survived cleanup");
+        const survivors = owned();
+        const groupSurvivors = processRows().filter(row=>groups.has(row.group) && !row.state.startsWith("Z"));
+        if(survivors.length || groupSurvivors.length)throw Error("owned worker descendants survived cleanup");
         if(trackingError)throw trackingError;
+        cleanup.verified=true;
       } finally {clearInterval(tracker);}
     })(),
   };

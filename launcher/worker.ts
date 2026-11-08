@@ -188,7 +188,10 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
     try {
       if (child) {
         try { await child.stop(); }
-        finally { await child.exited; }
+        finally {
+          e.s.event(`cleanup:${id}`, "worker-cleanup", child.cleanup, "Retain process-group readback and native custody; never infer unobserved containment");
+          await child.exited;
+        }
       }
     } finally { e.s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id); }
   }
