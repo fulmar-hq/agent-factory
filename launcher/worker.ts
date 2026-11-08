@@ -1,4 +1,4 @@
-import { prepareDelivery, deliveryBroker } from "../adapters/delivery";
+import { prepareDelivery, publish, testSnapshot } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
@@ -73,18 +73,25 @@ export async function runWorker(id: string) {
     const delivery = t.provider === "codex" && t.repo === "fulmar-hq/alido";
     const attempt = continuation?.attempt ?? "initial";
     const archive = join(root,"runs","delivery",id,attempt);
-    let broker: Awaited<ReturnType<typeof deliveryBroker>> | undefined;
-    try {
-      if (delivery) {
-        const qualified=s.get<{expiresAt:number}>("delivery-qualified");
-        if(!qualified || qualified.expiresAt<=Date.now())throw Error("delivery policy unqualified");
-        await prepareDelivery(workspace,source,archive,id);
-        mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
-        const baseline = (await command(["git","-C",workspace,"rev-parse","HEAD"])).trim();
-        broker = await deliveryBroker(t,id,workspace,archive,baseline,data=>s.event(crypto.randomUUID(),"worker-delivery",{id,...data as object},"Retain signed branch and PR; use signed revert for accepted source"),command,source);
-      }
-      await superviseSession(e, id, t, workspace, join(root, `worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`), broker ? {socket:broker.socket,native:continuation?.native} : undefined);
-    } finally { broker?.close(); }
+    if (delivery) {
+      const qualified=s.get<{expiresAt:number;version:number}>("delivery-qualified");
+      if(!qualified || qualified.version!==2 || qualified.expiresAt<=Date.now())throw Error("publisher blocked: isolation unproven");
+      await prepareDelivery(workspace,source,archive,id);
+    }
+    mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
+    const baselineKey=`publish-base:${id}`;
+    if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());
+    await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery ? {native:continuation?.native} : undefined);
+    if(delivery && e.sessions().find(x=>x.id===id)?.status==="finished") {
+      const verifyClaim=()=>{
+        const current=e.sessions().find(x=>x.id===id);
+        const q=s.get<{expiresAt:number;version:number}>("delivery-qualified");
+        const claims=s.db.query("SELECT path FROM claims WHERE session=?").all(id) as {path:string}[];
+        if(!current || current.status!=="finished" || s.get("paused")!==false || s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true || !q || q.version!==2 || q.expiresAt<=Date.now() || claims.length!==t.paths.length || t.paths.some(p=>!claims.some(c=>c.path===p.toLowerCase())))throw Error("publisher claim/cleanup/qualification refused");
+      };
+      const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
+      s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+    }
   } catch (error) {
     e.finish(id, false);
     s.event(`failure:${id}`, "worker-failure", {error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
@@ -95,7 +102,7 @@ export async function runWorker(id: string) {
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.
-export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {socket:string; native?:string}) {
+export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {native?:string}) {
   const continuation = e.s.get<{attempt:string;native:string}>(`continuation:${id}`);
   const attempt = continuation?.attempt ?? id;
   const original = e.sessions().find(x => x.id === id)!;
