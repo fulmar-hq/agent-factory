@@ -49,7 +49,9 @@ test("worker adapters pin requested native model and effort without key fallback
   expect(c.argv).toContain("gpt-6.1-sol");
   expect(c.argv).toContain("model_reasoning_effort=medium");
   expect(c.argv).toContain('default_permissions="factory"');
-  expect(c.argv).toContain('permissions.factory.filesystem={ ":minimal"="read", ":workspace_roots"="write", "/tmp"="read", ":tmpdir"="read", "/Library/Developer"="read", "/opt/homebrew"="read" }');
+  expect(c.argv.find(a=>a.startsWith("permissions.factory.filesystem="))).toContain('"/synthetic/node_modules"="read"');
+  expect(c.argv).toContain("permissions.factory.network.enabled=false");
+  expect(c.argv).toContain("permissions.factory.network.unix_sockets={  }");
   expect(c.env.SSH_AUTH_SOCK).toBeUndefined();
   expect(c.argv).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   expect(

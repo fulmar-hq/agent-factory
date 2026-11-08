@@ -57,8 +57,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   appendFileSync(exclude,"\n.factory-tmp/\n.factory-delivery.bundle\n");
   for (const [key,value] of [
     ["user.name","Vincent Messina"], ["user.email","72951696+vincentmessina@users.noreply.github.com"],
-    ["gpg.format","ssh"], ["user.signingkey",join(process.env.HOME!,".ssh/fisher_commit_signing_ed25519.pub")],
-    ["commit.gpgsign","true"], ["core.hooksPath","/dev/null"], ["core.excludesFile","/dev/null"],
+    ["commit.gpgsign","false"], ["core.hooksPath","/dev/null"], ["core.excludesFile","/dev/null"],
   ]) await git("config","--local",key,value);
 }
 
@@ -84,57 +83,81 @@ export function deliveryRequest(raw:unknown) {
   if (Object.keys(r).sort().join(",") !== "body,title" || typeof r.title !== "string" || typeof r.body !== "string" || !r.title.trim() || r.title.length>200 || r.body.length>20000) throw Error("title and body only");
   return {title:r.title,body:r.body};
 }
-// A native network allowlist cannot restrict github.com to a repository. This
-// broker owns credentials and network; the sandbox gets only this Unix socket.
-// Import a bundle into a private controlled repo. Never run trusted Git against
-// worker-writable config/hooks, or accept a destination/ref/command from a worker.
-export async function deliveryBroker(t:Ticket, id:string, workspace:string, dir:string, baseline:string, log:(data:unknown)=>void, execute=command, trustedSource=workspace) {
-  if (t.repo !== deliveryRepo) throw Error("delivery repository not admitted");
-  const socket=join("/tmp",`factory-delivery-${id.slice(0,16)}-${crypto.randomUUID().slice(0,8)}.sock`);
-  const bare=join(dir,"delivery.git");
-  if (!existsSync(bare)) await execute(["git","clone","--bare","--no-hardlinks",trustedSource,bare]);
+// No worker-facing publisher socket. The launcher calls PUBLISH after verified
+// cleanup and re-tests a private snapshot. Hooks and worker Git config never run
+// in the trusted publisher. Failure at any gate retains the snapshot, no push.
+export type PublishAuthority = {
+  verifyClaim: () => void;
+  testTree: (checkout:string, tree:string) => Promise<{tree:string; passed:boolean}>;
+  isolationVerified: boolean;
+};
+export async function publish(t:Ticket, id:string, workspace:string, dir:string, baseline:string,
+  authority:PublishAuthority, execute=command, trustedSource=workspace) {
+  if (!authority.isolationVerified) throw Error("publisher blocked: isolation unproven");
+  if (![deliveryRepo,"fulmar-hq/agent-factory"].includes(t.repo) || !/^[a-f0-9]{40}$/.test(baseline)) throw Error("publisher destination/base refused");
+  authority.verifyClaim();
   const branch=branchFor(id);
-  let busy=false;
-  const server=Bun.serve({unix:socket, async fetch(req) {
-    if(req.method!=="POST" || new URL(req.url).pathname!=="/deliver") return new Response("refused",{status:403});
-    if(busy) return new Response("delivery busy",{status:409});
-    busy=true;
-    try {
-      const reader=req.body?.getReader();
-      if(!reader)throw Error("request body required");
-      let text="",size=0;
-      while(true) {
-        const {done,value}=await reader.read();if(done)break;
-        size+=value.length;if(size>25000){await reader.cancel();throw Error("request too large");}
-        text+=new TextDecoder().decode(value,{stream:true});
-      }
-      const {title,body}=deliveryRequest(JSON.parse(text));
-      const bundle=join(workspace,".factory-delivery.bundle");
-      if(realpathSync(bundle)!==join(realpathSync(workspace),".factory-delivery.bundle")) throw Error("bundle symlink refused");
-      const snapshot=join(dir,`incoming-${crypto.randomUUID()}.bundle`);
-      snapshotBundle(bundle,snapshot);
-      const git=(...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-C",bare,...args]);
-      await git("fetch","--no-tags",snapshot,`HEAD:refs/heads/${branch}`);
-      const head=(await git("rev-parse",branch)).trim();
-      await git("merge-base","--is-ancestor",baseline,head);
-      const changed=(await git("diff","--name-only",baseline,head)).trim().split("\n").filter(Boolean);
-      if(!changed.length || changed.some(p=>!t.paths.includes(p))) throw Error("delivery paths outside approved scope");
-      const commits=(await git("rev-list",`${baseline}..${head}`)).trim().split("\n");
-      const merges=(await git("rev-list","--min-parents=2",`${baseline}..${head}`)).trim();
-      if(merges)throw Error("delivery merge commits refused");
-      for(const sha of commits) {
-        const paths=(await git("diff-tree","--no-commit-id","--name-only","-r",sha)).trim().split("\n").filter(Boolean);
-        if(paths.some(p=>!t.paths.includes(p)))throw Error("commit paths outside approved scope");
-        await git("-c",`gpg.ssh.allowedSignersFile=${join(process.env.HOME!,".ssh/fisher_allowed_signers")}`,"verify-commit",sha);
-      }
-      const destination=`https://github.com/${deliveryRepo}.git`;
-      await git("push",destination,`refs/heads/${branch}:refs/heads/${branch}`);
-      const existing=JSON.parse(await execute(["gh","pr","list","--repo",deliveryRepo,"--head",branch,"--base","QA","--json","url"]));
-      const url=existing[0]?.url ?? (await execute(["gh","pr","create","--repo",deliveryRepo,"--base","QA","--head",branch,"--title",title,"--body",body])).trim();
-      log({head,url,branch,repo:deliveryRepo});
-      return Response.json({head,url});
-    } catch(error) { return new Response(String(error),{status:400}); }
-    finally {busy=false;}
-  }});
-  return {socket,close:()=>server.stop(true)};
+  if (!/^(feat|fix)\/[a-zA-Z0-9/-]+$/.test(branch)) throw Error("publisher branch refused");
+  mkdirSync(dir,{recursive:true,mode:0o700});
+  const snapshot=join(dir,`incoming-${crypto.randomUUID()}.bundle`);
+  snapshotBundle(join(workspace,".factory-delivery.bundle"),snapshot);
+  const checkout=join(dir,`publish-${crypto.randomUUID()}`);
+  await execute(["git","-c","core.hooksPath=/dev/null","clone","--no-hardlinks","--no-checkout",trustedSource,checkout]);
+  const git=(...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","user.name=Vincent Messina","-c","user.email=72951696+vincentmessina@users.noreply.github.com","-c","core.attributesFile=/dev/null","-C",checkout,...args]);
+  await git("config","core.hooksPath","/dev/null");
+  await git("fetch","--no-tags",snapshot,"HEAD");
+  const head=(await git("rev-parse","FETCH_HEAD")).trim();
+  await git("merge-base","--is-ancestor",baseline,head);
+  // Exact expected base, no alternate parent, merge, or concealed intermediate edit.
+  const roots=(await git("rev-list","--reverse",`${baseline}..${head}`)).trim().split("\n").filter(Boolean);
+  if (!roots.length) throw Error("empty delivery");
+  let parent=baseline;
+  for(const sha of roots) {
+    if ((await git("show","-s","--format=%P",sha)).trim()!==parent) throw Error("unexpected delivery base/parents");
+    const paths=(await git("diff-tree","--no-commit-id","--name-only","-r",sha)).trim().split("\n").filter(Boolean);
+    if(paths.some(p=>!t.paths.includes(p)))throw Error("commit paths outside approved scope");
+    parent=sha;
+  }
+  const changed=(await git("diff","--name-only",baseline,head)).trim().split("\n").filter(Boolean);
+  if(!changed.length || changed.some(p=>!t.paths.includes(p)))throw Error("delivery paths outside approved scope");
+  await git("checkout","--detach",head);
+  if((await git("status","--porcelain")).trim())throw Error("publisher checkout not clean");
+  const tree=(await git("rev-parse","HEAD^{tree}")).trim();
+  const tests=await authority.testTree(checkout,tree);
+  if(!tests.passed || tests.tree!==tree || (await git("rev-parse","HEAD^{tree}")).trim()!==tree || (await git("status","--porcelain")).trim())throw Error("exact tested tree required");
+  authority.verifyClaim();
+  // Squash only the tested tree onto the authorized base. Only this launcher
+  // command can contact the signing agent; no worker-supplied hooks or argv.
+  const signed=(await git("-c","gpg.format=ssh","-c",`user.signingkey=${join(process.env.HOME!,".ssh/fisher_commit_signing_ed25519.pub")}`,
+    "commit-tree","-S",tree,"-p",baseline,"-m",`factory: ${t.title} (refs #${t.number})`)).trim();
+  await git("-c",`gpg.ssh.allowedSignersFile=${join(process.env.HOME!,".ssh/fisher_allowed_signers")}`,"verify-commit",signed);
+  if((await git("rev-parse",`${signed}^{tree}`)).trim()!==tree)throw Error("signed tree changed");
+  await git("update-ref",`refs/heads/${branch}`,signed);
+  authority.verifyClaim();
+  await git("-c","credential.helper=","-c","credential.https://github.com.helper=!gh auth git-credential","push",`https://github.com/${t.repo}.git`,`refs/heads/${branch}:refs/heads/${branch}`);
+  const base=t.repo===deliveryRepo ? "QA" : "main";
+  const existing=JSON.parse(await execute(["gh","pr","list","--repo",t.repo,"--head",branch,"--base",base,"--json","url"]));
+  const url=existing[0]?.url ?? (await execute(["gh","pr","create","--repo",t.repo,"--base",base,"--head",branch,"--title",t.title,"--body",`refs #${t.number}\nLauncher tested tree: ${tree}\nLauncher signed commit: ${signed}`])).trim();
+  return {head:signed,tree,url,branch,repo:t.repo};
+}
+
+// Tests run in the worker boundary, never with launcher credentials. The caller
+// checks clean status and the tree again after this process exits.
+export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
+  const {workerSpec}=await import("./workers");
+  if(existsSync(join(source,"node_modules"))) {
+    await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);
+    localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
+  }
+  mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
+  const spec=workerSpec(t,checkout);
+  const overrides=spec.argv.flatMap((a,i)=>a==="-c"?[a,spec.argv[i+1]]:[]);
+  const p=Bun.spawn(["codex","sandbox",...overrides,"-P","factory","-C",checkout,"/bin/sh","-c",t.test],{cwd:checkout,env:spec.env,stdout:"pipe",stderr:"pipe",stdin:"ignore"});
+  const timer=setTimeout(()=>p.kill(),600000);
+  try {
+    const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
+    const {writeFileSync}=await import("node:fs");
+    writeFileSync(join(dirname(checkout),"tested-tree.json"),JSON.stringify({tree,command:t.test,code,out,err,at:Date.now()}),{flag:"wx",mode:0o600});
+    return {tree,passed:code===0};
+  } finally {clearTimeout(timer);}
 }

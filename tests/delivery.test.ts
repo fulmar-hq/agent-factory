@@ -35,34 +35,14 @@ test("calibration freezes effective estimate; continuation preserves all origina
  s.close();
 });
 
-test("broker fixes GitHub destination and QA base and refuses foreign changed paths",async()=>{
- const {mkdtempSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
- const {deliveryBroker}=await import("../adapters/delivery");
- const dir=mkdtempSync(join(tmpdir(),"factory-broker-"));writeFileSync(join(dir,".factory-delivery.bundle"),"fixture");
- const calls:string[][]=[];let foreign=true;
- const execute=async(args:string[])=>{
-  calls.push(args);
-  if(args.includes("rev-parse"))return "a".repeat(40);
-  if(args.includes("diff"))return foreign ? "outside.ts\n" : ticket().paths[0]+"\n";
-  if(args.includes("--min-parents=2"))return "";
-  if(args.includes("rev-list"))return "a".repeat(40);
-  if(args.includes("list"))return "[]";
-  if(args.includes("create"))return "https://github.com/fulmar-hq/alido/pull/1";
-  return "";
- };
- const broker=await deliveryBroker({...ticket(),repo:"fulmar-hq/alido"},"a".repeat(64),dir,dir,"b".repeat(40),()=>{},execute);
- try {
-  const send=(body:unknown)=>fetch("http://localhost/deliver",{unix:broker.socket,method:"POST",body:JSON.stringify(body)});
-  expect((await send({title:"fixture",body:"",repo:"elsewhere/repo"})).status).toBe(400);
-  expect((await send({title:"fixture",body:""})).status).toBe(400);
-  expect(calls.some(c=>c.includes("push"))).toBe(false);
-  foreign=false;
-  expect((await send({title:"fixture",body:"refs #1"})).status).toBe(200);
-  expect(calls.find(c=>c.includes("push"))).toContain("https://github.com/fulmar-hq/alido.git");
-  const pr=calls.find(c=>c.includes("create"))!;
-  expect(pr[pr.indexOf("--base")+1]).toBe("QA");expect(pr[pr.indexOf("--repo")+1]).toBe("fulmar-hq/alido");
-  expect(calls.some(c=>c.includes("verify-commit"))).toBe(true);
- } finally {broker.close();}
+test("publisher fails closed without native isolation and checks claim before importing",async()=>{
+ const {publish}=await import("../adapters/delivery");
+ let calls=0;
+ const exec=async()=>{calls++;return "";};
+ const t={...ticket(),repo:"fulmar-hq/alido"};
+ await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:false,verifyClaim:()=>{},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("isolation unproven");
+ await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:true,verifyClaim:()=>{throw Error("claim refused");},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("claim refused");
+ expect(calls).toBe(0);
 });
 
 test("delivery setup preserves edits and isolates Git metadata and dependencies",async()=>{
@@ -95,4 +75,41 @@ test("trusted Git receives an immutable private bundle snapshot and refuses syml
  expect(readFileSync(target,"utf8")).toBe("original");
  symlinkSync(source,join(dir,"link"));expect(()=>snapshotBundle(join(dir,"link"),join(dir,"refused"))).toThrow();
  mkdirSync(join(dir,"directory"));expect(()=>snapshotBundle(join(dir,"directory"),join(dir,"refused"))).toThrow("regular bundle");
+});
+
+test("launcher signs only the tested snapshot and refuses dirty or mismatched receipts",async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {publish}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
+ const dir=mkdtempSync(join(tmpdir(),"factory-publish-")),source=join(dir,"source");mkdirSync(source);
+ const git=(...a:string[])=>command(["git","-C",source,...a]);
+ await git("init");await git("config","user.name","Fictional");await git("config","user.email","fixture@example.invalid");
+ writeFileSync(join(source,"fixture"),"base");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","base");
+ const base=(await git("rev-parse","HEAD")).trim();
+ writeFileSync(join(source,"fixture"),"tested");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","worker");
+ await git("bundle","create",".factory-delivery.bundle","HEAD");
+ const t={...ticket(),repo:"fulmar-hq/alido",paths:["fixture"]},calls:string[][]=[];
+ const execute=async(a:string[])=>{
+  calls.push(a);
+  if(a.includes("commit-tree"))return command(a.filter(x=>x!=="-S"));
+  if(a.includes("verify-commit") || a.includes("push"))return "";
+  if(a.includes("list"))return "[]";
+  if(a.includes("create") && a[0]==="gh")return "https://github.com/fulmar-hq/alido/pull/1";
+  return command(a);
+ };
+ let claims=0;
+ const result=await publish(t,"a".repeat(64),source,join(dir,"pass"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
+  expect(await Bun.file(join(checkout,"fixture")).text()).toBe("tested");return {tree,passed:true};
+ }},execute,source);
+ expect(claims).toBe(3);expect(calls.find(a=>a.includes("commit-tree"))).toContain("-S");
+ expect(calls.find(a=>a.includes("push"))?.at(-1)).toBe(`refs/heads/${result.branch}:refs/heads/${result.branch}`);
+ expect((await command(["git","-C",source,"rev-parse","HEAD^{tree}"])).trim()).toBe(result.tree);
+ calls.length=0;
+ for(const mode of ["failed","mismatch","dirty"]){
+  await expect(publish(t,"a".repeat(64),source,join(dir,mode),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(checkout,tree)=>{
+   if(mode==="dirty")writeFileSync(join(checkout,"fixture"),"unreviewed");
+   return {tree:mode==="mismatch" ? "0".repeat(40) : tree,passed:mode!=="failed"};
+  }},execute,source)).rejects.toThrow("exact tested tree");
+ }
+ expect(calls.some(a=>a.includes("push"))).toBe(false);expect(calls.some(a=>a.includes("commit-tree"))).toBe(false);
+ await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
 });

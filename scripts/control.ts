@@ -44,11 +44,7 @@ try {
     console.log(archive);
   }
   else if (action === "qualify-delivery") {
-    const evidence=await Bun.file(args[0]).json();
-    if(evidence.code!==0 || evidence.signed!==true || Date.now()-evidence.at>3600000)throw Error("fresh native signed boundary receipt required");
-    const q=await Bun.file(join(root,"qualifications.json")).json();
-    s.set("delivery-qualified",{expiresAt:q.codex.expiresAt,evidence:args[0],version:1});
-    s.event(randomUUID(),"delivery-qualification",{evidence:args[0],expiresAt:q.codex.expiresAt},"Expire delivery-qualified; retain evidence and original provider qualification");
+    throw Error("publisher blocked: legacy delivery qualification cannot authorize launcher publication; full v2 native isolation and verified published-tree evidence required");
   }
   else if (action === "continue-session") console.log(e.continueSession(args[0],args[1],()=>spawnSupervisor(args[0],root)));
   else if (action === "approve-intake")
