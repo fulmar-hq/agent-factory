@@ -1,3 +1,4 @@
+import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
@@ -100,6 +101,19 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       totalTokens = 0,
       completed = false;
     const accounting = new WorkerAccounting();
+    let native: NativeReceipt | undefined = spec.nativeId ? new NativeReceipt(t.provider,spec.nativeId,workspace,spec.env.HOME,start) : undefined;
+    const sample = () => {
+      try {
+        native?.poll(accounting);
+        totalTokens=accounting.tokens;
+        if(native) {
+          const evidence=native.evidence(t.model ?? (t.provider==="codex" ? "gpt-6.1-sol" : "opus"),t.effort ?? "medium");
+          e.s.set(`native-evidence:${id}`,evidence);
+          if(evidence.conflict) {e.s.set(`stop:${id}`,{reason:"native model/effort conflict"});halt!();}
+        }
+      } catch(error) {e.s.set(`stop:${id}`,{reason:String(error)});halt!();}
+      e.account(id,(Date.now()-start)/1000,totalTokens);
+    };
     let stopping: Promise<void> | undefined;
     halt = () => {
       if (stop) return;
@@ -109,7 +123,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
     process.on("SIGTERM", halt);
     process.on("SIGINT", halt);
     timer = setInterval(() => {
-      e.account(id, (Date.now() - start) / 1000, totalTokens);
+      sample();
       const state = e.sessions().find((a) => a.id === id);
       if (
         e.s.get("paused") !== false ||
@@ -128,7 +142,11 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
         const event = accounting.ingest(t.provider, line);
-        if (event.native) e.register(id, process.pid, event.native);
+        if (event.native) {
+          if(native && native.id!==event.native)throw Error("native ID changed");
+          native ??= new NativeReceipt(t.provider,event.native,workspace,spec.env.HOME,start);
+          e.register(id, process.pid, event.native);
+        }
         if (event.tokens !== undefined) totalTokens = event.tokens;
         if (event.done) completed = true;
         e.account(id, (Date.now() - start) / 1000, totalTokens);
@@ -136,13 +154,15 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       }
     }
     const code = await child.exited;
+    // Drain bounded chunks after exit; never accept identity from an unread tail.
+    for(let i=0;i<64;i++) {sample();if(!native || native.caughtUp || stop)break;}
     clearInterval(timer);
     if (stopping) await stopping;
     closeSync(fd);
     fd = undefined;
     if (stop)
       e.s.db.query("UPDATE sessions SET status='paused' WHERE id=?").run(id);
-    else e.finish(id, code === 0 && completed);
+    else e.finish(id, code === 0 && completed && native?.evidence(t.model ?? (t.provider==="codex" ? "gpt-6.1-sol" : "opus"),t.effort ?? "medium").verified === true);
   } finally {
     if (timer) clearInterval(timer);
     if (halt) {

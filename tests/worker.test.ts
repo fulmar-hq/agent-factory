@@ -43,7 +43,7 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
   );
   writeFileSync(
     join(bin, "codex"),
-    `#!/bin/sh\nif [ "$1" = login ]; then echo 'Logged in using ChatGPT'; exit 0; fi\necho started >> '${dir}/starts'\necho '{"type":"thread.started","thread_id":"fixture-native"}'\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 0.05; done\n`,
+    `#!/bin/sh\nif [ "$1" = login ]; then echo 'Logged in using ChatGPT'; exit 0; fi\necho started >> '${dir}/starts'\necho '{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000001"}'\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 0.05; done\n`,
     { mode: 0o700 },
   );
   const s = new Store(join(dir, "controller.sqlite")),
@@ -99,7 +99,7 @@ test("real supervisors launch fixture once and terminate its process at 2x", asy
       (await Bun.file(join(dir, "starts")).text()).trim().split("\n"),
     ).toHaveLength(1);
     expect(e.sessions()[0].status).toBe("paused");
-    expect(e.sessions()[0].native_id).toBe("fixture-native");
+    expect(e.sessions()[0].native_id).toBe("00000000-0000-0000-0000-000000000001");
     expect(e.sessions()[0].actual_seconds).toBeGreaterThanOrEqual(0.6);
     expect(s.rows("questions")).toHaveLength(1);
   } finally {

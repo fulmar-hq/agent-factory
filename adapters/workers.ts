@@ -12,7 +12,7 @@ export function workerSpec(
 ): WorkerSpec {
   const selected = t.model ?? (t.provider === "codex" ? "gpt-6.1-sol" : "opus");
   const model =
-      t.provider === "claude" && selected === "opus-5.5" ? "opus" : selected,
+      t.provider === "claude" && selected === "opus-5.5" ? "claude-opus-5-5" : selected,
     effort = t.effort ?? "medium";
   const env: Record<string, string> = {};
   for (const key of [
@@ -22,7 +22,7 @@ export function workerSpec(
     "LOGNAME",
     "TMPDIR",
     "LANG",
-    "SSH_AUTH_SOCK",
+
   ])
     if (process.env[key]) env[key] = process.env[key]!;
   // Explicit allowlist: never inherit API keys, provider routes, controller tokens or gh tokens.
@@ -34,8 +34,11 @@ export function workerSpec(
         "exec",
         "--ignore-user-config",
         "--json",
-        "--sandbox",
-        "workspace-write",
+        "--ignore-rules",
+        "-c", 'approval_policy="never"',
+        "-c", 'default_permissions="factory"',
+        "-c", 'permissions.factory.filesystem={ ":minimal"="read", ":workspace_roots"="write", "/tmp"="read", ":tmpdir"="read", "/Library/Developer"="read", "/opt/homebrew"="read" }',
+        "-c", "permissions.factory.network.enabled=false",
         "-m",
         model,
         "-c",
@@ -46,6 +49,7 @@ export function workerSpec(
       ],
       env,
     };
+  env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = "1";
   const nativeId = crypto.randomUUID();
   return {
     argv: [
@@ -55,6 +59,13 @@ export function workerSpec(
       "",
       "--strict-mcp-config",
       "--no-chrome",
+      "--restricted",
+      "--tools", "Bash,Read,Edit,Write,Glob,Grep",
+      "--permission-mode", "acceptEdits",
+      "--settings", JSON.stringify({
+        permissions: {blockReadsOutsideWorkingDirectories:true},
+        sandbox: {enabled:true, failIfUnavailable:true, autoAllowBashIfSandboxed:true, allowUnsandboxedCommands:false, excludedCommands:[], filesystem:{denyRead:[env.HOME ?? "/Users"], allowRead:[workspace]}},
+      }),
       "--permission-prompts",
       "none",
       "--model",
@@ -143,30 +154,42 @@ export async function verifySubscription(provider: string) {
   }
 }
 
-// Native cumulative counters only; never estimate tokens from characters or time.
+// Streaming and transcript copies share message IDs; never add two sources together.
 export class WorkerAccounting {
   tokens = 0;
   private messages = new Map<string, number>();
+  private inputs = new Map<string, number>();
   private current = "";
-  private input = 0;
   ingest(provider: string, line: string) {
     const receipt = sessionEvent(provider, line);
-    if (provider === "claude") {
-      try {
-        const x = JSON.parse(line);
+    try {
+      const x = JSON.parse(line);
+      if (provider === "codex" && x.type === "event_msg" && x.payload?.type === "token_count") {
+        const n = x.payload.info?.total_token_usage?.total_tokens;
+        if (Number.isSafeInteger(n) && n >= 0) this.tokens = Math.max(this.tokens, n);
+      }
+      if (provider === "claude") {
         const event = x.type === "stream_event" ? x.event : null;
-        if (event?.type === "message_start" && event.message?.id) {
-          this.current = event.message.id;
-          const u = event.message.usage ?? {};
-          this.input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          this.messages.set(this.current, this.input + (u.output_tokens ?? 0));
+        const m = event?.type === "message_start" ? event.message : x.type === "assistant" ? x.message : null;
+        if (m?.id && m.usage) {
+          if(event?.type === "message_start") this.current = m.id;
+          const u = m.usage;
+          const values = [u.input_tokens ?? 0,u.cache_read_input_tokens ?? 0,u.cache_creation_input_tokens ?? 0,u.output_tokens ?? 0];
+          if (values.every(n => Number.isSafeInteger(n) && n >= 0)) {
+            const input = values[0]+values[1]+values[2];
+            this.inputs.set(m.id,input);
+            this.messages.set(m.id,Math.max(this.messages.get(m.id) ?? 0,input+values[3]));
+          }
         }
-        if (event?.type === "message_delta" && this.current && event.usage?.output_tokens !== undefined)
-          this.messages.set(this.current, this.input + event.usage.output_tokens);
-        this.tokens = Math.max(this.tokens, [...this.messages.values()].reduce((a, b) => a + b, 0));
-      } catch {}
-    }
-    if (receipt.tokens !== undefined) this.tokens = Math.max(this.tokens, receipt.tokens);
-    return { ...receipt, tokens: this.tokens };
+        const output = event?.type === "message_delta" ? event.usage?.output_tokens : undefined;
+        const messageId = typeof x.api_message_id === "string" ? x.api_message_id : this.current;
+        if (messageId && Number.isSafeInteger(output) && output >= 0)
+          this.messages.set(messageId,Math.max(this.messages.get(messageId) ?? 0,(this.inputs.get(messageId) ?? 0)+output));
+        this.tokens = Math.max(this.tokens,[...this.messages.values()].reduce((a,b)=>a+b,0));
+      }
+    } catch {}
+    if (receipt.tokens !== undefined && Number.isSafeInteger(receipt.tokens) && receipt.tokens >= 0)
+      this.tokens = Math.max(this.tokens,receipt.tokens);
+    return {...receipt,tokens:this.tokens};
   }
 }
