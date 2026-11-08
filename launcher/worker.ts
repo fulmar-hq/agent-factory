@@ -1,46 +1,39 @@
+import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { Engine, usageGate } from "./engine";
-import { configAt, root, optionalJSON, QualificationSchema } from "./config";
+import { configAt, root, optionalJSON, QualificationSchema, type Ticket } from "./config";
 import { Store } from "../tracking/store";
 import {
   workerSpec,
-  sessionEvent,
+  WorkerAccounting,
   verifySubscription,
 } from "../adapters/workers";
 import { command } from "../adapters/github";
-export async function runWorker(id: string) {
-  const c = await configAt(),
-    s = new Store(join(root, "controller.sqlite")),
-    e = new Engine(s, c);
+export function claimSupervisor(e: Engine, id: string) {
   // BEGIN IMMEDIATE waits for the launch reservation to commit before reading it.
-  const x = s.atomic(() => {
+  return e.s.atomic(() => {
     const current = e.sessions().find((x) => x.id === id);
     if (!current || current.status !== "starting") return null;
-    if (s.db.query("UPDATE sessions SET pid=? WHERE id=? AND status='starting' AND pid IS NULL")
+    if (e.s.db.query("UPDATE sessions SET pid=? WHERE id=? AND status='starting' AND pid IS NULL")
       .run(process.pid, id).changes !== 1) return null;
-    s.set(`supervisor:${id}`, processIdentity(process.pid));
+    e.s.set(`supervisor:${id}`, processIdentity(process.pid));
     return current;
   });
-  if (!x) {
-    s.close();
-    return;
-  }
-  const t = JSON.parse(x.brief),
-    start = Date.now();
-  let child: ReturnType<typeof Bun.spawn> | undefined;
-  let timer: ReturnType<typeof setInterval> | undefined;
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  let fd: number | undefined;
-  let halt: (() => void) | undefined;
+}
+export async function runWorker(id: string) {
+  const c = await configAt(), s = new Store(join(root, "controller.sqlite")), e = new Engine(s, c);
+  const x = claimSupervisor(e, id);
+  if (!x) { s.close(); return; }
+  const t = JSON.parse(x.brief) as Ticket;
   try {
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;
     const q = QualificationSchema.parse(qs?.[t.provider]);
     if (
-      q.expiresAt <= start ||
+      q.expiresAt <= Date.now() ||
       q.model !== t.model ||
       q.effort !== t.effort ||
       s.get("paused") !== false
@@ -73,24 +66,45 @@ export async function runWorker(id: string) {
       { id, workspace },
       `Preserve work, then archive workspace ${workspace} and branch after custody transfer`,
     );
+    await superviseSession(e, id, t, workspace, join(root, `worker-${id}.jsonl`));
+  } catch (error) {
+    e.finish(id, false);
+    s.event(`failure:${id}`, "worker-failure", {error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
+  } finally {
+    s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
+    s.close();
+  }
+}
+// Shared execution path for admitted workers and owner-run disposable rehearsals.
+// This function does not admit work or create qualification evidence.
+export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string) {
+  e.s.atomic(() => {
+    const session = e.sessions().find(x => x.id === id);
+    if (!session || session.pid !== process.pid || session.status !== "starting" || e.s.get("paused") !== false)
+      throw Error("owned starting supervisor required");
+    if (!e.s.event(`native-start:${id}`, "native-start-attempt", {id}, "Never replay this native start; reconcile retained custody"))
+      throw Error("native start already attempted");
+  });
+  const start = Date.now();
+  let child: ReturnType<typeof spawnWorker> | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let fd: number | undefined;
+  let halt: (() => void) | undefined;
+  try {
     const spec = workerSpec(t, workspace);
-    fd = openSync(join(root, `worker-${id}.jsonl`), "ax", 0o600);
-    child = Bun.spawn(spec.argv, {
-      cwd: workspace,
-      env: spec.env,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: fd,
-    });
+    fd = openSync(logPath, "ax", 0o600);
+    child = spawnWorker(spec, workspace, fd);
+    e.s.event(`native-process:${id}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
     e.register(id, process.pid, spec.nativeId ?? null);
     let stop = false,
       totalTokens = 0,
       completed = false;
+    const accounting = new WorkerAccounting();
+    let stopping: Promise<void> | undefined;
     halt = () => {
       if (stop) return;
       stop = true;
-      child?.kill("SIGTERM");
-      killTimer = setTimeout(() => child?.kill("SIGKILL"), 3000);
+      stopping = child!.stop();
     };
     process.on("SIGTERM", halt);
     process.on("SIGINT", halt);
@@ -98,14 +112,14 @@ export async function runWorker(id: string) {
       e.account(id, (Date.now() - start) / 1000, totalTokens);
       const state = e.sessions().find((a) => a.id === id);
       if (
-        s.get("paused") !== false ||
-        s.get(`stop:${id}`) ||
+        e.s.get("paused") !== false ||
+        e.s.get(`stop:${id}`) ||
         state?.status === "paused"
       )
         halt!();
     }, 500);
     let pending = "";
-    for await (const chunk of child.stdout as ReadableStream<Uint8Array>) {
+    for await (const chunk of child.stdout) {
       const text = new TextDecoder().decode(chunk);
       writeSync(fd, text);
       pending += text;
@@ -113,9 +127,9 @@ export async function runWorker(id: string) {
       while ((end = pending.indexOf("\n")) >= 0) {
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
-        const event = sessionEvent(t.provider, line);
+        const event = accounting.ingest(t.provider, line);
         if (event.native) e.register(id, process.pid, event.native);
-        if (event.tokens !== undefined) totalTokens += event.tokens;
+        if (event.tokens !== undefined) totalTokens = event.tokens;
         if (event.done) completed = true;
         e.account(id, (Date.now() - start) / 1000, totalTokens);
         if (e.sessions().find((x) => x.id === id)?.status === "paused") halt();
@@ -123,39 +137,24 @@ export async function runWorker(id: string) {
     }
     const code = await child.exited;
     clearInterval(timer);
-    if (killTimer) clearTimeout(killTimer);
+    if (stopping) await stopping;
     closeSync(fd);
     fd = undefined;
     if (stop)
-      s.db.query("UPDATE sessions SET status='paused' WHERE id=?").run(id);
+      e.s.db.query("UPDATE sessions SET status='paused' WHERE id=?").run(id);
     else e.finish(id, code === 0 && completed);
-  } catch (error) {
-    e.finish(id, false);
-    s.event(
-      `failure:${id}`,
-      "worker-failure",
-      { error: String(error) },
-      "Reconcile preserved work and native session; never blindly retry",
-    );
   } finally {
     if (timer) clearInterval(timer);
-    if (killTimer) clearTimeout(killTimer);
     if (halt) {
       process.off("SIGTERM", halt);
       process.off("SIGINT", halt);
     }
     if (fd !== undefined) closeSync(fd);
     if (child) {
-      child.kill("SIGTERM");
-      const finalKill = setTimeout(() => child?.kill("SIGKILL"), 3000);
-      try {
-        await child.exited;
-      } finally {
-        clearTimeout(finalKill);
-      }
+      await child.stop();
+      await child.exited;
     }
-    s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
-    s.close();
+    e.s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
   }
 }
 if (import.meta.main) await runWorker(process.argv[2]);

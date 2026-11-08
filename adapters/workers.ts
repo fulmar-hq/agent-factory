@@ -51,6 +51,12 @@ export function workerSpec(
     argv: [
       "claude",
       mode === "background" ? "--bg" : "-p",
+      "--setting-sources",
+      "",
+      "--strict-mcp-config",
+      "--no-chrome",
+      "--permission-prompts",
+      "none",
       "--model",
       model,
       "--effort",
@@ -58,7 +64,7 @@ export function workerSpec(
       "--session-id",
       nativeId,
       ...(mode === "print"
-        ? ["--output-format", "stream-json", "--verbose"]
+        ? ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
         : ["--name", `factory-${t.number}`]),
       prompt,
     ],
@@ -84,7 +90,8 @@ export function sessionEvent(
       if (x.type === "result")
         return {
           native: x.session_id,
-          tokens: (x.usage?.input_tokens ?? 0) + (x.usage?.output_tokens ?? 0),
+          tokens: (x.usage?.input_tokens ?? 0) + (x.usage?.output_tokens ?? 0) +
+            (x.usage?.cache_read_input_tokens ?? 0) + (x.usage?.cache_creation_input_tokens ?? 0),
           done: true,
         };
     }
@@ -133,5 +140,33 @@ export async function verifySubscription(provider: string) {
       throw Error("subscription sign-in unverified; no key fallback");
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Native cumulative counters only; never estimate tokens from characters or time.
+export class WorkerAccounting {
+  tokens = 0;
+  private messages = new Map<string, number>();
+  private current = "";
+  private input = 0;
+  ingest(provider: string, line: string) {
+    const receipt = sessionEvent(provider, line);
+    if (provider === "claude") {
+      try {
+        const x = JSON.parse(line);
+        const event = x.type === "stream_event" ? x.event : null;
+        if (event?.type === "message_start" && event.message?.id) {
+          this.current = event.message.id;
+          const u = event.message.usage ?? {};
+          this.input = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          this.messages.set(this.current, this.input + (u.output_tokens ?? 0));
+        }
+        if (event?.type === "message_delta" && this.current && event.usage?.output_tokens !== undefined)
+          this.messages.set(this.current, this.input + event.usage.output_tokens);
+        this.tokens = Math.max(this.tokens, [...this.messages.values()].reduce((a, b) => a + b, 0));
+      } catch {}
+    }
+    if (receipt.tokens !== undefined) this.tokens = Math.max(this.tokens, receipt.tokens);
+    return { ...receipt, tokens: this.tokens };
   }
 }

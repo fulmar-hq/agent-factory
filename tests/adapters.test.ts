@@ -54,7 +54,13 @@ test("worker adapters pin requested native model and effort without key fallback
     Object.keys(c.env).some((x) => /API_KEY|TOKEN|BEDROCK|FACTORY/.test(x)),
   ).toBe(false);
   const t = { ...ticket(), provider: "claude" as const, model: "opus-5.5" };
-  expect(workerSpec(t, "/synthetic").argv).toContain("-p");
+  const print = workerSpec(t, "/synthetic").argv;
+  expect(print).toContain("-p");
+  expect(print).toContain("--include-partial-messages");
+  expect(print.slice(print.indexOf("--setting-sources"), print.indexOf("--setting-sources")+2)).toEqual(["--setting-sources", ""]);
+  expect(print).toContain("--strict-mcp-config");
+  expect(print).toContain("--no-chrome");
+  expect(print.slice(print.indexOf("--permission-prompts"), print.indexOf("--permission-prompts")+2)).toEqual(["--permission-prompts", "none"]);
   const b = workerSpec(t, "/synthetic", "background");
   expect(b.argv).toContain("--bg");
   expect(b.argv).toContain("opus");

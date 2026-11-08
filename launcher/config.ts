@@ -96,12 +96,15 @@ export const QualificationSchema = z.object({
   policyIsolation: z.literal(true),
   liveAccounting: z.literal(true),
   stopVerified: z.literal(true),
-  phoneVerified: z.literal(true),
+  phoneVerified: z.boolean(),
+  waiver: z.object({ phone: z.literal("deferred") }).strict().optional(),
   version: z.string().min(1),
   model: z.string().min(1),
   effort: role.shape.effort,
   expiresAt: z.number().int().positive(),
   evidence: z.string().min(1),
+}).refine((q) => q.phoneVerified || q.waiver?.phone === "deferred", {
+  message: "phone verification or explicit phone: deferred waiver required",
 });
 export type Qualification = z.infer<typeof QualificationSchema>;
 export const root = resolve(
