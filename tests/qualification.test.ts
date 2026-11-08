@@ -49,7 +49,7 @@ test("stream token overrun pauses the shared supervisor before any final receipt
   const { superviseSession,claimSupervisor }=await import("../launcher/worker");
   const dir=mkdtempSync(join(tmpdir(),"factory-stream-")), s=new Store(join(dir,"state.sqlite")), e=new Engine(s,config());
   const oldPath=process.env.PATH;
-  writeFileSync(join(dir,"claude"),`#!/bin/sh\necho '{"type":"system","session_id":"synthetic"}'\necho '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m","usage":{"input_tokens":100}}}}'\nexec sleep 60\n`,{mode:0o700});
+  writeFileSync(join(dir,"claude"),`#!/bin/sh\necho '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m","usage":{"input_tokens":100}}}}'\nexec sleep 60\n`,{mode:0o700});
   process.env.PATH=dir+":"+oldPath;
   const t={...ticket(),provider:"claude" as const,model:"opus",effort:"medium" as const,estimateTokens:30};
   // Deliberate synthetic session, independent of production admission or credentials.

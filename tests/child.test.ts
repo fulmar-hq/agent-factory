@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnWorker } from "../launcher/child";
 
-test("stop kills a TERM-ignoring descendant after its parent has exited", async () => {
+for(const detached of [false,true]) test(`stop kills a TERM-ignoring descendant in ${detached ? "a separate" : "the parent"} group after its parent exits`, async () => {
   const dir=mkdtempSync(join(tmpdir(),"factory-group-")), fd=openSync(join(dir,"err"),"w");
   const script = `const fs=require('node:fs'); const {spawn}=require('node:child_process');
-    const child=spawn(process.execPath,['-e',\`process.on('SIGTERM',()=>{});setInterval(()=>{},100)\`],{stdio:'ignore'});
+    const child=spawn(process.execPath,['-e',\`process.on('SIGTERM',()=>{});setInterval(()=>{},100)\`],{stdio:'ignore',detached:${detached}});
     fs.writeFileSync('pids',String(child.pid));
     process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},100);`;
   const p=spawnWorker({argv:[process.execPath,"-e",script],env:{PATH:process.env.PATH!}},dir,fd);

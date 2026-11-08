@@ -48,7 +48,9 @@ test("worker adapters pin requested native model and effort without key fallback
   const c = workerSpec(ticket(), "/synthetic");
   expect(c.argv).toContain("gpt-6.1-sol");
   expect(c.argv).toContain("model_reasoning_effort=medium");
-  expect(c.argv).toContain("workspace-write");
+  expect(c.argv).toContain('default_permissions="factory"');
+  expect(c.argv).toContain('permissions.factory.filesystem={ ":minimal"="read", ":workspace_roots"="write", "/tmp"="read", ":tmpdir"="read", "/Library/Developer"="read", "/opt/homebrew"="read" }');
+  expect(c.env.SSH_AUTH_SOCK).toBeUndefined();
   expect(c.argv).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   expect(
     Object.keys(c.env).some((x) => /API_KEY|TOKEN|BEDROCK|FACTORY/.test(x)),
@@ -63,7 +65,11 @@ test("worker adapters pin requested native model and effort without key fallback
   expect(print.slice(print.indexOf("--permission-prompts"), print.indexOf("--permission-prompts")+2)).toEqual(["--permission-prompts", "none"]);
   const b = workerSpec(t, "/synthetic", "background");
   expect(b.argv).toContain("--bg");
-  expect(b.argv).toContain("opus");
+  expect(b.argv).toContain("claude-opus-5-5");
+  expect(b.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL).toBe("1");
+  const settings=JSON.parse(print[print.indexOf("--settings")+1]);
+  expect(settings.sandbox).toMatchObject({enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,excludedCommands:[]});
+  expect(print).toContain("--restricted");
   expect(b.argv).toContain("medium");
   expect(b.nativeId).toBeTruthy();
 });
