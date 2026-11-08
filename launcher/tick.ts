@@ -1,17 +1,35 @@
 import { join } from "node:path";
-import { Engine } from "./engine";
+import { Engine, type Admission } from "./engine";
 import {
   configAt,
   root,
   inputs,
   optionalJSON,
   type Qualification,
+  type Ticket,
 } from "./config";
 import { Store } from "../tracking/store";
 import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
-import { reconcile, command, markBuilding } from "../adapters/github";
+import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
+export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
+  await validateIntake(t, execute);
+  // No await between fresh validation and the atomic reservation/spawn attempt.
+  const session = e.s.atomic(() => {
+    const session = e.admit(t, { ...a, now: clock() });
+    if (!e.claimStart(session.id)) throw Error("start refused");
+    spawn(session.id);
+    return session;
+  });
+  // Once spawned, a label failure must never roll back custody or retry work.
+  try {
+    await setBuilding(t, e.s, execute);
+  } catch (error) {
+    e.s.event(`label-failure:${session.id}`, "github-state-failure", { error: String(error) }, "Reconcile labels; retain the stable launch claim.");
+  }
+  return session;
+}
 export async function tick(dir = root) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite"));
@@ -62,17 +80,14 @@ export async function tick(dir = root) {
           await verifySubscription(t.provider);
           verified.add(t.provider);
         }
-        const session = e.admit(t, {
+        const session = await launchReady(e, t, {
           now: Date.now(),
           meter: r[t.provider],
           billing: r.billing,
           qualification: qualifications[t.provider],
-        });
-        // Claim is durable BEFORE spawn. Crash here sacrifices liveness, never uniqueness.
-        if (e.claimStart(session.id)) {
-          await markBuilding(t, s);
+        }, (id) => {
           const p = Bun.spawn(
-            [process.execPath, join(import.meta.dir, "worker.ts"), session.id],
+            [process.execPath, join(import.meta.dir, "worker.ts"), id],
             {
               env: { ...process.env, FACTORY_PRIVATE_DIR: dir },
               stdin: "ignore",
@@ -81,7 +96,7 @@ export async function tick(dir = root) {
             },
           );
           p.unref();
-        }
+        });
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
           .run("claimed", session.ticket);
@@ -91,9 +106,11 @@ export async function tick(dir = root) {
           .run(String(error), `${t.repo}#${t.number}`);
       }
     }
-    s.set("heartbeat", { at: Date.now(), status: "ok", ready: ready.length });
+    const heartbeat = { at: Date.now(), status: "ok", ready: ready.length };
+    s.set("heartbeat", heartbeat);
+    return heartbeat;
   } finally {
     s.close();
   }
 }
-if (import.meta.main) await tick();
+if (import.meta.main) console.info(JSON.stringify(await tick()));

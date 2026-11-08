@@ -1,3 +1,4 @@
+import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
 import {
@@ -59,6 +60,7 @@ export function usageGate(raw: unknown, high: boolean, now: number, c: Config) {
 function claimPath(path: string): string {
   if (
     path.startsWith("/") ||
+    /[^\x20-\x7e]/.test(path) ||
     /[\\\x00-\x1f*?\[\]{}:]/.test(path) ||
     path.split("/").some((x) => x === ".." || x === "")
   )
@@ -205,6 +207,7 @@ export class Engine {
     });
   }
   register(id: string, pid: number, native: string | null) {
+    this.s.set(`supervisor:${id}`, processIdentity(pid));
     this.s.db
       .query(
         "UPDATE sessions SET status='running',pid=?,native_id=COALESCE(?,native_id) WHERE id=? AND status IN ('starting','running')",
@@ -292,9 +295,13 @@ export class Engine {
       if (x.pid !== null) {
         try {
           process.kill(x.pid, 0);
-          blocked("supervisor still alive");
+          const recorded = this.s.get<string>(`supervisor:${id}`);
+          const current = processIdentity(x.pid);
+          // Legacy records lack identity: require reconciliation without guessing.
+          if (current && (!recorded || recorded === current))
+            blocked("supervisor still alive");
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          if (!["ESRCH", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
         }
       }
       this.s.db

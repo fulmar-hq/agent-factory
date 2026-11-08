@@ -132,7 +132,7 @@ export async function reconcile(
   return ready;
 }
 
-export async function markBuilding(t: Ticket, s: Store, execute = command) {
+export async function validateIntake(t: Ticket, execute = command) {
   const current = JSON.parse(
     await execute([
       "gh",
@@ -148,6 +148,14 @@ export async function markBuilding(t: Ticket, s: Store, execute = command) {
   const approved = issueTicket(t.repo, current);
   if (!approved || JSON.stringify(approved) !== JSON.stringify(t))
     throw Error("approved intake changed before launch");
+}
+
+export async function markBuilding(t: Ticket, s: Store, execute = command) {
+  await validateIntake(t, execute);
+  await setBuilding(t, s, execute);
+}
+
+export async function setBuilding(t: Ticket, s: Store, execute = command) {
   await execute([
     "gh",
     "issue",

@@ -1,3 +1,4 @@
+import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { Engine, usageGate } from "./engine";
@@ -13,20 +14,16 @@ export async function runWorker(id: string) {
   const c = await configAt(),
     s = new Store(join(root, "controller.sqlite")),
     e = new Engine(s, c);
-  const x = e.sessions().find((x) => x.id === id);
-  // Atomic supervisor custody: two supervisor processes cannot both start the same reservation.
-  if (
-    !x ||
-    x.status !== "starting" ||
-    !s.atomic(
-      () =>
-        s.db
-          .query(
-            "UPDATE sessions SET pid=? WHERE id=? AND status='starting' AND pid IS NULL",
-          )
-          .run(process.pid, id).changes === 1,
-    )
-  ) {
+  // BEGIN IMMEDIATE waits for the launch reservation to commit before reading it.
+  const x = s.atomic(() => {
+    const current = e.sessions().find((x) => x.id === id);
+    if (!current || current.status !== "starting") return null;
+    if (s.db.query("UPDATE sessions SET pid=? WHERE id=? AND status='starting' AND pid IS NULL")
+      .run(process.pid, id).changes !== 1) return null;
+    s.set(`supervisor:${id}`, processIdentity(process.pid));
+    return current;
+  });
+  if (!x) {
     s.close();
     return;
   }
