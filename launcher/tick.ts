@@ -113,4 +113,18 @@ export async function tick(dir = root) {
     s.close();
   }
 }
-if (import.meta.main) console.info(JSON.stringify(await tick()));
+// launchd routes stdout to tick.log; exactly one summary for success or error.
+export async function tickSummary(run = () => tick(), emit = console.info) {
+  try {
+    const result = await run();
+    emit(JSON.stringify(result));
+    return result;
+  } catch (error) {
+    emit(JSON.stringify({ at: Date.now(), status: "error", error: String(error) }));
+    throw error;
+  }
+}
+if (import.meta.main) {
+  try { await tickSummary(); }
+  catch (error) { console.error(String(error)); process.exitCode = 1; }
+}
