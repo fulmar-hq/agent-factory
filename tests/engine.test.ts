@@ -224,12 +224,17 @@ test("1.8 checkpoint, 2x time pause, immutable baseline and one question", () =>
   expect(e.claimStart(x.id)).toBe(false);
   e.s.close();
 });
-test("exact token budget pauses independently before twice the estimate", () => {
+test("tokens checkpoint at 1.8 and stop at twice the estimate", () => {
   const e = setup(),
     x = e.admit(ticket(), admission());
   e.account(x.id, 1, 999);
   expect(e.sessions()[0].status).toBe("reserved");
   e.account(x.id, 1, 1000);
+  expect(e.sessions()[0].status).toBe("reserved");
+  e.account(x.id, 1, 1800);
+  expect(e.sessions()[0].checkpoint).toBe(1);
+  expect(e.sessions()[0].status).toBe("reserved");
+  e.account(x.id, 1, 2000);
   expect(e.sessions()[0].status).toBe("paused");
   expect(() => e.account(x.id, NaN, -1)).toThrow();
   e.s.close();

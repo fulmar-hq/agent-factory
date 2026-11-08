@@ -1,3 +1,4 @@
+import { prepareDelivery, deliveryBroker } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
@@ -51,7 +52,8 @@ export async function runWorker(id: string) {
     if (!source) throw Error("workspace missing");
     const workspace = join(root, "workspaces", id);
     mkdirSync(join(root, "workspaces"), { recursive: true, mode: 0o700 });
-    await command([
+    const continuation = s.get<{attempt:string;native:string}>(`continuation:${id}`);
+    if (!continuation) await command([
       "git",
       "-C",
       source,
@@ -68,7 +70,21 @@ export async function runWorker(id: string) {
       { id, workspace },
       `Preserve work, then archive workspace ${workspace} and branch after custody transfer`,
     );
-    await superviseSession(e, id, t, workspace, join(root, `worker-${id}.jsonl`));
+    const delivery = t.provider === "codex" && t.repo === "fulmar-hq/alido";
+    const attempt = continuation?.attempt ?? "initial";
+    const archive = join(root,"runs","delivery",id,attempt);
+    let broker: Awaited<ReturnType<typeof deliveryBroker>> | undefined;
+    try {
+      if (delivery) {
+        const qualified=s.get<{expiresAt:number}>("delivery-qualified");
+        if(!qualified || qualified.expiresAt<=Date.now())throw Error("delivery policy unqualified");
+        await prepareDelivery(workspace,source,archive,id);
+        mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
+        const baseline = (await command(["git","-C",workspace,"rev-parse","HEAD"])).trim();
+        broker = await deliveryBroker(t,id,workspace,archive,baseline,data=>s.event(crypto.randomUUID(),"worker-delivery",{id,...data as object},"Retain signed branch and PR; use signed revert for accepted source"),command,source);
+      }
+      await superviseSession(e, id, t, workspace, join(root, `worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`), broker ? {socket:broker.socket,native:continuation?.native} : undefined);
+    } finally { broker?.close(); }
   } catch (error) {
     e.finish(id, false);
     s.event(`failure:${id}`, "worker-failure", {error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
@@ -79,15 +95,19 @@ export async function runWorker(id: string) {
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.
-export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string) {
+export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {socket:string; native?:string}) {
+  const continuation = e.s.get<{attempt:string;native:string}>(`continuation:${id}`);
+  const attempt = continuation?.attempt ?? id;
+  const original = e.sessions().find(x => x.id === id)!;
   e.s.atomic(() => {
     const session = e.sessions().find(x => x.id === id);
     if (!session || session.pid !== process.pid || session.status !== "starting" || e.s.get("paused") !== false)
       throw Error("owned starting supervisor required");
-    if (!e.s.event(`native-start:${id}`, "native-start-attempt", {id}, "Never replay this native start; reconcile retained custody"))
+    if (!e.s.event(`native-start:${attempt}`, "native-start-attempt", {id}, "Never replay this native start; reconcile retained custody"))
       throw Error("native start already attempted");
   });
   const start = Date.now();
+  e.s.set(`active-clock:${id}`,{at:start,seconds:original.actual_seconds});
   let child: ReturnType<typeof spawnWorker> | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let fd: number | undefined;
@@ -95,17 +115,17 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
   const onTerm = () => halt?.("SIGTERM"), onInt = () => halt?.("SIGINT");
   try {
     const settingsPath = logPath + ".settings.json";
-    const spec = materializeSettings(workerSpec(t, workspace), settingsPath);
-    if (spec.settings) e.s.event(`native-settings:${id}`, "native-settings", {id, path:settingsPath, settings:spec.settings}, "Retain the per-run settings with native receipts; requalify policy changes");
+    const spec = materializeSettings(workerSpec(t, workspace,"print",root,delivery), settingsPath);
+    if (spec.settings) e.s.event(`native-settings:${attempt}`, "native-settings", {id, path:settingsPath, settings:spec.settings}, "Retain the per-run settings with native receipts; requalify policy changes");
     fd = openSync(logPath, "ax", 0o600);
     child = spawnWorker(spec, workspace, fd);
-    e.s.event(`native-process:${id}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
+    e.s.event(`native-process:${attempt}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
     e.register(id, process.pid, spec.nativeId ?? null);
     let stop = false,
       totalTokens = 0,
       completed = false;
     const accounting = new WorkerAccounting();
-    let native: NativeReceipt | undefined = spec.nativeId ? new NativeReceipt(t.provider,spec.nativeId,workspace,spec.env.HOME,start) : undefined;
+    let native: NativeReceipt | undefined = spec.nativeId ? new NativeReceipt(t.provider,spec.nativeId,workspace,spec.env.HOME,original.started ?? start) : undefined;
     const checkStreamModel = () => {
       if (t.provider !== "claude") return;
       const selected = spec.argv[spec.argv.indexOf("--model") + 1];
@@ -125,12 +145,12 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
           if(evidence.conflict) {e.s.set(`stop:${id}`,{reason:"native model/effort conflict"});halt!();}
         }
       } catch(error) {e.s.set(`stop:${id}`,{reason:String(error)});halt!();}
-      e.account(id,(Date.now()-start)/1000,totalTokens);
+      e.account(id,original.actual_seconds+(Date.now()-start)/1000,totalTokens);
     };
     let stopping: Promise<void> | undefined;
     halt = (signal?: string) => {
       if (stop) return;
-      e.s.event(`halt:${id}`, "worker-halt", {id, signal:signal ?? null,
+      e.s.event(`halt:${attempt}`, "worker-halt", {id, signal:signal ?? null,
         reason:e.s.get(`stop:${id}`) ?? (e.s.get("paused") !== false ? "factory paused" : "worker stop"),
       }, "Reconcile stop evidence and preserved work before archiving custody");
       stop = true;
@@ -162,13 +182,14 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
         const event = accounting.ingest(t.provider, line);
         checkStreamModel();
         if (event.native) {
+          if(delivery?.native && event.native!==delivery.native)throw Error("continuation native ID changed");
           if(native && native.id!==event.native)throw Error("native ID changed");
-          native ??= new NativeReceipt(t.provider,event.native,workspace,spec.env.HOME,start);
+          native ??= new NativeReceipt(t.provider,event.native,workspace,spec.env.HOME,original.started ?? start);
           e.register(id, process.pid, event.native);
         }
         if (event.tokens !== undefined) totalTokens = event.tokens;
         if (event.done) completed = true;
-        e.account(id, (Date.now() - start) / 1000, totalTokens);
+        e.account(id, original.actual_seconds+(Date.now() - start) / 1000, totalTokens);
         if (e.sessions().find((x) => x.id === id)?.status === "paused") halt();
       }
     }
@@ -193,7 +214,8 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       if (child) {
         try { await child.stop(); }
         finally {
-          e.s.event(`cleanup:${id}`, "worker-cleanup", child.cleanup, "Retain process-group readback and native custody; never infer unobserved containment");
+          e.s.set(`cleanup-evidence:${id}`,child.cleanup);
+          e.s.event(`cleanup:${attempt}`, "worker-cleanup", child.cleanup, "Retain process-group readback and native custody; never infer unobserved containment");
           await child.exited;
         }
       }

@@ -102,7 +102,9 @@ export class Engine {
     });
   }
   admit(raw: unknown, a: Admission): Session {
-    const t = TicketSchema.parse(raw),
+    const original = TicketSchema.parse(raw);
+    const floor = this.s.get<number>(`token-calibration:${original.provider}`) ?? 0;
+    const t = { ...original, estimateTokens: Math.max(original.estimateTokens, floor) },
       id = eventId(t);
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
@@ -241,7 +243,7 @@ export class Engine {
       const t = JSON.parse(x.brief) as Ticket;
       const ratio = Math.max(
         x.actual_seconds / t.estimateSeconds,
-        x.actual_tokens / t.estimateTokens,
+        x.actual_tokens / (this.s.get<number>(`token-extension:${id}`) ?? t.estimateTokens),
       );
       if (ratio >= this.c.overrun.checkpoint_at) {
         this.s.db.query("UPDATE sessions SET checkpoint=1 WHERE id=?").run(id);
@@ -253,8 +255,7 @@ export class Engine {
           now,
         );
       }
-      const tokenBudgetReached = x.actual_tokens >= t.estimateTokens;
-      if (ratio >= this.c.overrun.pause_at || tokenBudgetReached) {
+      if (ratio >= this.c.overrun.pause_at) {
         this.s.db
           .query(
             "UPDATE sessions SET status='paused' WHERE id=? AND status NOT IN ('finished','archived')",
@@ -264,7 +265,7 @@ export class Engine {
           .query("INSERT OR IGNORE INTO questions VALUES(?,?,NULL,?)")
           .run(
             `overrun:${id}`,
-            tokenBudgetReached ? "Work reached its token budget. Close it or grant a bounded extension?" : "Work reached twice its time estimate. Close it or grant a bounded extension?",
+            "Work reached twice its time or token estimate. Close it or grant a bounded extension?",
             now,
           );
       }
@@ -286,6 +287,28 @@ export class Engine {
       { id, ok },
       "Preserve workspace and logs; failed/uncertain work is never automatically retried",
     );
+  }
+  continueSession(id: string, receipt: string, spawn: () => void) {
+    return this.s.atomic(() => {
+      const x = this.sessions().find(x => x.id === id);
+      if (!x || x.status !== "paused" || x.pid !== null || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
+      if (!receipt?.trim() || this.s.get("paused") !== false) blocked("receipt and unpaused factory required");
+      const cleanup = this.s.db.query("SELECT data FROM events WHERE id=?").get(`cleanup:${id}`) as {data:string}|null;
+      if (!cleanup || (this.s.get<{verified:boolean}>(`cleanup-evidence:${id}`) ?? JSON.parse(cleanup.data)).verified !== true) blocked("verified cleanup required");
+      const t = JSON.parse(x.brief) as Ticket;
+      const tokens = this.s.get<number>("token-calibration:codex");
+      if (!tokens || tokens <= t.estimateTokens || x.actual_tokens >= 2*tokens || x.actual_seconds >= 2*t.estimateSeconds) blocked("bounded calibrated extension required");
+      const attempt = randomUUID();
+      this.s.set(`token-extension:${id}`, tokens);
+      const previousStop=this.s.get(`stop:${id}`);
+      this.s.set(`stop:${id}`,null);
+      this.s.set(`active-clock:${id}`,{at:Date.now(),seconds:x.actual_seconds});
+      this.s.set(`continuation:${id}`, {attempt, native:x.native_id, receipt});
+      this.s.db.query("UPDATE sessions SET status='starting' WHERE id=?").run(id);
+      this.s.event(attempt, "session-continuation", {id, receipt, tokens, previous:x, previousStop}, "Stop session; preserve original baseline, accounting, native ID, claims and debits");
+      spawn();
+      return attempt;
+    });
   }
   archive(id: string, receipt: string, actor: string) {
     if (actor !== "owner") blocked("owner only");

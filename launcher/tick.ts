@@ -60,8 +60,10 @@ export async function tick(dir = root) {
     s.set("versions", versions);
     // Never replay starting/running/unknown records. The persistent claim retains custody.
     for (const x of e.active()) {
-      if (x.started && ["starting", "running"].includes(x.status))
-        e.account(x.id, (now - x.started) / 1000, x.actual_tokens, now);
+      if (x.started && ["starting", "running"].includes(x.status)) {
+        const clock=s.get<{at:number;seconds:number}>(`active-clock:${x.id}`);
+        e.account(x.id, clock ? clock.seconds+(now-clock.at)/1000 : (now-x.started)/1000, x.actual_tokens, now);
+      }
       const current = e.sessions().find((a) => a.id === x.id)!;
       if (current.status === "paused" || s.get("paused") === true)
         s.set(`stop:${x.id}`, {
