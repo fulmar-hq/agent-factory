@@ -12,3 +12,5 @@ wallet:
   other: {default_usd: 0}
 projects:
   demo: {repo: example/demo, owners: [builder], tests: bun test}
+
+ticket_budget_default: {estimate_tokens: 8000000, checkpoint_tokens: 14400000, pause_tokens: 16000000, estimate_minutes: 30, checkpoint_minutes: 54, pause_minutes: 60}

@@ -103,8 +103,17 @@ export class Engine {
   }
   admit(raw: unknown, a: Admission): Session {
     const original = TicketSchema.parse(raw);
-    const floor = this.s.get<number>(`token-calibration:${original.provider}`) ?? 0;
-    const t = { ...original, estimateTokens: Math.max(original.estimateTokens, floor) },
+    const defaults=this.c.ticket_budget_default;
+    const completed=this.sessions().filter(x=>x.status==="finished" && x.actual_tokens>0).filter(x=>{
+      const brief=JSON.parse(x.brief) as Ticket;
+      return brief.provider===original.provider && brief.repo===original.repo && brief.area===original.area && brief.kind===original.kind;
+    });
+    const meanSeconds=completed.length ? Math.ceil(completed.reduce((n,x)=>n+x.actual_seconds,0)/completed.length) : undefined;
+    const mean=completed.length ? Math.ceil(completed.reduce((n,x)=>n+x.actual_tokens,0)/completed.length) : undefined;
+    const floor = defaults ? mean ?? defaults.estimate_tokens : this.s.get<number>(`token-calibration:${original.provider}`) ?? 0;
+    const proposedTokens=defaults && original.estimateTokens===defaults.estimate_tokens ? 0 : original.estimateTokens;
+    const proposedSeconds=defaults && original.estimateSeconds===defaults.estimate_minutes*60 ? 0 : original.estimateSeconds;
+    const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) },
       id = eventId(t);
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
@@ -245,6 +254,8 @@ export class Engine {
         x.actual_seconds / t.estimateSeconds,
         x.actual_tokens / (this.s.get<number>(`token-extension:${id}`) ?? t.estimateTokens),
       );
+      const budget=this.budget(x);
+      this.s.set(`budget:${id}`,budget);
       if (ratio >= this.c.overrun.checkpoint_at) {
         this.s.db.query("UPDATE sessions SET checkpoint=1 WHERE id=?").run(id);
         this.s.event(
@@ -256,6 +267,7 @@ export class Engine {
         );
       }
       if (ratio >= this.c.overrun.pause_at) {
+        this.s.set(`stop:${id}`,{reason:"budget pause; next turn blocked",at:now,...budget});
         this.s.db
           .query(
             "UPDATE sessions SET status='paused' WHERE id=? AND status NOT IN ('finished','archived')",
@@ -270,6 +282,15 @@ export class Engine {
           );
       }
     });
+  }
+  budget(x:Session) {
+    const t=JSON.parse(x.brief) as Ticket;
+    const tokens=this.s.get<number>(`token-extension:${x.id}`) ?? t.estimateTokens;
+    return {estimateTokens:tokens,checkpointTokens:tokens*1.8,pauseTokens:tokens*2,
+      estimateSeconds:t.estimateSeconds,checkpointSeconds:t.estimateSeconds*1.8,pauseSeconds:t.estimateSeconds*2,
+      overshootTokens:Math.max(0,x.actual_tokens-tokens*2),overshootSeconds:Math.max(0,x.actual_seconds-t.estimateSeconds*2),
+      nextTurnBlocked:x.actual_tokens>=tokens*2 || x.actual_seconds>=t.estimateSeconds*2,
+      cachedTokens:this.s.get<number>(`cached-tokens:${x.id}`) ?? 0};
   }
   finish(id: string, ok: boolean) {
     const current = this.sessions().find(x => x.id === id);

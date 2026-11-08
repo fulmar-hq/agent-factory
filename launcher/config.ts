@@ -27,6 +27,11 @@ export const ConfigSchema = z.object({
     rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
   }).optional(),
   overrun: z.object({ checkpoint_at: z.literal(1.8), pause_at: z.literal(2) }),
+  ticket_budget_default: z.object({
+    estimate_tokens:z.literal(8000000), checkpoint_tokens:z.literal(14400000), pause_tokens:z.literal(16000000),
+    estimate_minutes:z.literal(30), checkpoint_minutes:z.literal(54), pause_minutes:z.literal(60),
+    rule:z.string().optional(),
+  }).optional(),
   capacity: z.object({
     start_parallel: z.number().int().positive(),
     heavy_test_slots: z.number().int().nonnegative(),
@@ -82,8 +87,8 @@ export const TicketSchema = z.object({
   test: z.string().min(1),
   approved: z.literal(true),
   benefit: z.enum(["normal", "high"]),
-  estimateSeconds: finite.positive().max(14400),
-  estimateTokens: finite.positive(),
+  estimateSeconds: finite.positive().max(14400).default(1800),
+  estimateTokens: finite.positive().default(8000000),
   paths: z.array(z.string().min(1)).min(1),
   spansBackendAndScreen: z.literal(false),
   heavy: z.boolean(),

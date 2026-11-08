@@ -231,6 +231,8 @@ export async function verifySubscription(provider: string) {
 // Streaming and transcript copies share message IDs; never add two sources together.
 export class WorkerAccounting {
   tokens = 0;
+  cachedTokens = 0;
+  private cache = new Map<string,number>();
   readonly models = new Set<string>();
   private messages = new Map<string, number>();
   private inputs = new Map<string, number>();
@@ -240,9 +242,13 @@ export class WorkerAccounting {
     try {
       const x = JSON.parse(line);
       if (provider === "codex" && x.type === "event_msg" && x.payload?.type === "token_count") {
+        const cached=x.payload.info?.total_token_usage?.cached_input_tokens;
+        if(Number.isSafeInteger(cached) && cached>=0)this.cachedTokens=Math.max(this.cachedTokens,cached);
         const n = x.payload.info?.total_token_usage?.total_tokens;
         if (Number.isSafeInteger(n) && n >= 0) this.tokens = Math.max(this.tokens, n);
       }
+      if(provider==="codex" && x.type==="turn.completed" && Number.isSafeInteger(x.usage?.cached_input_tokens))
+        this.cachedTokens=Math.max(this.cachedTokens,x.usage.cached_input_tokens);
       if (provider === "claude") {
         const event = x.type === "stream_event" ? x.event : null;
         const m = event?.type === "message_start" ? event.message : x.type === "assistant" ? x.message : null;
@@ -250,6 +256,11 @@ export class WorkerAccounting {
         if (x.type === "result" && x.modelUsage && typeof x.modelUsage === "object")
           for (const model of Object.keys(x.modelUsage)) this.models.add(model);
         if (m?.id && m.usage) {
+          const cached=(m.usage.cache_read_input_tokens ?? 0)+(m.usage.cache_creation_input_tokens ?? 0);
+          if(Number.isSafeInteger(cached) && cached>=0) {
+            this.cache.set(m.id,Math.max(this.cache.get(m.id) ?? 0,cached));
+            this.cachedTokens=Math.max(this.cachedTokens,[...this.cache.values()].reduce((a,b)=>a+b,0));
+          }
           if(event?.type === "message_start") this.current = m.id;
           const u = m.usage;
           const values = [u.input_tokens ?? 0,u.cache_read_input_tokens ?? 0,u.cache_creation_input_tokens ?? 0,u.output_tokens ?? 0];
