@@ -81,7 +81,7 @@ export async function runWorker(id: string) {
         await prepareDelivery(workspace,source,archive,id);
         mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
         const baseline = (await command(["git","-C",workspace,"rev-parse","HEAD"])).trim();
-        broker = await deliveryBroker(t,id,workspace,archive,baseline,data=>s.event(crypto.randomUUID(),"worker-delivery",{id,...data as object},"Retain signed branch and PR; use signed revert for accepted source"));
+        broker = await deliveryBroker(t,id,workspace,archive,baseline,data=>s.event(crypto.randomUUID(),"worker-delivery",{id,...data as object},"Retain signed branch and PR; use signed revert for accepted source"),command,source);
       }
       await superviseSession(e, id, t, workspace, join(root, `worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`), broker ? {socket:broker.socket,native:continuation?.native} : undefined);
     } finally { broker?.close(); }

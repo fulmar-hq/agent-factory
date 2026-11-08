@@ -61,11 +61,11 @@ export function deliveryRequest(raw:unknown) {
 // broker owns credentials and network; the sandbox gets only this Unix socket.
 // Import a bundle into a private controlled repo. Never run trusted Git against
 // worker-writable config/hooks, or accept a destination/ref/command from a worker.
-export async function deliveryBroker(t:Ticket, id:string, workspace:string, dir:string, baseline:string, log:(data:unknown)=>void, execute=command) {
+export async function deliveryBroker(t:Ticket, id:string, workspace:string, dir:string, baseline:string, log:(data:unknown)=>void, execute=command, trustedSource=workspace) {
   if (t.repo !== deliveryRepo) throw Error("delivery repository not admitted");
   const socket=join("/tmp",`factory-delivery-${id.slice(0,16)}-${crypto.randomUUID().slice(0,8)}.sock`);
   const bare=join(dir,"delivery.git");
-  if (!existsSync(bare)) await execute(["git","clone","--bare","--no-hardlinks",workspace,bare]);
+  if (!existsSync(bare)) await execute(["git","clone","--bare","--no-hardlinks",trustedSource,bare]);
   const branch=branchFor(id);
   let busy=false;
   const server=Bun.serve({unix:socket, async fetch(req) {
