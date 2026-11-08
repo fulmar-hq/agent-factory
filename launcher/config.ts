@@ -23,6 +23,9 @@ export const ConfigSchema = z.object({
     stop_at: z.literal(0.9),
     max_meter_age_minutes: finite.positive().max(15),
   }),
+  usage_windows: z.object({
+    rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
+  }).optional(),
   overrun: z.object({ checkpoint_at: z.literal(1.8), pause_at: z.literal(2) }),
   capacity: z.object({
     start_parallel: z.number().int().positive(),
@@ -49,8 +52,9 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 export const MeterSchema = z.object({
   observedAt: z.number().int().positive(),
+  nativeProvider: z.enum(["codex", "claude"]).optional(),
   windows: z
-    .array(z.object({ used: ratio, resetsAt: z.number().int().positive() }))
+    .array(z.object({ used: ratio, resetsAt: z.number().int().positive(), name: z.string().optional(), durationMinutes: z.number().positive().optional() }))
     .min(1),
   source: z.string().min(1),
 });

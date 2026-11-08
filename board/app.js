@@ -20,6 +20,7 @@ const words = {
     blocked: "Starts blocked",
     highOnly: "High benefit only",
     open: "Below 70%",
+    weeklyOnly: "weekly only",
     age: "minutes old",
     estimator: "Estimator vs mean",
     wallet: "Available wallet",
@@ -58,6 +59,7 @@ const words = {
     blocked: "Démarrages bloqués",
     highOnly: "Bénéfice élevé seulement",
     open: "Moins de 70 %",
+    weeklyOnly: "hebdomadaire seulement",
     age: "minutes écoulées",
     estimator: "Estimation / moyenne",
     wallet: "Budget disponible",
@@ -136,23 +138,20 @@ function render() {
   const cards = [];
   for (const provider of ["codex", "claude"]) {
     const m = data.usage[provider];
-    const fresh =
-      m &&
-      data.now - m.observedAt <= 900000 &&
-      m.observedAt <= data.now &&
-      m.windows.length >= 2 &&
-      m.windows.every((x) => x.resetsAt > data.now);
+    const status = data.usageAdmission[provider];
+    const weeklyOnly = m?.windows.length === 1 &&
+      (m.windows[0].name === "seven_day" || m.windows[0].durationMinutes === 10080);
     cards.push([
       provider + " " + t.usage,
       m
         ? m.windows.map((x) => Math.round(x.used * 100) + "%").join(" / ") +
-          (fresh ? " · " + (Math.max(...m.windows.map(x=>x.used)) >= .9 ? t.blocked : Math.max(...m.windows.map(x=>x.used)) >= .7 ? t.highOnly : t.open) : " · " + t.stale)
+          " · " + t[status] + (weeklyOnly ? " · " + t.weeklyOnly : "")
         : t.unknown + " · " + t.blocked,
       m
         ? Math.max(0,Math.floor((data.now-m.observedAt)/60000)) + " " + t.age + " · " + new Date(m.observedAt).toLocaleString(lang) +
           " · " +
-          m.windows
-            .map((x) => new Date(x.resetsAt).toLocaleString(lang))
+          m.source + " · " + m.windows
+            .map((x) => (x.name ?? "") + " " + new Date(x.resetsAt).toLocaleString(lang))
             .join(" / ")
         : data.qualifications[provider],
     ]);

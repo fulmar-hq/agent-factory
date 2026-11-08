@@ -11,7 +11,7 @@ import {
   optionalJSON,
   QualificationSchema,
 } from "../launcher/config";
-import { Engine } from "../launcher/engine";
+import { Engine, usageGate } from "../launcher/engine";
 import { available } from "../wallet/ledger";
 const same = (a: string, b: string) =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -131,6 +131,10 @@ export async function board(dir = root, port = 4318) {
           heartbeat: s.get("heartbeat"),
           versions: s.get("versions"),
           usage: r,
+          usageAdmission: Object.fromEntries((["codex", "claude"] as const).map(provider => {
+            try { usageGate(r[provider], false, now, c, provider); return [provider, "open"]; }
+            catch (error) { return [provider, String(error).includes("high benefit only") ? "highOnly" : String(error).includes("stale") ? "stale" : "blocked"]; }
+          })),
           estimator: {evaluation, source:s.get("estimate-history-source")},
           estimates: Object.fromEntries((s.rows("tickets") as {id:string;snapshot:string}[]).filter(row => JSON.parse(row.snapshot).state === "OPEN").map(row => {
             const i = JSON.parse(row.snapshot);

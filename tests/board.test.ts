@@ -80,3 +80,26 @@ test("board binds loopback, shows local data, rejects helper and cross-origin wr
     rmSync(dir, { recursive: true });
   }
 });
+
+test("board uses configured native gate and retains weekly-only provenance", async () => {
+  const dir=mkdtempSync(join(tmpdir(),"factory-board-usage-"));
+  const c={...config(), usage_windows:{rule:"gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"}};
+  writeFileSync(join(dir,"config.yaml"),JSON.stringify(c));
+  writeFileSync(join(dir,"owner-token"),"a".repeat(64));
+  const s=new Store(join(dir,"controller.sqlite")), at=Date.now();
+  const reading={observedAt:at,nativeProvider:"codex",source:"native Codex rate-limit receipt",windows:[{used:.06,resetsAt:at+86400000,name:"primary",durationMinutes:10080}]};
+  s.set("readings",{codex:reading});
+  const b=await board(dir,0), base=`http://127.0.0.1:${b.server.port}`;
+  try {
+    let state=await (await fetch(base+"/api/state")).json();
+    expect(state.usageAdmission).toEqual({codex:"open",claude:"blocked"});
+    expect(state.usage.codex).toEqual(reading);
+    s.set("readings",{codex:{...reading,observedAt:at-900001}});
+    state=await (await fetch(base+"/api/state")).json();
+    expect(state.usageAdmission.codex).toBe("stale");
+    s.set("readings",{codex:{...reading,windows:[{...reading.windows[0],used:.9}]}});
+    state=await (await fetch(base+"/api/state")).json();
+    expect(state.usageAdmission.codex).toBe("blocked");
+    expect(await (await fetch(base+"/app.js")).text()).toContain('weeklyOnly: "weekly only"');
+  } finally { b.close(); s.close(); rmSync(dir,{recursive:true}); }
+});
