@@ -13,6 +13,7 @@ import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
+import { qualificationAlerts } from "./alerts";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
   await validateIntake(t, execute);
   // No await between fresh validation and the atomic reservation/spawn attempt.
@@ -37,6 +38,8 @@ export async function tick(dir = root) {
     const e = new Engine(s, c),
       now = Date.now();
     s.set("heartbeat", { at: now, status: "reconciling" });
+    const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
+    qualificationAlerts(s, qualifications, now);
     const versions: Record<string, string> = { bun: Bun.version };
     for (const cmd of ["codex", "claude", "gh"])
       try {
@@ -65,9 +68,6 @@ export async function tick(dir = root) {
     }
     s.set("readings", r);
     observeBilling(s, c, r.billing, now);
-    const qualifications = ((await optionalJSON(
-      join(dir, "qualifications.json"),
-    )) ?? {}) as Record<string, Qualification>;
     const verified = new Set<string>();
     const installations = ((await optionalJSON(
       join(dir, "repositories.json"),

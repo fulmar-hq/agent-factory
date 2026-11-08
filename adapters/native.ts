@@ -69,7 +69,7 @@ export class NativeReceipt {
     } finally {closeSync(fd);}
   }
   evidence(model:string, effort:string) {
-    const expected=this.provider==="claude" && model==="opus-5.5" ? "claude-opus-5-5" : model;
+    const expected=this.provider==="claude" && ["opus", "opus-5.5"].includes(model) ? "claude-opus-5-5" : model;
     const models=[...this.models],efforts=[...this.efforts];
     return {path:this.path,id:this.id,bound:this.bound,models,efforts,
       conflict:models.some(m=>m!==expected)||efforts.some(e=>e!==effort),

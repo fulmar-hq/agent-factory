@@ -1,18 +1,66 @@
-import type { Ticket } from "../launcher/config";
+import { root, type Ticket } from "../launcher/config";
+import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join, relative, isAbsolute, resolve } from "node:path";
 import { command } from "./github";
 export type WorkerSpec = {
   argv: string[];
   env: Record<string, string>;
   nativeId?: string;
+  settings?: ReturnType<typeof claudeSettings>;
 };
+// Deny every private asset except this run's worktree (normally nested under root).
+// Do not deny the ancestor itself: native deny rules take precedence over allows.
+export function privateDenyPaths(privateDir: string, workspace: string): string[] {
+  const canonical = (p: string) => existsSync(p) ? realpathSync(p) : resolve(p);
+  const base = canonical(privateDir), work = canonical(workspace);
+  if (base === work) throw Error("private root cannot be a worker workspace");
+  const tail = relative(base, work);
+  if (tail.startsWith("..") || isAbsolute(tail)) return [base];
+  const parts = tail.split("/");
+  const denied: string[] = [];
+  let parent = base;
+  for (const part of parts) {
+    for (const name of readdirSync(parent)) if (name !== part) denied.push(join(parent, name));
+    parent = join(parent, part);
+  }
+  return denied;
+}
+export function claudeSettings(workspace: string, privateDir = root) {
+  const denied = privateDenyPaths(privateDir, workspace);
+  return {
+    switchModelsOnFlag: false,
+    permissions: {
+      blockReadsOutsideWorkingDirectories: true,
+      blockWritesOutsideWorkingDirectories: true,
+      deny: [
+        ...denied.flatMap(p => [`Read(/${p}/**)`, `Edit(/${p}/**)`]),
+        "Edit(//tmp/**)", "Edit(//private/tmp/**)",
+      ],
+    },
+    sandbox: {
+      enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false, excludedCommands: [],
+      filesystem: { denyRead: [process.env.HOME ?? "/Users", ...denied], allowRead: [workspace], denyWrite: denied },
+    },
+  };
+}
+export function materializeSettings(spec: WorkerSpec, path: string) {
+  if (!spec.settings) return spec;
+  // New immutable run asset; never overwrite an earlier run's policy.
+  writeFileSync(path, JSON.stringify(spec.settings, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  const argv = [...spec.argv];
+  argv[argv.indexOf("--settings") + 1] = path;
+  return { ...spec, argv };
+}
 export function workerSpec(
   t: Ticket,
   workspace: string,
   mode: "print" | "background" = "print",
+  privateDir = root,
 ): WorkerSpec {
-  const selected = t.model ?? (t.provider === "codex" ? "gpt-6.1-sol" : "opus");
+  const selected = t.model ?? (t.provider === "codex" ? "gpt-6.1-sol" : "opus-5.5");
   const model =
-      t.provider === "claude" && selected === "opus-5.5" ? "claude-opus-5-5" : selected,
+      t.provider === "claude" && ["opus", "opus-5.5"].includes(selected) ? "claude-opus-5-5" : selected,
     effort = t.effort ?? "medium";
   const env: Record<string, string> = {};
   for (const key of [
@@ -51,10 +99,12 @@ export function workerSpec(
     };
   env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = "1";
   const nativeId = crypto.randomUUID();
+  const settings = claudeSettings(workspace, privateDir);
   return {
     argv: [
       "claude",
       mode === "background" ? "--bg" : "-p",
+      "--safe-mode",
       "--setting-sources",
       "",
       "--strict-mcp-config",
@@ -62,10 +112,7 @@ export function workerSpec(
       "--restricted",
       "--tools", "Bash,Read,Edit,Write,Glob,Grep",
       "--permission-mode", "acceptEdits",
-      "--settings", JSON.stringify({
-        permissions: {blockReadsOutsideWorkingDirectories:true},
-        sandbox: {enabled:true, failIfUnavailable:true, autoAllowBashIfSandboxed:true, allowUnsandboxedCommands:false, excludedCommands:[], filesystem:{denyRead:[env.HOME ?? "/Users"], allowRead:[workspace]}},
-      }),
+      "--settings", JSON.stringify(settings),
       "--permission-prompts",
       "none",
       "--model",
@@ -81,6 +128,7 @@ export function workerSpec(
     ],
     env,
     nativeId,
+    settings,
   };
 }
 export function sessionEvent(
@@ -103,7 +151,7 @@ export function sessionEvent(
           native: x.session_id,
           tokens: (x.usage?.input_tokens ?? 0) + (x.usage?.output_tokens ?? 0) +
             (x.usage?.cache_read_input_tokens ?? 0) + (x.usage?.cache_creation_input_tokens ?? 0),
-          done: true,
+          done: x.is_error === false && x.subtype === "success" && x.stop_reason !== "refusal",
         };
     }
   } catch {}
@@ -157,6 +205,7 @@ export async function verifySubscription(provider: string) {
 // Streaming and transcript copies share message IDs; never add two sources together.
 export class WorkerAccounting {
   tokens = 0;
+  readonly models = new Set<string>();
   private messages = new Map<string, number>();
   private inputs = new Map<string, number>();
   private current = "";
@@ -171,6 +220,9 @@ export class WorkerAccounting {
       if (provider === "claude") {
         const event = x.type === "stream_event" ? x.event : null;
         const m = event?.type === "message_start" ? event.message : x.type === "assistant" ? x.message : null;
+        if (typeof m?.model === "string") this.models.add(m.model);
+        if (x.type === "result" && x.modelUsage && typeof x.modelUsage === "object")
+          for (const model of Object.keys(x.modelUsage)) this.models.add(model);
         if (m?.id && m.usage) {
           if(event?.type === "message_start") this.current = m.id;
           const u = m.usage;

@@ -58,6 +58,7 @@ test("worker adapters pin requested native model and effort without key fallback
   const t = { ...ticket(), provider: "claude" as const, model: "opus-5.5" };
   const print = workerSpec(t, "/synthetic").argv;
   expect(print).toContain("-p");
+  expect(print).toContain("--safe-mode");
   expect(print).toContain("--include-partial-messages");
   expect(print.slice(print.indexOf("--setting-sources"), print.indexOf("--setting-sources")+2)).toEqual(["--setting-sources", ""]);
   expect(print).toContain("--strict-mcp-config");
@@ -91,6 +92,8 @@ test("native receipts capture actual IDs and usage; missing receipt never invent
     ).tokens,
   ).toBe(25);
   expect(sessionEvent("codex", "broken")).toEqual({});
+  expect(sessionEvent("claude", JSON.stringify({type:"result",is_error:true,subtype:"success",stop_reason:"refusal"})).done).toBe(false);
+  expect(sessionEvent("claude", JSON.stringify({type:"result",is_error:false,subtype:"success"})).done).toBe(true);
 });
 test("auth gate accepts subscription only and refuses key or third party routes", () => {
   expect(subscriptionStatus("codex", "Logged in using ChatGPT")).toBe(true);
