@@ -30,6 +30,7 @@ export function claudeSettings(workspace: string, privateDir = root) {
   return {
     switchModelsOnFlag: false,
     permissions: {
+      allow: ["Bash"],
       blockReadsOutsideWorkingDirectories: true,
       blockWritesOutsideWorkingDirectories: true,
       deny: [
