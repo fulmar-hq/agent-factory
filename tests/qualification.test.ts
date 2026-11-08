@@ -35,10 +35,10 @@ test("stream usage is live, monotonic and final receipts do not double count", (
 });
 test("each CLI tick emits one summary including errors", async () => {
   const lines:string[] = [];
-  await tickSummary(async()=>({at:1,status:"ok",ready:0}),line=>lines.push(line));
+  await tickSummary(async()=>({at:1,status:"ok",ready:1,paused:true,claimed:0,refusals:[{ticket:"example/demo#1",reason:"Error: usage window missing"}]}),line=>lines.push(line));
   await expect(tickSummary(async()=>{throw Error("unavailable")},line=>lines.push(line))).rejects.toThrow("unavailable");
   expect(lines).toHaveLength(2);
-  expect(JSON.parse(lines[0]).status).toBe("ok");
+  expect(JSON.parse(lines[0])).toMatchObject({status:"ok",paused:true,claimed:0,refusals:[{ticket:"example/demo#1",reason:"Error: usage window missing"}]});
   expect(JSON.parse(lines[1]).status).toBe("error");
 });
 
