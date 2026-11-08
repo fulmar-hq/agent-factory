@@ -83,6 +83,7 @@ export function workerSpec(
     let deliveryPrompt = "";
     if (delivery) {
       if (t.repo !== "fulmar-hq/alido" || !process.env.SSH_AUTH_SOCK) throw Error("qualified delivery agent required");
+      files["/System/Library/OpenSSL/openssl.cnf"]="read";
       files[join(workspace,".git")]="write";
       files[join(workspace,".factory-tmp")]="write";
       env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
@@ -97,7 +98,7 @@ export function workerSpec(
       }
       sockets.push(env.SSH_AUTH_SOCK,delivery.socket);
       for (const socket of sockets) files[socket]="write";
-      deliveryPrompt = `\nContinue preserved work. Git metadata and dependencies are local. Run the approved tests; make a signed commit. Then git bundle create .factory-delivery.bundle HEAD and POST JSON {"title":"...","body":"... refs #${t.number}; test receipts ..."} using curl --unix-socket ${delivery.socket} http://localhost/deliver . The delivery broker pushes only your branch to fulmar-hq/alido and opens a PR to QA. Direct network and gh credentials are unavailable. Do not merge or activate workflows. Use TMPDIR for scratch. Ignore .factory-tmp and .factory-delivery.bundle in git status; do not commit them.`;
+      deliveryPrompt = `\nContinue preserved work. Git metadata and dependencies are local. Run the approved tests; make a signed commit. If Bun package-script startup refuses the protected ancestor directory, use the same Vitest entrypoint directly: node node_modules/vitest/vitest.mjs run followed by the approved test paths; report the equivalent command and its actual result. Then git bundle create .factory-delivery.bundle HEAD and POST JSON {"title":"...","body":"... refs #${t.number}; test receipts ..."} using curl --unix-socket ${delivery.socket} http://localhost/deliver . The delivery broker pushes only your branch to fulmar-hq/alido and opens a PR to QA. Direct network and gh credentials are unavailable. Do not merge or activate workflows. Use TMPDIR for scratch. Ignore .factory-tmp and .factory-delivery.bundle in git status; do not commit them.`;
     }
     const filesystem = Object.entries(files).map(([p,a])=>`${JSON.stringify(p)}=${JSON.stringify(a)}`).join(", ");
     return {
