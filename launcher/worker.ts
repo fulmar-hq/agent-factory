@@ -10,6 +10,7 @@ import {
   workerSpec,
   WorkerAccounting,
   verifySubscription,
+  materializeSettings,
 } from "../adapters/workers";
 import { command } from "../adapters/github";
 export function claimSupervisor(e: Engine, id: string) {
@@ -92,7 +93,9 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
   let fd: number | undefined;
   let halt: (() => void) | undefined;
   try {
-    const spec = workerSpec(t, workspace);
+    const settingsPath = logPath + ".settings.json";
+    const spec = materializeSettings(workerSpec(t, workspace), settingsPath);
+    if (spec.settings) e.s.event(`native-settings:${id}`, "native-settings", {id, path:settingsPath, settings:spec.settings}, "Retain the per-run settings with native receipts; requalify policy changes");
     fd = openSync(logPath, "ax", 0o600);
     child = spawnWorker(spec, workspace, fd);
     e.s.event(`native-process:${id}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
@@ -102,10 +105,19 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       completed = false;
     const accounting = new WorkerAccounting();
     let native: NativeReceipt | undefined = spec.nativeId ? new NativeReceipt(t.provider,spec.nativeId,workspace,spec.env.HOME,start) : undefined;
+    const checkStreamModel = () => {
+      if (t.provider !== "claude") return;
+      const selected = spec.argv[spec.argv.indexOf("--model") + 1];
+      if ([...accounting.models].some(model => model !== selected)) {
+        e.s.set(`stop:${id}`, {reason:"native stream model conflict", models:[...accounting.models]});
+        halt!();
+      }
+    };
     const sample = () => {
       try {
         native?.poll(accounting);
         totalTokens=accounting.tokens;
+        checkStreamModel();
         if(native) {
           const evidence=native.evidence(t.model ?? (t.provider==="codex" ? "gpt-6.1-sol" : "opus"),t.effort ?? "medium");
           e.s.set(`native-evidence:${id}`,evidence);
@@ -119,6 +131,8 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       if (stop) return;
       stop = true;
       stopping = child!.stop();
+      // Cleanup is awaited below; attach a handler now while stdout is draining.
+      void stopping.catch(() => {});
     };
     process.on("SIGTERM", halt);
     process.on("SIGINT", halt);
@@ -142,6 +156,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
         const event = accounting.ingest(t.provider, line);
+        checkStreamModel();
         if (event.native) {
           if(native && native.id!==event.native)throw Error("native ID changed");
           native ??= new NativeReceipt(t.provider,event.native,workspace,spec.env.HOME,start);
@@ -170,11 +185,12 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
       process.off("SIGINT", halt);
     }
     if (fd !== undefined) closeSync(fd);
-    if (child) {
-      await child.stop();
-      await child.exited;
-    }
-    e.s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
+    try {
+      if (child) {
+        try { await child.stop(); }
+        finally { await child.exited; }
+      }
+    } finally { e.s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id); }
   }
 }
 if (import.meta.main) await runWorker(process.argv[2]);

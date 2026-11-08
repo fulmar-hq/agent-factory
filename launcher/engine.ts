@@ -251,7 +251,8 @@ export class Engine {
           now,
         );
       }
-      if (ratio >= this.c.overrun.pause_at) {
+      const tokenBudgetReached = x.actual_tokens >= t.estimateTokens;
+      if (ratio >= this.c.overrun.pause_at || tokenBudgetReached) {
         this.s.db
           .query(
             "UPDATE sessions SET status='paused' WHERE id=? AND status NOT IN ('finished','archived')",
@@ -261,7 +262,7 @@ export class Engine {
           .query("INSERT OR IGNORE INTO questions VALUES(?,?,NULL,?)")
           .run(
             `overrun:${id}`,
-            "Work reached twice its estimate. Close it or grant a bounded extension?",
+            tokenBudgetReached ? "Work reached its token budget. Close it or grant a bounded extension?" : "Work reached twice its time estimate. Close it or grant a bounded extension?",
             now,
           );
       }
