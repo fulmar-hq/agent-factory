@@ -1,7 +1,33 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync } from "node:fs";
+import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
+
+// Preserve and replace dependency links that still point to the source install.
+// Never widen filesystem reads to make a copied dependency layout work.
+export function localizeDependencies(workspace:string, source:string, archive:string) {
+  const deps=join(workspace,"node_modules"), installed=join(source,"node_modules");
+  const visit=(dir:string)=>{
+    for(const entry of readdirSync(dir,{withFileTypes:true})) {
+      const path=join(dir,entry.name);
+      if(entry.isSymbolicLink()) {
+        const target=readlinkSync(path);
+        if(!isAbsolute(target)) {
+          const tail=relative(deps,resolve(dirname(path),target));
+          if(tail.startsWith("..") || isAbsolute(tail))throw Error("dependency link escapes copied install");
+          continue;
+        }
+        const tail=relative(installed,target);
+        if(tail.startsWith("..") || isAbsolute(tail))throw Error("dependency link escapes installed dependencies");
+        const saved=join(archive,"dependency-links",relative(deps,path));
+        mkdirSync(dirname(saved),{recursive:true,mode:0o700});
+        renameSync(path,saved);
+        symlinkSync(relative(dirname(path),join(deps,tail)) || ".",path);
+      } else if(entry.isDirectory())visit(path);
+    }
+  };
+  visit(deps);
+}
 
 export const deliveryRepo = "fulmar-hq/alido";
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
@@ -25,6 +51,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     if (!existsSync(join(source,"node_modules"))) throw Error("installed dependencies missing");
     await command(process.platform === "darwin" ? ["cp","-cR",join(source,"node_modules"),join(workspace,"node_modules")] : ["cp","-R",join(source,"node_modules"),join(workspace,"node_modules")]);
   }
+  localizeDependencies(workspace,source,archive);
   const exclude=join(workspace,".git/info/exclude");
   const {appendFileSync}=await import("node:fs");
   appendFileSync(exclude,"\n.factory-tmp/\n.factory-delivery.bundle\n");

@@ -11,6 +11,7 @@ await git("init");
 await command(["cp","-R",join(import.meta.dir,"../node_modules"),join(work,"node_modules")]);
 for(const [k,v] of [["user.name","Vincent Messina"],["user.email","72951696+vincentmessina@users.noreply.github.com"],["gpg.format","ssh"],["user.signingkey",join(process.env.HOME!,".ssh/fisher_commit_signing_ed25519.pub")],["commit.gpgsign","true"]]) await git("config",k,v);
 writeFileSync(join(work,"fixture.test.ts"),'import {test,expect} from "bun:test"; import {z} from "zod"; test("dependencies execute",()=>expect(z.string().parse("fixture")).toBe("fixture"));');
+writeFileSync(join(work,"esm-probe.mjs"),'import {z} from "zod"; if(z.string().parse("fixture")!=="fixture")process.exit(1); console.log("NODE_ESM_PASS");');
 const socket=join("/tmp",`factory-probe-${Date.now()}.sock`);
 const server=Bun.serve({unix:socket,fetch:()=>new Response("scoped broker reachable")});
 const t={repo:"fulmar-hq/alido",number:1,area:"fixture",kind:"fixture",title:"Fictional qualification",owner:"product",creator:"fixture",source:"fixture",outcome:"fixture",test:"fixture",approved:true as const,benefit:"normal" as const,estimateSeconds:600,estimateTokens:9000000,paths:["fixture"],spansBackendAndScreen:false as const,heavy:false,wallet:"other" as const,costCents:0,provider:"codex" as const};
@@ -25,6 +26,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 bun --version
 node --version
+node esm-probe.mjs
 bun test fixture.test.ts
 echo NODE_MODULES_PASS
 echo SSH_AUTH_SOCK=$SSH_AUTH_SOCK
@@ -49,7 +51,7 @@ try {
  const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
  writeFileSync(join(dir,"probe.json"),JSON.stringify({out,err,code,argv:config,probe},null,2));
  console.log(JSON.stringify({dir,out,err,code}));
- if(code!==0 || !out.includes("NODE_MODULES_PASS") || !err.includes("1 pass") || !out.includes("ALL_BOUNDARIES_PASS"))throw Error("native delivery boundary qualification failed");
+ if(code!==0 || !out.includes("NODE_MODULES_PASS") || !out.includes("NODE_ESM_PASS") || !err.includes("1 pass") || !out.includes("ALL_BOUNDARIES_PASS"))throw Error("native delivery boundary qualification failed");
  await git("-c",`gpg.ssh.allowedSignersFile=${join(process.env.HOME!,".ssh/fisher_allowed_signers")}`,"verify-commit","HEAD");
  writeFileSync(join(dir,"qualified.json"),JSON.stringify({code:0,signed:true,receipt:join(dir,"probe.json"),at:Date.now()}));
  console.log("SIGNED_COMMIT_VERIFIED");

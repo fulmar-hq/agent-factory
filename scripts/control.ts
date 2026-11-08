@@ -1,3 +1,4 @@
+import { prepareDelivery } from "../adapters/delivery";
 import { calibrateTokens } from "../launcher/budgets";
 import { spawnSupervisor } from "../launcher/tick";
 import { join } from "node:path";
@@ -29,6 +30,18 @@ try {
       s.event(randomUUID(),"token-calibration",{...calibration,receipt},"Append a new owner calibration; preserve frozen original estimates");
     });
     console.log(JSON.stringify({...calibration,sources:calibration.sources.length}));
+  }
+  else if (action === "prepare-delivery") {
+    const [id,receipt]=args;
+    const x=e.sessions().find(x=>x.id===id);
+    if(!x || x.pid!==null || !["finished","paused"].includes(x.status) || !receipt)throw Error("stopped custody and receipt required");
+    const t=JSON.parse(x.brief);
+    if(t.repo!=="fulmar-hq/alido")throw Error("delivery repository refused");
+    const repos=await Bun.file(join(root,"repositories.json")).json();
+    const archive=join(root,"runs","delivery",id,randomUUID());
+    await prepareDelivery(join(root,"workspaces",id),repos[t.repo],archive,id);
+    s.event(randomUUID(),"delivery-workspace",{id,receipt,archive},"Archive replacement links and restore saved originals; preserve source edits and history");
+    console.log(archive);
   }
   else if (action === "qualify-delivery") {
     const evidence=await Bun.file(args[0]).json();
@@ -85,7 +98,7 @@ try {
     });
   } else
     throw Error(
-      "supported: calibrate-tokens DATES RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
+      "supported: prepare-delivery SESSION RECEIPT, qualify-delivery RECEIPT, calibrate-tokens TORONTO-DAY RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
     );
 } finally {
   s.close();

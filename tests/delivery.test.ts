@@ -66,10 +66,10 @@ test("broker fixes GitHub destination and QA base and refuses foreign changed pa
 });
 
 test("delivery setup preserves edits and isolates Git metadata and dependencies",async()=>{
- const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,realpathSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,realpathSync,symlinkSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {prepareDelivery,branchFor}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
  const dir=mkdtempSync(join(tmpdir(),"factory-worktree-")),source=join(dir,"source"),work=join(dir,"work"),id="d".repeat(64);
- mkdirSync(source);mkdirSync(join(source,"node_modules"));writeFileSync(join(source,"node_modules/fixture"),"original dependency");
+ mkdirSync(source);mkdirSync(join(source,"node_modules"));writeFileSync(join(source,"node_modules/fixture"),"original dependency");symlinkSync(join(source,"node_modules"),join(source,"node_modules/node_modules"));
  const git=(...args:string[])=>command(["git","-C",source,...args]);
  await git("init");await git("config","user.name","Fictional Owner");await git("config","user.email","fictional@example.invalid");
  writeFileSync(join(source,"fixture"),"base");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","fixture");
@@ -83,6 +83,7 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  expect(realpathSync(join(work,".git"))).toBe(join(realpathSync(work),".git"));
  writeFileSync(join(work,"node_modules/fixture"),"changed locally");
  expect(readFileSync(join(source,"node_modules/fixture"),"utf8")).toBe("original dependency");
+ expect(realpathSync(join(work,"node_modules/node_modules"))).toBe(realpathSync(join(work,"node_modules")));
  expect(readFileSync(join(dir,"archive/original-gitfile"),"utf8")).toContain("gitdir:");
 });
 
