@@ -23,7 +23,7 @@ test("generated per-run native policy protects private siblings without denying 
     expect(statSync(path).mode & 0o777).toBe(0o600);
     const policy = JSON.parse(readFileSync(path,"utf8"));
     expect(policy).toEqual(spec.settings);
-    expect(policy.permissions).toMatchObject({blockReadsOutsideWorkingDirectories:true,blockWritesOutsideWorkingDirectories:true});
+    expect(policy.permissions).toMatchObject({allow:["Bash"],blockReadsOutsideWorkingDirectories:true,blockWritesOutsideWorkingDirectories:true});
     expect(policy.permissions.deny).toContain(`Edit(/${realpathSync(dir)}/owner-token/**)`);
     expect(policy.sandbox.filesystem.denyWrite).toEqual(paths);
     expect(policy.switchModelsOnFlag).toBe(false);

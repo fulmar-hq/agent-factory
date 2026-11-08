@@ -32,6 +32,8 @@ Accounting is monotonic against the original baseline. The supervisor checks ela
 
 The original `estimateTokens` is a hard observed-token budget: reaching it pauses and stops the worker immediately, independently of the 2x elapsed-time rule. A first native usage event can already exceed that budget; the controller stops at the first observed crossing and cannot prevent unreported in-flight usage.
 
+The per-run native permission settings explicitly allow `Bash` so supervised sessions can run approved local commands without an unavailable approval prompt. Shell sandboxing remains required with unsandboxed commands forbidden; this allow rule is never a substitute for actual outside/private read/write denial evidence. Without the explicit rule, compound commands can be refused despite sandbox auto-allow settings.
+
 Termination records descendant process groups during execution, pins observed processes to their start identities, and sends TERM then KILL after three seconds even if the leader exits. This covers native tools that create separate groups and observed orphans. Processes that escape observation between samples still require execution-boundary containment proof. Missing process-table access fails cleanup rather than silently proving success. Failed or interrupted work keeps retained custody.
 
 Cleanup keeps collecting descendants while stopping, signals owned processes in groups it cannot own individually, and verifies that observed live processes disappear after KILL. Unreaped zombies are treated as exited. Survivors or process-table errors fail cleanup; they never produce a successful receipt.
