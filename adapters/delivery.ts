@@ -31,6 +31,23 @@ export function localizeDependencies(workspace:string, source:string, archive:st
 
 export const deliveryRepo = "fulmar-hq/alido";
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
+export async function deliveryBase(source:string, repo:string, execute=command) {
+  if(repo!==deliveryRepo)throw Error("delivery source refused");
+  const sha=(await execute(["gh","api",`repos/${repo}/git/ref/heads/QA`,"--jq",".object.sha"])).trim();
+  if(!/^[a-f0-9]{40}$/.test(sha))throw Error("current QA revision unknown");
+  // Fetch the immutable object, never reset a user's checkout or depend on the
+  // shared FETCH_HEAD, which another concurrent fetch could replace.
+  await execute(["git","-C",source,"-c","credential.helper=","-c","credential.https://github.com.helper=!gh auth git-credential","fetch","--no-tags",`https://github.com/${repo}.git`,sha]);
+  return sha;
+}
+// The intake test is an executable command, not acceptance prose. Keep the
+// approved command exact; owners must approve a new digest to change it.
+export function executableTest(test:string) {
+  if (!/^(?:[A-Z_][A-Z_0-9]*=(?:"[^"\n]*"|'[^'\n]*'|[^\s]+)\s+)*(?:bun|node|git|python3|test|\/[^\s]+)(?:\s|$)/.test(test.trim()))
+    throw Error("executable test command required; reapprove intake with acceptance prose in outcome");
+  return test;
+}
+export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c",executableTest(test)];
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
 export async function prepareDelivery(workspace:string, source:string, archive:string, id:string) {
@@ -124,7 +141,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   if((await git("status","--porcelain")).trim())throw Error("publisher checkout not clean");
   const tree=(await git("rev-parse","HEAD^{tree}")).trim();
   const tests=await authority.testTree(checkout,tree);
-  if(!tests.passed || tests.tree!==tree || (await git("rev-parse","HEAD^{tree}")).trim()!==tree || (await git("status","--porcelain")).trim())throw Error("exact tested tree required");
+  if(!tests.passed || tests.tree!==tree || (await git("rev-parse","HEAD^{tree}")).trim()!==tree || (await git("status","--porcelain")).trim())throw Error(`exact tested tree required; inspect ${join(dir,"tested-tree.json")}`);
   authority.verifyClaim();
   // Squash only the tested tree onto the authorized base. Only this launcher
   // command can contact the signing agent; no worker-supplied hooks or argv.
@@ -144,6 +161,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
 // Tests run in the worker boundary, never with launcher credentials. The caller
 // checks clean status and the tree again after this process exits.
 export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
+  executableTest(t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
     await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);
@@ -152,7 +170,7 @@ export async function testSnapshot(t:Ticket, checkout:string, tree:string, sourc
   mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
   const spec=workerSpec(t,checkout);
   const overrides=spec.argv.flatMap((a,i)=>a==="-c"?[a,spec.argv[i+1]]:[]);
-  const p=Bun.spawn(["codex","sandbox",...overrides,"-P","factory","-C",checkout,"/bin/sh","-c",t.test],{cwd:checkout,env:spec.env,stdout:"pipe",stderr:"pipe",stdin:"ignore"});
+  const p=Bun.spawn(["codex","sandbox",...overrides,"-P","factory","-C",checkout,...testShell(t.test)],{cwd:checkout,env:spec.env,stdout:"pipe",stderr:"pipe",stdin:"ignore"});
   const timer=setTimeout(()=>p.kill(),600000);
   try {
     const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);

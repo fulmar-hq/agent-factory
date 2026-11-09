@@ -1,4 +1,4 @@
-import { prepareDelivery, publish, testSnapshot } from "../adapters/delivery";
+import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
@@ -53,6 +53,9 @@ export async function runWorker(id: string) {
     const workspace = join(root, "workspaces", id);
     mkdirSync(join(root, "workspaces"), { recursive: true, mode: 0o700 });
     const continuation = s.get<{attempt:string;native:string}>(`continuation:${id}`);
+    const delivery = t.provider === "codex" && t.repo === "fulmar-hq/alido";
+    if (delivery) executableTest(t.test);
+    const base = !continuation && delivery ? await deliveryBase(source,t.repo) : "HEAD";
     if (!continuation) await command([
       "git",
       "-C",
@@ -62,7 +65,7 @@ export async function runWorker(id: string) {
       "-b",
       `feat/factory-${id.slice(0, 16)}`,
       workspace,
-      "HEAD",
+      base,
     ]);
     s.event(
       `workspace:${id}`,
@@ -70,7 +73,6 @@ export async function runWorker(id: string) {
       { id, workspace },
       `Preserve work, then archive workspace ${workspace} and branch after custody transfer`,
     );
-    const delivery = t.provider === "codex" && t.repo === "fulmar-hq/alido";
     const attempt = continuation?.attempt ?? "initial";
     const archive = join(root,"runs","delivery",id,attempt);
     if (delivery) {
@@ -94,7 +96,7 @@ export async function runWorker(id: string) {
     }
   } catch (error) {
     e.finish(id, false);
-    s.event(`failure:${id}`, "worker-failure", {error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
+    s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
   } finally {
     s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
     s.close();

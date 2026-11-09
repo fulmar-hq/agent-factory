@@ -135,8 +135,9 @@ export class Engine {
     const meanSeconds=completed.length ? Math.ceil(completed.reduce((n,x)=>n+x.actual_seconds,0)/completed.length) : undefined;
     const mean=completed.length ? Math.ceil(completed.reduce((n,x)=>n+x.actual_tokens,0)/completed.length) : undefined;
     const floor = defaults ? mean ?? defaults.estimate_tokens : this.s.get<number>(`token-calibration:${original.provider}`) ?? 0;
-    const proposedTokens=defaults && original.estimateTokens===defaults.estimate_tokens ? 0 : original.estimateTokens;
-    const proposedSeconds=defaults && original.estimateSeconds===defaults.estimate_minutes*60 ? 0 : original.estimateSeconds;
+    // Forecasts may raise a reservation, never silently shrink approved bounds.
+    const proposedTokens=original.estimateTokens;
+    const proposedSeconds=original.estimateSeconds;
     const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) };
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");

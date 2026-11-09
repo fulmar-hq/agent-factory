@@ -34,9 +34,16 @@ test('cached Codex inputs are reported separately and never added twice',()=>{
  expect(a.tokens).toBe(120);expect(a.cachedTokens).toBe(80);
 });
 
-test('new tickets replace defaults with the mean of completed comparable receipts',()=>{
+test('comparable receipts cannot shrink explicitly approved ticket budgets',()=>{
  const e=setup(),x=e.admit(ticket(),admission());e.claimStart(x.id);e.account(x.id,240,4000000);e.finish(x.id,true);
  const y=e.admit({...ticket(2),estimateTokens:8000000,estimateSeconds:1800},admission());
- expect(JSON.parse(y.brief)).toMatchObject({estimateTokens:4000000,estimateSeconds:240});
+ expect(JSON.parse(y.brief)).toMatchObject({estimateTokens:8000000,estimateSeconds:1800});
  expect(JSON.parse(e.sessions()[0].brief)).toMatchObject({estimateTokens:8000000,estimateSeconds:1800});e.s.close();
+});
+
+test('larger comparable receipts raise future reservations only',()=>{
+ const e=setup(),x=e.admit(ticket(),admission());e.claimStart(x.id);e.account(x.id,2000,9000000);e.finish(x.id,true);
+ const y=e.admit(ticket(2),admission());
+ expect(JSON.parse(y.brief)).toMatchObject({estimateTokens:9000000,estimateSeconds:2000});
+ expect(JSON.parse(x.brief)).toMatchObject({estimateTokens:8000000,estimateSeconds:1800});e.s.close();
 });
