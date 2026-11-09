@@ -5,6 +5,36 @@ import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission } from "./fixtures";
 
+test("delivery pins fresh QA without changing the source checkout",async()=>{
+ const {deliveryBase}=await import("../adapters/delivery");const calls:string[][]=[];
+ const sha="a".repeat(40);
+ expect(await deliveryBase("/fictional/source","fulmar-hq/alido",async a=>{calls.push(a);return calls.length===1?sha:"";})).toBe(sha);
+ expect(calls[0]).toEqual(["gh","api","repos/fulmar-hq/alido/git/ref/heads/QA","--jq",".object.sha"]);
+ expect(calls[1].slice(-4)).toEqual(["fetch","--no-tags","https://github.com/fulmar-hq/alido.git",sha]);
+ await expect(deliveryBase("/unused","fulmar-hq/alido",async()=>"unknown")).rejects.toThrow("revision unknown");
+ await expect(deliveryBase("/unused","elsewhere/repo",async()=>sha)).rejects.toThrow("source refused");
+});
+
+test("publisher rejects prose and cannot mask an earlier failed check",async()=>{
+ const {executableTest,testShell}=await import("../adapters/delivery");
+ for(const prose of ["Review case gates against existing routes/tests and git diff --check","Check configuration/route references and git diff --check","One available local reproduction; verify references and git diff --check"])
+  expect(()=>executableTest(prose)).toThrow("executable test");
+ for(const command of ["test 1 = 2; test 1 = 1","test 1 = 2 | cat; test 1 = 1"]){
+  const p=Bun.spawn(testShell(command),{stdout:"ignore",stderr:"ignore"});
+  expect(await p.exited).not.toBe(0);
+ }
+ const p=Bun.spawn(testShell('HOME="$PWD/.factory-tmp/home" node -e "process.exit(0)"'),{stdout:"ignore",stderr:"ignore"});
+ expect(await p.exited).toBe(0);
+});
+
+test("prose delivery checks refuse before reservation or native start",async()=>{
+ const {launchReady}=await import("../launcher/tick");
+ const s=new Store(":memory:"),e=new Engine(s,config());e.pause(false,"owner");
+ let calls=0;
+ await expect(launchReady(e,{...ticket(),repo:"fulmar-hq/alido",test:"Review sources; git diff --check"},admission(),()=>{calls++;},async()=>{calls++;return "";})).rejects.toThrow("executable test");
+ expect(calls).toBe(0);expect(e.sessions()).toHaveLength(0);expect(s.rows("debits")).toHaveLength(0);s.close();
+});
+
 test("calibration uses native cumulative completed-turn deltas including cache",()=>{
  const row=(p:unknown)=>JSON.stringify({type:"event_msg",payload:p});
  const token=(n:number)=>row({type:"token_count",info:{total_token_usage:{total_tokens:n}}});
