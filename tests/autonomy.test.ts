@@ -200,3 +200,12 @@ test('only useful published work rearms an exhausted intake round',()=>{
   supply(e,[],now+3600004);expect(e.s.get<any>('intake-round').id).not.toBe(round.id);
  }finally{e.s.close();}
 });
+test('a restart hold acquired after retry approval still blocks final admission',async()=>{
+ const e=setup();try {
+  const {x,i}=failed(e);failures(e,now);const dir=mkdtempSync(join(tmpdir(),'factory-auto-'));diagnosis(e,'fixture-diagnosis',x.id,dir);
+  await applyOwnerResults(e,dir,undefined,now,github([i]).execute);
+  e.s.set('restart-held:example/demo:codex:test',{at:now});
+  expect(()=>e.admit(prospective('example/demo',i),{...admission(),retryNoPr:[x.id]})).toThrow('restart budget held');
+  expect(e.sessions()).toHaveLength(1);
+ }finally{e.s.close();}
+});

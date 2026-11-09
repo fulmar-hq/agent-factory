@@ -18,8 +18,8 @@ export function reconcileCapacity(s:Store,c:Config,active:number,pressure:Capaci
  const p=c.capacity.controller;if(!p)return;
  return s.atomic(()=>{
   const prior=s.get<Capacity>('capacity-controller');let slots=slotLimit(s,c);
-  const exits=s.db.query("SELECT kind,data FROM events WHERE kind IN ('worker-exit','worker-failure') AND at>? AND at<=?").all(now-3600000,now) as {kind:string;data:string}[];
-  const outcomes=new Map<string,boolean>();for(const r of exits){const d=JSON.parse(r.data);outcomes.set(d.id,outcomes.get(d.id)===false ? false : r.kind==='worker-failure' ? false : d.ok);}
+  const exits=s.db.query("SELECT kind,data FROM events WHERE kind IN ('worker-exit','worker-failure','worker-halt') AND at>? AND at<=?").all(now-3600000,now) as {kind:string;data:string}[];
+  const outcomes=new Map<string,boolean>();for(const r of exits){const d=JSON.parse(r.data);outcomes.set(d.id,outcomes.get(d.id)===false ? false : r.kind!=='worker-exit' ? false : d.ok);}
   const failureRate=outcomes.size ? [...outcomes.values()].filter(x=>!x).length/outcomes.size : 0;
   const busy=active/slots,healthy=busy>p.busy_above && pressure==='normal' && failureRate<p.failure_below;
   let healthySince=healthy ? (prior && now>=prior.at && now-prior.at<=120000 ? prior.healthySince ?? now : now) : null;
