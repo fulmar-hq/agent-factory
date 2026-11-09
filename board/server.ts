@@ -1,3 +1,4 @@
+import {pushPace} from "../launcher/push";
 import {slotLimit} from "../launcher/capacity";
 import { issueTicket } from "../adapters/github";
 import { estimate, history, score } from "../estimator/predict";
@@ -134,6 +135,7 @@ export async function board(dir = root, port = 4318) {
           ownerWakes:s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all().map((r:any)=>JSON.parse(r.value)),
           versions: s.get("versions"),
           usage: r,
+          usagePush: pushPace(c,r.codex,now),
           usageAdmission: Object.fromEntries((["codex", "claude"] as const).map(provider => {
             try { usageGate(r[provider], false, now, c, provider); return [provider, "open"]; }
             catch (error) { return [provider, String(error).includes("high benefit only") ? "highOnly" : String(error).includes("stale") ? "stale" : "blocked"]; }

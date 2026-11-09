@@ -18,13 +18,18 @@ export const ConfigSchema = z.object({
   }),
   owners: z.record(z.string(), role),
   usage_gates: z.object({
-    admit_below: z.literal(0.7),
-    high_benefit_only_below: z.literal(0.9),
-    stop_at: z.literal(0.9),
+    admit_below: ratio.positive(),
+    high_benefit_only_below: ratio.positive(),
+    stop_at: ratio.positive(),
     max_meter_age_minutes: finite.positive().max(15),
   }),
   usage_windows: z.object({
     rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
+  }).optional(),
+  usage_push: z.object({
+    until: z.iso.datetime({offset:true}), target:z.string(), pace:z.string(), admit_below:ratio,
+    ready_buffer:z.literal("slots + 6"), effort:z.object({build:z.literal("high"),intake:z.literal("medium"),review:z.literal("medium")}),
+    challenger:z.string(), guard:z.string(),
   }).optional(),
   overrun: z.object({ checkpoint_at: z.literal(1.8), pause_at: z.literal(2) }),
   ticket_budget_default: z.object({
@@ -45,7 +50,7 @@ export const ConfigSchema = z.object({
   capacity: z.object({
     start_parallel: z.number().int().positive(),
     heavy_test_slots: z.number().int().nonnegative(),
-    controller: z.object({start: z.literal(6), max: z.literal(12), interval_minutes: z.literal(60), busy_above: z.literal(0.8), failure_below: z.literal(0.3)}).optional(),
+    controller: z.object({start: z.number().int().min(1).max(16), max: z.number().int().min(1).max(16), interval_minutes: z.number().int().min(1), busy_above: ratio, failure_below: ratio, mini_memory_free_floor: ratio.optional()}).refine(p=>p.start<=p.max).optional(),
   }),
   wallet: z.object({
     aws: z.object({
@@ -64,7 +69,7 @@ export const ConfigSchema = z.object({
       tests: z.string(),
     }),
   ),
-});
+}).refine(c=>c.usage_gates.admit_below<=c.usage_gates.high_benefit_only_below && c.usage_gates.high_benefit_only_below<=c.usage_gates.stop_at,{message:"usage thresholds must be ordered"});
 export type Config = z.infer<typeof ConfigSchema>;
 export const MeterSchema = z.object({
   observedAt: z.number().int().positive(),

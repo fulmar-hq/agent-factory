@@ -1,3 +1,8 @@
+import {ChallengeTarget} from "./challenge";
+import {command} from "../adapters/github";
+import {usageGate} from "./engine";
+import {qualificationFor} from "./push";
+import {optionalJSON,QualificationSchema} from "./config";
 import {join} from 'node:path';
 import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync} from 'node:fs';
 import {Store} from '../tracking/store';
@@ -52,18 +57,37 @@ export async function runOwner(id:string,dir=root) {
   const fullBrief=readFileSync(join(dir,'owners',`${wake.owner}.md`),'utf8');
   const brief=fullBrief.length>60000 ? fullBrief.slice(0,12000)+'\n[Historical middle retained in owner record]\n'+fullBrief.slice(-48000) : fullBrief;
   const t:Ticket={repo:'owner/review',number:1,title:'Review owner event',owner:wake.owner,creator:'launcher',source:wake.id,outcome:`You are Alido · ${wake.owner}. Review this event and report the required follow-up. This wake is read-only: do not implement changes, publish, merge, release, sign in or send messages. Ticket workers and the trusted launcher perform effects separately. Preserve work.\nOwner record:\n${brief}\nEvent:\n${JSON.stringify(wake)}`,test:'Report source-backed owner decisions',approved:true,benefit:'normal',estimateSeconds:1800,estimateTokens:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:role.harness,model:role.model,effort:role.effort,area:'owner',kind:'review'};
+  let workspace=runtime.workspace;
+  if(wake.kind==='challenger-review'){
+   const target=ChallengeTarget.parse(wake.payload);
+   const q=QualificationSchema.parse(qualificationFor((await optionalJSON(join(dir,'qualifications.json'))) as Record<string,unknown> ?? {},'codex','medium'));
+   if(q.expiresAt<=Date.now() || q.model!==role.model || q.effort!=='medium' || role.harness!=='codex')throw Error('challenger unqualified');
+   usageGate(s.get<{codex?:unknown}>('readings')?.codex,false,Date.now(),c,'codex');
+   const repos=(await optionalJSON(join(dir,'repositories.json'))) as Record<string,string>;
+   const source=repos?.[target.repo];if(!source)throw Error('challenger source missing');
+   workspace=join(dir,'runs','challenger-sources',crypto.randomUUID());
+   mkdirSync(workspace,{recursive:true,mode:0o700});
+   await command(['git','init','-q',workspace]);
+   await command(['git','-C',workspace,'fetch','--depth=1',`https://github.com/${target.repo}.git`,target.head,target.base],undefined,120000);
+   await command(['git','-C',workspace,'checkout','--detach',target.head]);
+   t.provider='codex';t.effort='medium';
+   t.outcome=`Independent Codex challenger review. Read project AGENTS.md and contracts. Inspect git diff ${target.base} ${target.head}. Try to break the change; identify correctness, security, validation and regression gaps. Read-only source, no edits, messages or effects. Write ${join(scratch,'challenge.json')} with exactly {head:"${target.head}",verdict:"PASS" or "CHANGES_REQUESTED",evidence:"concrete source-backed findings, at least 20 characters"}. Missing evidence or a blocking defect means CHANGES_REQUESTED. The trusted launcher posts your verdict on ${target.url}; you have no GitHub credentials.
+Owner record:
+${brief}`;
+  }
+  if(wake.kind==='product-intake' || wake.kind==='failure-diagnosis')t.effort='medium';
   if(wake.kind==='qa-deployed'){
    t.outcome=`You are independent Alido Quality. Accept or reject ONLY this hosted frozen QA revision/tree/artifact. Deadline is an absolute epoch milliseconds; finish before it. Read the trusted launcher-fetched native/hosted evidence in ${join(scratch,'qa-evidence.json')}. Inspect additional hosted/browser evidence only if the sandbox has a qualified supported path; do not assume those capabilities exist. Record exactly which feature checks are proven and which are missing. Do not use AWS SSO, change customer settings, send real-person messages or mutate release state. Missing hosted evidence means REJECT. Write ${join(scratch,'acceptance.json')} with exactly {day,revision,tree,artifact,verdict: ACCEPT or REJECT,evidence: nonempty source-backed findings}. Do not accept from passing CI alone. Your launcher validates the receipt after verified native completion.\nOwner record:\n${brief}\nQA deployed packet:\n${JSON.stringify(wake.payload)}`;
   }
   if(wake.kind==='product-intake')t.outcome+=`\nWrite ${join(scratch,'intake.json')} as {"tickets":[{"repo":"enrolled/repo","title":"Short useful task","brief":{...}}]}. Brief uses the factory Ticket schema, explicit honest estimateSeconds/estimateTokens plus estimateBasis (at least 20 characters of evidence), one area, disjoint exact files, executable test, source-backed useful outcome. Review project AGENTS.md and contracts. Avoid duplicate work and protected files. At most one docs-only proposal in this round. Supply enough useful leaves to reach target; never inflate estimates or invent success. Do not call GitHub writes. The launcher validates and creates drafts then applies policy.`;
   if(wake.kind==='failure-diagnosis')t.outcome+=`\nDiagnose using retained evidence in the event and repository. Write ${join(scratch,'retry.json')} as {"session":"failed session id","diagnosis":"source-backed cause and correction, at least 20 characters","estimateBasis":"honest basis, at least 20 characters","test":"correct executable command","outcome":"corrected bounded outcome"}. Keep original paths, estimates, wallet and provider. The launcher permits one new-digest attempt only with verified custody and no PR. If unsafe, do not write a retry proposal; report a decision.`;
   // Intake and diagnosis start fresh; retained native sessions stay archived.
-  const fresh=['product-intake','failure-diagnosis','qa-deployed'].includes(wake.kind);
+  const fresh=['product-intake','failure-diagnosis','qa-deployed','challenger-review'].includes(wake.kind);
   const ownerNative=fresh ? undefined : runtime.native;
-  const spec=materializeSettings(ownerSpec(t,runtime.workspace,scratch,ownerNative),join(scratch,'settings.json'));
+  const spec=materializeSettings(ownerSpec(t,workspace,scratch,ownerNative),join(scratch,'settings.json'));
   let native=ownerNative ?? spec.nativeId;
   const started=native && role.harness==='codex' ? Number.parseInt(native.replaceAll('-','').slice(0,12),16) : Date.now();
-  let receipt:NativeReceipt|undefined=native ? new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,started) : undefined;
+  let receipt:NativeReceipt|undefined=native ? new NativeReceipt(t.provider,native,workspace,spec.env.HOME,started) : undefined;
   const accounting=new WorkerAccounting();
   if(ownerNative) {
    for(let i=0;i<256;i++){receipt!.poll(accounting);if(receipt!.caughtUp)break;}
@@ -71,7 +95,7 @@ export async function runOwner(id:string,dir=root) {
    receipt.beginTurn();
   }
   const baseline=accounting.tokens,cachedBaseline=accounting.cachedTokens;
-  fd=openSync(join(scratch,'native.jsonl'),'ax',0o600);child=spawnWorker(spec,runtime.workspace,fd);
+  fd=openSync(join(scratch,'native.jsonl'),'ax',0o600);child=spawnWorker(spec,workspace,fd);
   s.event(`owner-native:${id}`,'owner-native-start',{id,pid:child.pid,native:native ?? null,scratch,baseline},'Retain native ID, logs and stable wake claim');
   const start=Date.now();let done=false,halted=false;
   const halt=()=>{halted=true;stop ??= child!.stop();void stop.catch(()=>{});};
@@ -86,7 +110,7 @@ export async function runOwner(id:string,dir=root) {
   timer=setInterval(sample,500);
   let pending='';for await(const chunk of child.stdout){writeSync(fd,chunk);pending+=new TextDecoder().decode(chunk);let end:number;
    while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);const event=accounting.ingest(t.provider,line);
-    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,Date.now());s.set(`owner-runtime:${wake.owner}`,{...s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`),native});}
+    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,workspace,spec.env.HOME,Date.now());s.set(`owner-runtime:${wake.owner}`,{...s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`),native});}
     if(event.done)done=true;sample();
    }
   }

@@ -1,3 +1,4 @@
+import {buildEffort, usageThresholds} from "./push";
 import { slotLimit } from "./capacity";
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
@@ -61,8 +62,8 @@ export function usageGate(raw: unknown, high: boolean, now: number, c: Config, p
   )
     blocked("usage stale");
   const used = Math.max(...m.windows.map((w) => w.used));
-  if (used >= c.usage_gates.stop_at) blocked("usage stop");
-  if (used >= c.usage_gates.admit_below && !high) blocked("high benefit only");
+  if (used >= usageThresholds(c,now,provider).stop_at) blocked("usage stop");
+  if (used >= usageThresholds(c,now,provider).admit_below && !high) blocked("high benefit only");
 }
 // Claims are compared conservatively across case-insensitive workspaces, including old rows.
 export function claimPath(path: string): string {
@@ -115,8 +116,8 @@ export class Engine {
       if (!parsed.success || parsed.data.nativeProvider !== t.provider || parsed.data.observedAt > now)
         blocked("usage recovery native evidence invalid");
       const used = Math.max(...parsed.data.windows.map(w => w.used));
-      if (used >= this.c.usage_gates.stop_at) blocked("usage stop");
-      if (used >= this.c.usage_gates.admit_below && t.benefit !== "high") blocked("high benefit only");
+      if (used >= usageThresholds(this.c,now,t.provider).stop_at) blocked("usage stop");
+      if (used >= usageThresholds(this.c,now,t.provider).admit_below && t.benefit !== "high") blocked("high benefit only");
     }
   }
   workerUsage(id: string, meter: Meter | undefined, now: number) {
@@ -209,7 +210,7 @@ export class Engine {
       }
       const q = QualificationSchema.safeParse(a.qualification);
       const model = t.model ?? this.c.owners[t.owner].model,
-        effort = t.effort ?? this.c.owners[t.owner].effort;
+        effort = buildEffort(this.c,t,a.now);
       if (
         !q.success ||
         q.data.expiresAt <= a.now ||

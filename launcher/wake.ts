@@ -14,7 +14,7 @@ export function queueWake(s:Store,w:Wake,now=Date.now()) {
   s.set(`owner-wake:${w.id}`,{...w,state:'queued',at:now});return true;
  });
 }
-const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-verified'?-2:w.kind==='release-diagnosis'?-1:w.kind==='product-intake'?0:w.kind==='failure-diagnosis'?1:w.kind==='owner-decision'?2:3;
+const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-verified'?-2:w.kind==='release-diagnosis'?-1:w.kind==='challenger-review'?-0.5:w.kind==='product-intake'?0:w.kind==='failure-diagnosis'?1:w.kind==='owner-decision'?2:3;
 export function pendingWakes(s:Store) {
  return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
 }

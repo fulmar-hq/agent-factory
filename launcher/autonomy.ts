@@ -1,3 +1,4 @@
+import {pushPace} from "./push";
 import {z} from 'zod';
 import {join} from 'node:path';
 import {readFileSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
@@ -65,7 +66,8 @@ export function supply(e:Engine,ready:Ticket[],now:number) {
  const p=e.c.autonomy;if(!p || e.s.get('paused')!==false)return;
  // Old claimed digests do not constitute ready supply.
  const unclaimed=ready.filter(t=>!e.sessions().some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
- const target=slotLimit(e.s,e.c)+p.ready_buffer;
+ const pace=pushPace(e.c,e.s.get<{codex?:unknown}>('readings')?.codex,now);
+ const target=slotLimit(e.s,e.c)+(pace?.belowPace ? 6 : p.ready_buffer);
  let round=e.s.get<IntakeRound>('intake-round');
  // Successful implementation can rearm an exhausted round. Docs-only output
  // cannot repeatedly buy another documentation round while useful work stalls.
@@ -91,7 +93,7 @@ export function supply(e:Engine,ready:Ticket[],now:number) {
   round={...round,at:now,attempt:2,wake:`intake:${round.id}:2`};
  } else {const id=`${now}-${crypto.randomUUID()}`;round={id,at:now,attempt:1,wake:`intake:${id}:1`};}
  e.s.set('intake-round',round);
- queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,projects:e.c.projects,policy:p.auto_approval,existing:(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{const i=JSON.parse(r.snapshot) as Issue;return {id:r.id,title:i.title,state:i.state,labels:i.labels};}).filter(i=>i.state==='OPEN'),occupied:e.active().map(x=>({id:x.id,brief:JSON.parse(x.brief)}))}},now);
+ queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,pace,projects:e.c.projects,policy:p.auto_approval,existing:(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{const i=JSON.parse(r.snapshot) as Issue;return {id:r.id,title:i.title,state:i.state,labels:i.labels};}).filter(i=>i.state==='OPEN'),occupied:e.active().map(x=>({id:x.id,brief:JSON.parse(x.brief)}))}},now);
 }
 // Missing proof is an escalation, not a synthesized successful session.
 export type Cause='budget'|'sandbox'|'test'|'publisher'|'timeout'|'unknown';

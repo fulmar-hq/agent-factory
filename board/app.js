@@ -164,6 +164,8 @@ function render() {
         : data.qualifications[provider],
     ]);
   }
+  if(data.usagePush)cards.push([lang==='fr'?'Cadence Codex':'Codex pace',data.usagePush.requiredPercentPerHour.toFixed(2)+'%/h',
+    (lang==='fr'?'Actuelle : ':'Current: ')+(data.usagePush.actualPercentPerHour?.toFixed(2) ?? t.unknown)+'%/h · '+data.usagePush.remainingPercent.toFixed(1)+'% · '+(data.usagePush.belowPace?(lang==='fr'?'Sous la cadence':'Below pace'):(lang==='fr'?'Cadence atteinte':'On pace'))]);
   cards.push([t.heartbeat, data.paused ? t.paused : t.running,
     (data.heartbeat?.refusals ?? []).map(x => x.ticket + ": " + x.reason).join(" · ")]);
   cards.push([t.estimator, data.estimator.evaluation.status, JSON.stringify(data.estimator.evaluation.ratios)]);

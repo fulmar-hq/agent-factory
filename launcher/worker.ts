@@ -1,3 +1,4 @@
+import {qualificationFor} from "./push";
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
@@ -34,7 +35,7 @@ export async function runWorker(id: string) {
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;
-    const q = QualificationSchema.parse(qs?.[t.provider]);
+    const q = QualificationSchema.parse(qualificationFor(qs ?? {},t.provider,t.effort!));
     if (
       q.expiresAt <= Date.now() ||
       q.model !== t.model ||

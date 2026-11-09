@@ -1,4 +1,6 @@
-import { memoryPressure, reconcileCapacity } from "./capacity";
+import {challengeAndMerge} from "./challenge";
+import {buildEffort,qualificationFor} from "./push";
+import { memoryPressure, memoryFreeRatio, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
 import { Engine, type Admission } from "./engine";
@@ -94,7 +96,7 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
-    reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
+    reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now,await memoryFreeRatio());
     expireDecisions(s,now);
     failures(e,now);
     let ready = await reconcile(s, c, now);
@@ -106,6 +108,7 @@ export async function tick(dir = root) {
       supply(e,ready,now);
       return count;
     }) ?? 0 : 0;
+    await challengeAndMerge(s,c);
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
@@ -132,7 +135,7 @@ export async function tick(dir = root) {
           now: Date.now(),
           meter: r[t.provider],
           billing: r.billing,
-          qualification: qualifications[t.provider],
+          qualification: qualificationFor(qualifications,t.provider,buildEffort(c,t,Date.now())),
           recoverUsage: true,
         }, (id) => spawnSupervisor(id, dir));
         s.db
