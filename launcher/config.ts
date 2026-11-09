@@ -35,6 +35,7 @@ export const ConfigSchema = z.object({
   autonomy: z.object({
     intake_mode: z.enum(["drain", "build"]).default("drain"),
     intake_owner: z.string().min(1),
+    idle_wake_minutes: z.number().int().min(1).max(60).default(10),
     ready_buffer: z.literal(3),
     auto_approval: z.object({
       max_minutes: z.literal(30),

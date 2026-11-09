@@ -108,14 +108,12 @@ export async function tick(dir = root) {
       ready=await reconcile(s,c,now);
       const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
       if(count)ready=await reconcile(s,c,now);
-      supply(e,ready,now);
       return count;
     }) ?? 0 : 0;
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
     catch(error){ownerReconciled=false;s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
-    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
     if(ownerReconciled && Object.values(c.projects).every(p=>{
       const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
     }))s.set("last-successful-reconciliation",Date.now());
@@ -151,6 +149,9 @@ export async function tick(dir = root) {
           .run(String(error), `${t.repo}#${t.number}`);
       }
     }
+    // Observe actual admission outcomes: refused ready labels cannot conceal idle.
+    await autonomyEffects(s,async()=>supply(e,ready,Date.now(),{claimed,refusals}));
+    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
     autoResolved += resolveQuestions(e);
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };

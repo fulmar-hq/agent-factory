@@ -19,6 +19,7 @@ ticket_budget_default: {estimate_tokens: 8000000, checkpoint_tokens: 14400000, p
 autonomy:
   intake_mode: drain # build permits new product scope after deliberate reprioritization
   intake_owner: builder
+  idle_wake_minutes: 10 # free capacity with nothing claimable; retry backoff starts here
   ready_buffer: 3
   auto_approval:
     max_minutes: 30
