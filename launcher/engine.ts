@@ -1,3 +1,4 @@
+import { slotLimit } from "./capacity";
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -64,7 +65,7 @@ export function usageGate(raw: unknown, high: boolean, now: number, c: Config, p
   if (used >= c.usage_gates.admit_below && !high) blocked("high benefit only");
 }
 // Claims are compared conservatively across case-insensitive workspaces, including old rows.
-function claimPath(path: string): string {
+export function claimPath(path: string): string {
   if (
     path.startsWith("/") ||
     /[^\x20-\x7e]/.test(path) ||
@@ -178,6 +179,9 @@ export class Engine {
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
       const prior = this.retryPrior(t);
+      const autoRetry=this.s.get<{session:string}>(`automatic-retry:${ticketId(t)}`);
+      const failure=autoRetry && this.s.get<{repo:string;provider:string;cause:string}>(`failure-class:${autoRetry.session}`);
+      if(failure && this.s.get(`restart-held:${failure.repo}:${failure.provider}:${failure.cause}`))blocked("failure cause restart budget held");
       const attempt = prior.length ? prior[prior.length-1].attempt + 1 : 1;
       const id = prior.length ? createHash("sha256").update(`helper:v2:${ticketId(t)}:${t.approvalDigest}`).digest("hex") : eventId(t);
       if (this.s.db.query("SELECT id FROM events WHERE id=?").get(id)) blocked("duplicate event");
@@ -214,7 +218,7 @@ export class Engine {
       )
         blocked("worker unqualified");
       const active = this.active();
-      if (active.length >= this.c.capacity.start_parallel)
+      if (active.length >= slotLimit(this.s, this.c))
         blocked("slots full");
       if (
         t.heavy &&

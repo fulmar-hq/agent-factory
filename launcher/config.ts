@@ -32,9 +32,20 @@ export const ConfigSchema = z.object({
     estimate_minutes:z.literal(30), checkpoint_minutes:z.literal(54), pause_minutes:z.literal(60),
     rule:z.string().optional(),
   }).optional(),
+  autonomy: z.object({
+    intake_owner: z.string().min(1),
+    ready_buffer: z.literal(3),
+    auto_approval: z.object({
+      max_minutes: z.literal(30),
+      max_docs_per_round: z.literal(1),
+      protected_paths: z.array(z.string().min(1)).min(1),
+    }),
+    restart: z.object({max_retries: z.literal(1), causes_per_hour: z.number().int().min(1).max(10)}),
+  }).optional(),
   capacity: z.object({
     start_parallel: z.number().int().positive(),
     heavy_test_slots: z.number().int().nonnegative(),
+    controller: z.object({start: z.literal(6), max: z.literal(12), interval_minutes: z.literal(60), busy_above: z.literal(0.8), failure_below: z.literal(0.3)}).optional(),
   }),
   wallet: z.object({
     aws: z.object({
