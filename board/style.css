@@ -60,6 +60,23 @@ details {
   font-size: 1.35rem;
   display: block;
 }
+.capacity-evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 16px;
+}
+.capacity-evidence > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.capacity-evidence dt {
+  color: #4e625e;
+  font-size: 0.85rem;
+}
+.capacity-evidence dd {
+  margin: 4px 0 0;
+  font-weight: 600;
+}
 summary {
   cursor: pointer;
   font-weight: 600;

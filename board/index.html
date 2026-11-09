@@ -20,6 +20,11 @@
     <main>
       <p id="connection" role="status">Loading local evidence…</p>
       <section id="summary" class="grid" aria-live="polite"></section>
+      <section class="card" aria-labelledby="capacity-title">
+        <h2 id="capacity-title">Worker capacity</h2>
+        <p id="capacity-status" role="status">Controller evidence unavailable</p>
+        <dl id="capacity-evidence" class="capacity-evidence"></dl>
+      </section>
       <section>
         <h2 id="control-title">Controls</h2>
         <form id="auth">

@@ -28,6 +28,31 @@ const words = {
     estimator: "Estimator vs mean",
     wallet: "Available wallet",
     slots: "Slots",
+    capacity: "Worker capacity",
+    currentCapacity: "Current admission limit",
+    ceiling: "Controller maximum (not supplied)",
+    occupied: "Occupied / admission limit (includes retained custody)",
+    retained: "Paused / unknown custody",
+    busy: "Starting/running busy fraction (sampled)",
+    pressure: "Memory pressure",
+    failures: "Failure rate · trailing hour",
+    dwell: "Healthy dwell at sample",
+    growth: "Growth status / hold reason",
+    sample: "Controller sample",
+    missingCapacity: "Controller evidence unavailable",
+    staleCapacity: "Stale or invalid sample — current growth status unknown",
+    evidenceUnknown: "Unknown",
+    minutes: "min",
+    noDwell: "Not accumulating",
+    pressureValues: { normal: "Normal", warning: "Warning", critical: "Critical", unknown: "Unknown" },
+    growthReasons: {
+      "memory pressure not normal": "Memory pressure not normal",
+      "occupancy below threshold": "Starting/running occupancy below threshold",
+      "failure rate too high": "Failure rate too high",
+      "collecting healthy hour": "Collecting a healthy hour",
+      "added one slot after healthy hour": "Added one slot after a healthy hour",
+      "maximum capacity": "Maximum capacity reached",
+    },
     heartbeat: "Heartbeat",
     reconciled:"Last successful reconciliation",
     seconds: "seconds ago",
@@ -71,6 +96,31 @@ const words = {
     estimator: "Estimation / moyenne",
     wallet: "Budget disponible",
     slots: "Places",
+    capacity: "Capacité des agents",
+    currentCapacity: "Limite d’admission actuelle",
+    ceiling: "Maximum du contrôleur (non fourni)",
+    occupied: "Places occupées / limite d’admission (garde conservée incluse)",
+    retained: "Garde en pause / inconnue",
+    busy: "Fraction occupée en démarrage/exécution (échantillon)",
+    pressure: "Pression mémoire",
+    failures: "Taux d’échec · dernière heure",
+    dwell: "Durée saine à l’échantillon",
+    growth: "État de croissance / motif de blocage",
+    sample: "Échantillon du contrôleur",
+    missingCapacity: "Données du contrôleur indisponibles",
+    staleCapacity: "Échantillon périmé ou invalide — croissance actuelle inconnue",
+    evidenceUnknown: "Inconnu",
+    minutes: "min",
+    noDwell: "Aucune accumulation",
+    pressureValues: { normal: "Normale", warning: "Avertissement", critical: "Critique", unknown: "Inconnue" },
+    growthReasons: {
+      "memory pressure not normal": "Pression mémoire non normale",
+      "occupancy below threshold": "Occupation en démarrage/exécution sous le seuil",
+      "failure rate too high": "Taux d’échec trop élevé",
+      "collecting healthy hour": "Collecte d’une heure saine",
+      "added one slot after healthy hour": "Une place ajoutée après une heure saine",
+      "maximum capacity": "Capacité maximale atteinte",
+    },
     heartbeat: "Dernier signal",
     reconciled:"Dernière synchronisation réussie",
     seconds: "secondes",
@@ -104,6 +154,41 @@ function detail(parent, title, text) {
 function empty(id) {
   $(id).replaceChildren();
 }
+function renderCapacity() {
+  const t = w(), slots = data.slots ?? {}, c = slots.controller;
+  const count = (n) => Number.isInteger(n) && n >= 0 ? String(n) : t.evidenceUnknown;
+  const fraction = (n) => Number.isFinite(n) && n >= 0 && n <= 1
+    ? (n * 100).toLocaleString(lang, { maximumFractionDigits: 1 }) + "%"
+    : t.evidenceUnknown;
+  const validSample = Number.isFinite(c?.at) && c.at > 0 && c.at <= data.now;
+  const fresh = validSample && data.now - c.at <= 120000;
+  const retained = (status) => Array.isArray(data.sessions)
+    ? count(data.sessions.filter((x) => x.status === status).length)
+    : t.evidenceUnknown;
+  $("capacity-title").textContent = t.capacity;
+  $("capacity-status").textContent = !c ? t.missingCapacity : fresh ? "" : t.staleCapacity;
+  const rows = [
+    [t.currentCapacity, count(slots.max)],
+    // The API's max is the current admission limit, not the policy ceiling.
+    [t.ceiling, t.evidenceUnknown],
+    [t.occupied, count(slots.used) + " / " + count(slots.max)],
+    [t.retained, retained("paused") + " / " + retained("unknown")],
+    [t.busy, fraction(c?.busy)],
+    [t.pressure, t.pressureValues[c?.pressure] ?? t.evidenceUnknown],
+    [t.failures, fraction(c?.failureRate)],
+    [t.dwell, validSample && Number.isFinite(c?.healthySince) && c.healthySince > 0 && c.healthySince <= c.at
+      ? ((c.at - c.healthySince) / 60000).toLocaleString(lang, { maximumFractionDigits: 1 }) + " " + t.minutes
+      : c?.healthySince === null ? t.noDwell : t.evidenceUnknown],
+    [t.growth, c?.reason ? t.growthReasons[c.reason] ?? c.reason : t.evidenceUnknown],
+    [t.sample, validSample ? new Date(c.at).toLocaleString(lang) : t.evidenceUnknown],
+  ];
+  empty("capacity-evidence");
+  for (const [label, value] of rows) {
+    const row = node("div", "");
+    row.append(node("dt", label), node("dd", value));
+    $("capacity-evidence").append(row);
+  }
+}
 async function action(path, body) {
   const r = await fetch(path, {
     method: "POST",
@@ -135,6 +220,7 @@ function render() {
   for (const id of ["questions", "tickets", "sessions", "releases", "owners"])
     $(id + "-title").textContent = t[id];
   if (!data) return;
+  renderCapacity();
   $("connection").textContent =
     (data.paused ? t.paused : t.running) +
     " · " +
