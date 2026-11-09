@@ -1,3 +1,4 @@
+import {slotLimit} from "../launcher/capacity";
 import { issueTicket } from "../adapters/github";
 import { estimate, history, score } from "../estimator/predict";
 import { join } from "node:path";
@@ -180,7 +181,7 @@ export async function board(dir = root, port = 4318) {
           sessions: e.sessions().map(x=>({...x,budget:e.budget(x)})),
           releases: s.rows("releases"),
           owners,
-          slots: { used: e.active().length, max: c.capacity.start_parallel },
+          slots: { used: e.active().length, max: slotLimit(s,c), controller: s.get("capacity-controller") },
           schedule: c.schedule,
         });
       }

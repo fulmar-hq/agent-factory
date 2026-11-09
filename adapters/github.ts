@@ -185,6 +185,7 @@ export async function approveIntake(
   s: Store,
   receipt: string,
   execute = command,
+  expectedDigest?: string,
 ) {
   if (
     !/^[\w.-]+\/[\w.-]+$/.test(repo) ||
@@ -207,6 +208,7 @@ export async function approveIntake(
   ) as Issue;
   if (i.number !== number) throw Error("issue identity mismatch");
   const label = intakeLabel(repo, i);
+  if (expectedDigest && label !== expectedDigest) throw Error("intake changed during policy review");
   const labels = i.labels.filter(
     (x) => !x.name.startsWith("ready:") && !x.name.startsWith("state:"),
   );

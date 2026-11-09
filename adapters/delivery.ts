@@ -30,10 +30,11 @@ export function localizeDependencies(workspace:string, source:string, archive:st
 }
 
 export const deliveryRepo = "fulmar-hq/alido";
+export const isDeliveryRepo = (repo:string) => [deliveryRepo,"fulmar-hq/agent-factory"].includes(repo);
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
 export async function deliveryBase(source:string, repo:string, execute=command) {
-  if(repo!==deliveryRepo)throw Error("delivery source refused");
-  const sha=(await execute(["gh","api",`repos/${repo}/git/ref/heads/QA`,"--jq",".object.sha"])).trim();
+  if(!isDeliveryRepo(repo))throw Error("delivery source refused");
+  const sha=(await execute(["gh","api",`repos/${repo}/git/ref/heads/${repo===deliveryRepo ? "QA" : "main"}`,"--jq",".object.sha"])).trim();
   if(!/^[a-f0-9]{40}$/.test(sha))throw Error("current QA revision unknown");
   // Fetch the immutable object, never reset a user's checkout or depend on the
   // shared FETCH_HEAD, which another concurrent fetch could replace.
