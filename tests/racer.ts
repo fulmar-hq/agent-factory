@@ -11,7 +11,7 @@ try {
   t.costCents = mode === "dollar" ? 100 : 0;
   if (mode === "retry") t.approvalDigest=`ready:${"2".repeat(43)}`;
   const e = new Engine(s,c);
-  e.admit(t, {...admission(),retryNoPr:mode === "retry" ? e.sessions().map(x=>x.id) : undefined});
+  e.admit(t, {...admission(), ...(mode === "usage" ? {meter:undefined,recoverUsage:true} : {}), retryNoPr:mode === "retry" ? e.sessions().map(x=>x.id) : undefined});
   console.log("admitted");
 } catch {
   console.log("refused");

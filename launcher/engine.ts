@@ -36,6 +36,7 @@ export type Admission = {
   qualification?: Qualification;
   // Fresh all-state GitHub PR readback for these exact retained session branches.
   retryNoPr?: string[];
+  recoverUsage?: boolean;
 };
 export const ticketId = (t: Ticket) => `${t.repo}#${t.number}`;
 export const eventId = (t: Ticket) =>
@@ -92,6 +93,41 @@ export class Engine {
     return this.sessions().filter(
       (s) => !["finished", "archived"].includes(s.status),
     );
+  }
+  // One durable allowance across providers, ticks and restarts. Only a fresh
+  // native observation made after that admission can rearm it.
+  refreshUsage(provider: "codex" | "claude", meter: Meter | undefined, now: number) {
+    this.s.atomic(() => {
+      const prior = this.s.get<{id:string;provider:string;at:number}>("usage-bootstrap");
+      if (!prior || prior.provider !== provider || !meter || meter.observedAt <= prior.at) return;
+      try { usageGate(meter, true, now, this.c, provider); }
+      catch { return; }
+      this.s.event(`usage-refreshed:${prior.id}`, "usage-bootstrap-refreshed", { ...prior, observedAt: meter.observedAt }, "Retain the native observation and bootstrap admission receipt", now);
+      this.s.set("usage-bootstrap", null);
+    });
+  }
+  private recoveryEligible(t: Ticket, meter: Meter | undefined, now: number) {
+    if (t.heavy || t.costCents !== 0 || t.estimateSeconds > 1800 || t.estimateTokens > 8000000)
+      blocked("usage recovery requires small unpaid ticket");
+    if (meter) {
+      const parsed = MeterSchema.safeParse(meter);
+      if (!parsed.success || parsed.data.nativeProvider !== t.provider || parsed.data.observedAt > now)
+        blocked("usage recovery native evidence invalid");
+      const used = Math.max(...parsed.data.windows.map(w => w.used));
+      if (used >= this.c.usage_gates.stop_at) blocked("usage stop");
+      if (used >= this.c.usage_gates.admit_below && t.benefit !== "high") blocked("high benefit only");
+    }
+  }
+  workerUsage(id: string, meter: Meter | undefined, now: number) {
+    const x = this.sessions().find(x => x.id === id);
+    if (!x) blocked("unknown session");
+    const t = JSON.parse(x.brief) as Ticket;
+    try { usageGate(meter, t.benefit === "high", now, this.c, t.provider); }
+    catch (error) {
+      const allowance = this.s.get<{id:string;at:number}>("usage-bootstrap");
+      if (!allowance || allowance.id !== id || now < allowance.at || now - allowance.at > 120000 || this.s.get(`continuation:${id}`) || !["Error: usage stale", "Error: usage unknown"].includes(String(error))) throw error;
+      this.recoveryEligible(t, meter, now);
+    }
   }
   pause(paused: boolean, actor: "owner" | "helper") {
     if (actor !== "owner") blocked("owner only");
@@ -158,7 +194,15 @@ export class Engine {
       if (this.c.owners[t.owner].harness !== t.provider)
         blocked("provider mismatch");
       const normalizedPaths = [...new Set(t.paths.map(claimPath))];
-      usageGate(a.meter, t.benefit === "high", a.now, this.c, t.provider);
+      let bootstrap = false;
+      this.refreshUsage(t.provider, a.meter, a.now);
+      try { usageGate(a.meter, t.benefit === "high", a.now, this.c, t.provider); }
+      catch (error) {
+        if (!a.recoverUsage || !["Error: usage stale", "Error: usage unknown"].includes(String(error))) throw error;
+        this.recoveryEligible(t, a.meter, a.now);
+        if (this.s.get("usage-bootstrap") || this.active().length) blocked("usage recovery awaiting fresh native reading");
+        bootstrap = true;
+      }
       const q = QualificationSchema.safeParse(a.qualification);
       const model = t.model ?? this.c.owners[t.owner].model,
         effort = t.effort ?? this.c.owners[t.owner].effort;
@@ -226,6 +270,11 @@ export class Engine {
       for (const p of normalizedPaths)
         this.s.db.query("INSERT INTO claims VALUES(?,?)").run(p, id);
       debit(this.s, id, t.wallet, t.costCents, a.now);
+      if (bootstrap) {
+        const receipt = {id, provider:t.provider, at:a.now, observedAt:a.meter?.observedAt ?? null, estimateSeconds:t.estimateSeconds, estimateTokens:t.estimateTokens};
+        this.s.set("usage-bootstrap", receipt);
+        this.s.event(`usage-bootstrap:${id}`, "usage-bootstrap-admission", receipt, "Stop and reconcile the retained run; allowance rearms only after a newer fresh native reading", a.now);
+      }
       return this.sessions().find((x) => x.id === id)!;
     });
   }

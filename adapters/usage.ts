@@ -2,6 +2,62 @@ import { readdir, stat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MeterSchema, type Meter } from "../launcher/config";
+import { spawn } from "node:child_process";
+
+// Installed app-server protocol: initialize -> account/rateLimits/read. No
+// thread/turn, model call, reset credit consumption or login operation.
+export function codexStatusMetadata(raw: unknown, observedAt: number): Meter | undefined {
+  if (!raw || typeof raw !== "object") return;
+  const result = raw as Record<string, any>;
+  const r = result.rateLimitsByLimitId?.codex ?? result.rateLimits;
+  if (!r || r.limitId !== "codex") return;
+  const meter = codexMetadata({ timestamp: new Date(observedAt).toISOString(), payload: { rate_limits: {
+    limit_id: "codex", ...Object.fromEntries(["primary", "secondary"].map(key => [key, r[key] ? {
+      used_percent: r[key].usedPercent, resets_at: r[key].resetsAt,
+      window_minutes: r[key].windowDurationMins ?? undefined,
+    } : null])),
+  } } });
+  return meter ? {...meter, source: "native Codex account/rateLimits/read"} : undefined;
+}
+export async function codexStatus(argv = ["codex", "app-server", "--stdio"], timeoutMs = 8000): Promise<Meter | undefined> {
+  return new Promise(resolve => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ["pipe", "pipe", "ignore"] });
+    let pending = "", bytes = 0, settled = false, initialized = false;
+    const finish = (meter?: Meter) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      resolve(meter);
+    };
+    const timer = setTimeout(() => finish(), timeoutMs);
+    const send = (message: unknown) => child.stdin.write(JSON.stringify(message) + "\n");
+    child.on("error", () => finish());
+    child.on("exit", () => finish());
+    child.stdin.on("error", () => finish());
+    child.stdout.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > 262144) return finish();
+      pending += chunk.toString("utf8");
+      let end: number;
+      while ((end = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, end); pending = pending.slice(end + 1);
+        try {
+          const response = JSON.parse(line);
+          if (response.id === 1 && !initialized) {
+            if (response.error || !response.result) return finish();
+            initialized = true;
+            send({ method: "initialized" });
+            send({ id: 2, method: "account/rateLimits/read", params: { excludeResetCreditDetails: true } });
+          } else if (response.id === 2 && initialized) {
+            return finish(response.error ? undefined : codexStatusMetadata(response.result, Date.now()));
+          }
+        } catch { /* A malformed status response supplies no evidence. */ }
+      }
+    });
+    send({ id: 1, method: "initialize", params: { clientInfo: { name: "agent_factory_usage", version: "0.1.0" }, capabilities: null } });
+  });
+}
 
 type File = { path: string; size: number; modified: number };
 // Fixed-depth native directories only: no transcripts, credentials or credits retained.
@@ -82,7 +138,9 @@ export function claudeMetadata(x: unknown): Meter | undefined {
 export async function claudeReading(now = Date.now(), base = join(homedir(), ".claude", "projects")): Promise<Meter | undefined> {
   return newest(await receipts(base, 1), now, claudeMetadata);
 }
-export async function localReadings(now = Date.now()) {
-  const [codex, claude] = await Promise.all([codexReading(now), claudeReading(now)]);
-  return { codex, claude };
+export async function localReadings(now = Date.now(), sources = {
+  receipt: () => codexReading(now), claude: () => claudeReading(now), status: () => codexStatus(),
+}) {
+  const [receipt, claude, status] = await Promise.all([sources.receipt(), sources.claude(), sources.status()]);
+  return { codex: status && (!receipt || status.observedAt > receipt.observedAt) ? status : receipt, claude };
 }

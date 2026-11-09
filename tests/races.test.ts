@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission } from "./fixtures";
 import { Store } from "../tracking/store";
-for (const mode of ["slot", "dollar", "duplicate", "retry"])
+for (const mode of ["slot", "dollar", "duplicate", "retry", "usage"])
   test(`simultaneous processes compete for last ${mode}`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "factory-race-")),
       path = join(dir, "state.sqlite"),

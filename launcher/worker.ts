@@ -4,8 +4,8 @@ import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
-import { Engine, usageGate } from "./engine";
-import { configAt, root, optionalJSON, QualificationSchema, type Ticket } from "./config";
+import { Engine } from "./engine";
+import { configAt, root, optionalJSON, QualificationSchema, type Ticket, type Meter } from "./config";
 import { Store } from "../tracking/store";
 import {
   workerSpec,
@@ -42,8 +42,8 @@ export async function runWorker(id: string) {
       s.get("paused") !== false
     )
       throw Error("qualification expired or paused");
-    const readings = s.get<Record<string, unknown>>("readings");
-    usageGate(readings?.[t.provider], t.benefit === "high", Date.now(), c);
+    const readings = s.get<Record<string, Meter>>("readings");
+    e.workerUsage(id, readings?.[t.provider], Date.now());
     await verifySubscription(t.provider);
     const repos = (await optionalJSON(
       join(root, "repositories.json"),
