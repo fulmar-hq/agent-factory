@@ -42,6 +42,7 @@ export async function runOwner(id:string,dir=root) {
  let fd:number|undefined,child:ReturnType<typeof spawnWorker>|undefined,timer:ReturnType<typeof setInterval>|undefined;
  let wake:Wake|undefined,runtime:OwnerRuntime|undefined;
  let stop:Promise<void>|undefined;
+ let nativeStartAttempted=false;
  let onSignal:(()=>void)|undefined;
  try {
   const claimed=s.atomic(()=>{
@@ -97,7 +98,7 @@ ${brief}`;
    receipt.beginTurn();
   }
   const baseline=accounting.tokens,cachedBaseline=accounting.cachedTokens;
-  fd=openSync(join(scratch,'native.jsonl'),'ax',0o600);child=spawnWorker(spec,workspace,fd);
+  fd=openSync(join(scratch,'native.jsonl'),'ax',0o600);nativeStartAttempted=true;child=spawnWorker(spec,workspace,fd);
   s.event(`owner-native:${id}`,'owner-native-start',{id,pid:child.pid,native:native ?? null,scratch,baseline},'Retain native ID, logs and stable wake claim');
   const start=Date.now();let done=false,halted=false;
   const halt=()=>{halted=true;stop ??= child!.stop();void stop.catch(()=>{});};
@@ -123,12 +124,12 @@ ${brief}`;
   s.set(`owner-wake:${id}`,{...wake,state:ok?'done':'blocked',native,at:Date.now(),scratch});
   s.event(`owner-complete:${id}`,'owner-wake-complete',{id,ok,native,cleanup:child.cleanup},'Retain completed wake; use a distinct new event for further work');
  } catch(error){
-  if(wake){s.set(`owner-wake:${id}`,{...wake,state:'blocked',error:String(error)});s.event(`owner-failure:${id}`,'owner-wake-failure',{id,error:String(error)},'Reconcile native custody; never replay this wake');}
+  if(wake){const defer=wake.kind==='challenger-review' && !nativeStartAttempted;s.set(`owner-wake:${id}`,{...wake,state:defer?'queued':'blocked',...(defer?{notBefore:Date.now()+60000,prestartRefusal:true}:{}),error:String(error)});s.event(`owner-failure:${id}`,'owner-wake-failure',{id,error:String(error)},'Reconcile native custody; never replay this wake');}
  } finally {
   if(timer)clearInterval(timer);
   if(onSignal){process.off("SIGTERM",onSignal);process.off("SIGINT",onSignal);}
   try{if(child){await child.stop();await child.exited;}}
-  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(ownerRuntimeKey(wake));if(r?.wake===id)s.set(ownerRuntimeKey(wake),{...r,pid:undefined,identity:undefined});}s.close();}
+  finally{if(fd!==undefined)closeSync(fd);if(wake && (child ? child.cleanup.verified : !nativeStartAttempted)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(ownerRuntimeKey(wake));if(r?.wake===id)s.set(ownerRuntimeKey(wake),{...r,pid:undefined,identity:undefined});}s.close();}
  }
 }
 if(import.meta.main)await runOwner(process.argv[2]);

@@ -17,8 +17,9 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
   const publications=(s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery')").all() as {data:string}[]).map(r=>JSON.parse(r.data));
   for(const project of Object.values(c.projects)) {
    if(!['fulmar-hq/alido','fulmar-hq/agent-factory'].includes(project.repo))continue;
-   const prs=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json','number,url,headRefOid,baseRefOid,baseRefName,isDraft,reviewDecision,headRefName']));
+   let prs;try {prs=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json','number,url,headRefOid,baseRefOid,baseRefName,isDraft,reviewDecision,headRefName']));
    if(!Array.isArray(prs) || prs.length>=100)throw Error('challenger PR inventory missing/truncated');
+   }catch(error){s.event(`challenger-inventory:${project.repo}:${now}`,'challenger-inventory-refusal',{repo:project.repo,error:String(error)},undo,now);continue;}
    for(const pr of prs) {
     if(!publications.some(p=>p.url===pr.url))continue;
     const parsed=ChallengeTarget.safeParse({repo:project.repo,pr:pr.number,head:pr.headRefOid,base:pr.baseRefOid,branch:pr.baseRefName,url:pr.url});

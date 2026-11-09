@@ -108,7 +108,8 @@ export async function tick(dir = root) {
       supply(e,ready,now);
       return count;
     }) ?? 0 : 0;
-    await challengeAndMerge(s,c);
+    try {await challengeAndMerge(s,c);}
+    catch(error){s.event(crypto.randomUUID(),'challenger-inventory-refusal',{error:String(error)},'Retain refusal; independent owner dispatch and admission continue');}
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}

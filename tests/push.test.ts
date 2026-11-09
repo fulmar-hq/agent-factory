@@ -100,3 +100,23 @@ test('stricter configured stops remain binding without push, for Claude and afte
  }
  expect(()=>usageGate(meter(.6),true,now,c,'claude')).toThrow('usage stop');
 });
+test('one unavailable PR inventory does not block another repository review',async()=>{
+ const c=pushConfig(),s=new Store(':memory:');s.set('paused',false);
+ c.projects={alido:{repo:'fulmar-hq/alido',owners:['builder'],tests:'bun test'},factory:{repo:'fulmar-hq/agent-factory',owners:['builder'],tests:'bun test'}};
+ const head='c'.repeat(40),url='https://github.com/fulmar-hq/agent-factory/pull/3';s.event('pub','launcher-publish',{url,head},'retain',now);
+ const execute=async(args:string[])=>{if(args.includes('fulmar-hq/alido'))throw Error('synthetic inventory offline');return JSON.stringify([{number:3,url,headRefOid:head,baseRefOid:'b'.repeat(40),baseRefName:'main',isDraft:false}]);};
+ await challengeAndMerge(s,c,execute,now);
+ expect(s.get<any>(`owner-wake:challenger:fulmar-hq/agent-factory:3:${head}`).state).toBe('queued');
+ expect(s.rows('events').some((x:any)=>x.kind==='challenger-inventory-refusal')).toBe(true);s.close();
+});
+test('a proven pre-native qualification refusal defers without consuming the native run',async()=>{
+ const {mkdirSync}=await import('node:fs');const {queueWake,dispatchWake,pendingWakes,ownerRuntimeKey}=await import('../launcher/wake');const {runOwner}=await import('../launcher/owner');
+ const dir=mkdtempSync(join(tmpdir(),'factory-deferred-review-')),c=pushConfig();writeFileSync(join(dir,'config.yaml'),JSON.stringify(c));
+ mkdirSync(join(dir,'owners'));writeFileSync(join(dir,'owners/release.md'),'Synthetic review owner.');
+ const s=new Store(join(dir,'controller.sqlite'));s.set('paused',false);s.set('owner-runtime:release',{workspace:dir,native:'permanent-owner'});
+ const w={id:'challenger:pre-native',owner:'release',kind:'challenger-review',payload:{repo:'fulmar-hq/agent-factory',pr:3,head:'a'.repeat(40),base:'b'.repeat(40),branch:'main',url:'https://github.com/fulmar-hq/agent-factory/pull/3'}};
+ queueWake(s,w);expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(true);await runOwner(w.id,dir);
+ const deferred=s.get<any>('owner-wake:'+w.id);expect(deferred.state).toBe('queued');expect(deferred.cleanupVerified).toBe(true);expect(deferred.prestartRefusal).toBe(true);
+ expect(s.rows('events').some((x:any)=>x.kind==='owner-native-start')).toBe(false);expect(s.get<any>(ownerRuntimeKey(w)).pid).toBeUndefined();
+ expect(pendingWakes(s)).toHaveLength(0);expect(pendingWakes(s,Date.now()+61000)).toHaveLength(1);expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(false);s.close();
+});

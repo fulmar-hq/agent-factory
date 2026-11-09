@@ -16,14 +16,14 @@ export function queueWake(s:Store,w:Wake,now=Date.now()) {
  });
 }
 const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-verified'?-2:w.kind==='release-diagnosis'?-1:w.kind==='challenger-review'?-0.5:w.kind==='product-intake'?0:w.kind==='failure-diagnosis'?1:w.kind==='owner-decision'?2:3;
-export function pendingWakes(s:Store) {
- return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
+export function pendingWakes(s:Store,now=Date.now()) {
+ return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string;notBefore?:number})=>r.state==='queued' && (!r.notBefore || r.notBefore<=now)).sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
 }
 export const ownerRuntimeKey=(w:Wake)=>`owner-runtime:${w.kind==='challenger-review'?w.id:w.owner}`;
 export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity,c?:Config) {
  const claimed=s.atomic(()=>{
   const queued=s.get<Wake & {state:string}>(`owner-wake:${w.id}`);
-  if(queued?.state!=='queued')return false;
+  if(queued?.state!=='queued' || (queued as Wake & {notBefore?:number}).notBefore!>Date.now())return false;
   if(queued.kind==='qa-deployed'){
    const deadline=(queued.payload as {deadline?:number})?.deadline;
    if(!Number.isSafeInteger(deadline) || Date.now()>=deadline!){
