@@ -70,6 +70,14 @@ export class ReleaseExecutor {
    }
    const target={preflight:1140,qa:1200,production:1290}[stage];
    if(minute!==target)return this.refuse(day,`${stage} outside window`);
+   // Check persistent STOP before snapshots, prerequisites, reservations or remote calls.
+   const brake=await this.brake();
+   if(brake==='wallet stopped'){
+    const reason='QA deploy skipped: AWS stop latched';
+    this.receipt(day,`${stage}:skipped`,{stage,reason});
+    return {state:'skipped',reason};
+   }
+   if(brake)return this.refuse(day,brake);
    let night=this.s.get<Night>(`executor:${day}:night`);
    if(stage==='preflight'){
     if(!night){const candidate=SnapshotSchema.parse(await this.port.snapshot());night=this.s.atomic(()=>{const existing=this.s.get<Night>(`executor:${day}:night`);if(existing)return existing;const value={day,candidate};this.s.set(`executor:${day}:night`,value);return value;});}

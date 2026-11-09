@@ -28,7 +28,7 @@ test('missing mismatched or late ACCEPT cannot promote',async()=>{
 });
 test('uncertain dispatch stays claimed after restart and never replays',async()=>{const r=rig();r.executor.port.perform=async()=>{r.calls.push('preflight');throw Error('unknown HTTP outcome');};await r.executor.run('preflight');await r.executor.run('preflight');expect(r.calls).toEqual(['preflight']);expect(r.executor.effect('2026-11-09','preflight')?.state).toBe('claimed');r.s.close();});
 test('pending QA survives restart, deadline persists refusal',async()=>{const r=rig();r.pending.add('qa');await qa(r);r.set('21:20');await r.executor.run('reconcile');expect(r.executor.effect('2026-11-09','qa')?.state).toBe('failure');r.s.close();});
-test('wallet and overlap gates refuse',async()=>{for(const kind of ['wallet','overlap']){const r=rig();if(kind==='wallet')r.brake('wallet stopped');else r.overlap();expect((await r.executor.run('preflight')).state).toBe('refused');expect(r.calls).toEqual([]);r.s.close();}});
+test('wallet and overlap gates refuse',async()=>{for(const kind of ['wallet','overlap']){const r=rig();if(kind==='wallet')r.brake('wallet stopped');else r.overlap();expect((await r.executor.run('preflight')).state).toBe(kind==='wallet'?'skipped':'refused');expect(r.calls).toEqual([]);r.s.close();}});
 test('clock is rechecked after asynchronous admission reads',async()=>{const r=rig();const snapshot=r.executor.port.snapshot;r.executor.port.snapshot=async()=>{const value=await snapshot();r.set('19:01');return value;};await r.executor.run('preflight');expect(r.calls).toEqual([]);r.s.close();});
 test('concurrent windows atomically claim once',async()=>{const r=rig();await Promise.all([r.executor.run('preflight'),r.executor.run('preflight')]);expect(r.calls).toEqual(['preflight']);r.s.close();});
 test('hold epoch change refuses QA and Quality artifact mismatch refuses acceptance',async()=>{
@@ -45,4 +45,16 @@ test('deadline release events run before old CI wakes and expired acceptance nev
  expect(pendingWakes(s)[0].id).toBe('accept-now');let starts=0;
  expect(dispatchWake(s,pendingWakes(s).find(w=>w.id==='accept-expired')!,()=>{starts++;})).toBe(false);
  expect(starts).toBe(0);expect(s.get<{state:string}>('owner-wake:accept-expired')?.state).toBe('expired');s.close();
+});
+
+test('latched scheduled windows record skip without snapshots, debits or deploys',async()=>{
+ const r=rig();r.brake('wallet stopped');
+ r.executor.port.snapshot=async()=>{throw Error('remote snapshot must not run');};
+ for(const [clock,stage] of [['19:00','preflight'],['20:00','qa'],['21:30','production']] as const){
+  r.set(clock);expect(await r.executor.run(stage)).toEqual({state:'skipped',reason:'QA deploy skipped: AWS stop latched'});
+  expect(r.s.get(`executor:2026-11-09:${stage}`)).toBeNull();
+ }
+ expect(r.calls).toEqual([]);
+ expect((r.s.db.query('SELECT COUNT(*) AS n FROM debits').get() as {n:number}).n).toBe(0);
+ r.s.close();
 });
