@@ -67,6 +67,12 @@ export function supply(e:Engine,ready:Ticket[],now:number) {
  const unclaimed=ready.filter(t=>!e.sessions().some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
  const target=slotLimit(e.s,e.c)+p.ready_buffer;
  let round=e.s.get<IntakeRound>('intake-round');
+ // Successful implementation can rearm an exhausted round. Docs-only output
+ // cannot repeatedly buy another documentation round while useful work stalls.
+ if(round && !round.closed && round.attempt>=2){
+  const delivered=e.s.db.query("SELECT data FROM events WHERE kind='launcher-publish' AND at>?").all(round.at) as {data:string}[];
+  if(delivered.some(r=>{const x=e.sessions().find(x=>x.id===JSON.parse(r.data).id);if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));}))round={...round,closed:true};
+ }
  if(unclaimed.length>=target){if(round)e.s.set('intake-round',{...round,closed:true});return;}
  if(round && !round.closed) {
   const wake=e.s.get<{state:string;cleanupVerified?:boolean}>(`owner-wake:${round.wake}`);
@@ -164,7 +170,8 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
     }
    } else {
     const data=Retry.parse(artifact(w.scratch,'retry.json'));
-    const payload=w.payload as Failure;
+    const payload=w.payload as Failure & {deadline?:number};
+    if(payload.deadline!==undefined && now>=payload.deadline)throw Error('diagnosis deadline elapsed; owner decision required');
     if(data.session!==payload.session)throw Error('diagnosis session mismatch');
     await retryFailure(e,data,now,execute);
    }
