@@ -147,7 +147,8 @@
   function bar(pct, over) { return '<span class="track" aria-hidden="true"><progress max="100" value="' + Math.max(0, Math.min(100, pct || 0)) + '" class="' + (over ? 'over' : '') + '"></progress></span>'; }
   function localTime(at, date) {
     if (!at) return '—';
-    return new Intl.DateTimeFormat(S.lang === 'fr' ? 'fr-CA' : 'en-CA', Object.assign({ hour: 'numeric', minute: '2-digit' }, date ? { month: 'short', day: 'numeric' } : {})).format(at);
+    var d = new Date(at), c = clock(d.getHours(), d.getMinutes());
+    return date ? new Intl.DateTimeFormat(S.lang === 'fr' ? 'fr-CA' : 'en-CA', {month:'short',day:'numeric'}).format(at) + ', ' + c : c;
   }
   function band() {
     var m = heroMode(), dot = m === 'working' ? 'is-working' : (m === 'needs' ? 'is-warn' : '');
@@ -186,9 +187,9 @@
   function needs() {
     return data.questions.map(function (q, i) {
       ITEMS['q' + i] = Object.assign({ kind: 'question' }, q);
-      return '<section class="ask" aria-label="' + esc(t('needsYou')) + '"><div class="ask-text"><h2>' + esc(q.title) + '</h2><p class="ctx">' + esc(q.context) + '</p></div><div class="ask-side"><div class="ask-choices">' +
+      return '<section class="ask" aria-label="' + esc(t('needsYou')) + '"><div class="ask-text"><h2><button type="button" data-act="open" data-v="q' + i + '" data-k="q' + i + '">' + esc(q.title) + '</button></h2><p class="ctx">' + esc(q.context) + '</p></div><div class="ask-side"><div class="ask-choices">' +
         q.choices.map(function (c, ci) { return '<button type="button" class="btn' + (ci ? ' primary' : '') + '" data-act="answer" data-v="' + i + ':' + ci + '" data-k="answer-' + i + '-' + ci + '">' + esc(c.label) + '</button>'; }).join('') +
-        '</div><p class="ask-default">' + esc(q.defaultLine) + '</p><button class="link" type="button" data-act="open" data-v="q' + i + '" data-k="q' + i + '">' + esc(t('tech')) + '</button></div></section>';
+        '</div><p class="ask-default">' + esc(q.defaultLine) + '</p></div></section>';
     }).join('');
   }
   function col(key, head, count, body) {

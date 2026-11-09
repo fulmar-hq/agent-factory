@@ -44,6 +44,16 @@ try {
         await page.keyboard.press('Escape');
         if(await page.evaluate(()=>document.activeElement?.getAttribute('data-k'))!==key)throw Error('Focus not restored');
       }
+      const completed = page.locator('#col-done .row:visible').first();
+      if(await completed.count()) {
+        await completed.click();
+        const facts = await page.locator('.facts').textContent();
+        if(!['Started','Finished','Took','Expected'].every(word=>facts.includes(word)))throw Error('Completion timing facts missing');
+        const details = await page.locator('#sheet-body').textContent();
+        if(/\d{4}-\d\d-\d\dT|\{\s*"/.test(details))throw Error('Raw completion data');
+        await page.screenshot({path:join(out,`completed-${viewport.width}-${colorScheme}.png`)});
+        await page.keyboard.press('Escape');
+      }
       await page.locator('#lang-fr').click();
       await page.waitForFunction(()=>document.documentElement.lang==='fr');
       if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('French overflow');
