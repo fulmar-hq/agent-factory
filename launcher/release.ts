@@ -72,7 +72,7 @@ export class ReleaseExecutor {
    if(minute!==target)return this.refuse(day,`${stage} outside window`);
    // Check persistent STOP before snapshots, prerequisites, reservations or remote calls.
    const brake=await this.brake();
-   if(brake==='wallet stopped'){
+   if(brake==='AWS stop latched'){
     const reason='QA deploy skipped: AWS stop latched';
     this.receipt(day,`${stage}:skipped`,{stage,reason});
     return {state:'skipped',reason};

@@ -12,7 +12,7 @@ try {
  const port=new AlidoReleasePort();
  let admittedBilling=(await inputs(root)).billing;
  const executor=new ReleaseExecutor(s,port,async()=>{
-  if(s.get('aws-stop-latched')===true)return 'wallet stopped';
+  if(s.get('aws-stop-latched')===true)return 'AWS stop latched';
   if(s.get('paused')!==false)return 'factory paused';
   const r=await inputs(root);admittedBilling=r.billing;const now=Date.now(),reason=awsRefusal(s,c,now,r.billing);
   if(reason)return reason;
