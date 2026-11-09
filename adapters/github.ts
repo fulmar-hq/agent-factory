@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { z } from "zod";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
 export type Issue = {
@@ -10,6 +11,15 @@ export type Issue = {
   state: string;
   labels: { name: string }[];
 };
+const IssueSnapshotSchema = z.object({
+  number: z.number().int().positive().safe(),
+  title: z.string(),
+  body: z.string(),
+  url: z.string(),
+  updatedAt: z.string(),
+  state: z.enum(["OPEN", "CLOSED"]),
+  labels: z.array(z.object({ name: z.string() })),
+});
 export async function command(args: string[], cwd?: string, timeoutMs=30000) {
   const p = Bun.spawn(args, {
     cwd,
@@ -78,7 +88,7 @@ export async function reconcile(
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
-      const issues = JSON.parse(
+      const issues: unknown = JSON.parse(
         await execute([
           "gh",
           "issue",
@@ -92,14 +102,22 @@ export async function reconcile(
           "--json",
           "number,title,body,url,updatedAt,state,labels",
         ],undefined,120000),
-      ) as Issue[];
+      );
+      if (!Array.isArray(issues)) throw Error("GitHub issue snapshot must be an array");
+      const repositoryReady: Ticket[] = [];
       s.atomic(() => {
-        for (const i of issues) {
+        const identities = new Set<number>();
+        for (const row of issues) {
+          // Source corruption must roll back the repository, not become an intake refusal.
+          IssueSnapshotSchema.parse(row);
+          const i = row as Issue;
+          if (identities.has(i.number)) throw Error("duplicate GitHub issue identity");
+          identities.add(i.number);
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
           try {
             const t = issueTicket(project.repo, i);
-            if (t) ready.push(t);
+            if (t) repositoryReady.push(t);
           } catch (e) {
             decision = String(e);
           }
@@ -124,9 +142,7 @@ export async function reconcile(
         });
       });
       // Refuse admissions if the bounded backfill might be incomplete.
-      if (issues.length === 1000)
-        for (let n = ready.length - 1; n >= 0; n--)
-          if (ready[n].repo === project.repo) ready.splice(n, 1);
+      if (issues.length < 1000) ready.push(...repositoryReady);
     } catch (e) {
       s.set(`github:${project.repo}`, { error: String(e), observedAt: now });
     }
