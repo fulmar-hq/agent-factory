@@ -1,4 +1,5 @@
 import { boardQuestions } from "../launcher/questions";
+import { boardModel } from "./model";
 import {slotLimit} from "../launcher/capacity";
 import { issueTicket } from "../adapters/github";
 import { estimate, history, score } from "../estimator/predict";
@@ -112,6 +113,10 @@ export async function board(dir = root, port = 4318) {
         }
       }
       if (req.method !== "GET") return json({ error: "method refused" }, 405);
+      if (url.pathname === "/api/board") {
+        const readings = s.get<Awaited<ReturnType<typeof inputs>>>("readings") ?? await inputs(dir);
+        return json(boardModel(e, readings, Date.now(), url.searchParams.get("lang") === "fr" ? "fr" : "en"));
+      }
       if (url.pathname === "/api/state") {
         const r = s.get<Record<string, any>>("readings") ?? (await inputs(dir)),
           now = Date.now();
