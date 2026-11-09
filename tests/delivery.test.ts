@@ -27,6 +27,14 @@ test("publisher rejects prose and cannot mask an earlier failed check",async()=>
  expect(await p.exited).toBe(0);
 });
 
+test("prose delivery checks refuse before reservation or native start",async()=>{
+ const {launchReady}=await import("../launcher/tick");
+ const s=new Store(":memory:"),e=new Engine(s,config());e.pause(false,"owner");
+ let calls=0;
+ await expect(launchReady(e,{...ticket(),repo:"fulmar-hq/alido",test:"Review sources; git diff --check"},admission(),()=>{calls++;},async()=>{calls++;return "";})).rejects.toThrow("executable test");
+ expect(calls).toBe(0);expect(e.sessions()).toHaveLength(0);expect(s.rows("debits")).toHaveLength(0);s.close();
+});
+
 test("calibration uses native cumulative completed-turn deltas including cache",()=>{
  const row=(p:unknown)=>JSON.stringify({type:"event_msg",payload:p});
  const token=(n:number)=>row({type:"token_count",info:{total_token_usage:{total_tokens:n}}});
