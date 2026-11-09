@@ -58,7 +58,7 @@ test('below pace intake asks for slots plus six, rather than the old buffer',()=
  s.set('readings',{codex:weekly()});supply(e,Array.from({length:13},(_,n)=>ticket(n+1)),now);
  const round=s.get<{wake:string}>('intake-round')!;expect(s.get<any>(`owner-wake:${round.wake}`).payload.target).toBe(16);s.close();
 });
-for(const mode of ['missing','blocked','wrong-head','reject','pending','changes','moved-base','pass'] as const)test(`continuous release requires native challenge and current green checks: ${mode}`,async()=>{
+for(const mode of ['missing','blocked','wrong-head','reject','pending','changes','moved-base','remote-base-race','no-protection','pass'] as const)test(`continuous release requires native challenge and current green checks: ${mode}`,async()=>{
  const s=new Store(':memory:'),c=pushConfig();s.set('paused',false);c.projects={factory:{repo:'fulmar-hq/agent-factory',owners:['builder'],tests:'bun test'}};
  const head='a'.repeat(40),base='b'.repeat(40),url='https://github.com/fulmar-hq/agent-factory/pull/7',id=`challenger:fulmar-hq/agent-factory:7:${head}:${base}`;
  s.event('pub','launcher-publish',{id:'fixture',url,head},'retain',now);
@@ -66,12 +66,12 @@ for(const mode of ['missing','blocked','wrong-head','reject','pending','changes'
  const verdict={head:mode==='wrong-head'?base:head,verdict:mode==='reject'?'CHANGES_REQUESTED':'PASS',evidence:'Inspected concrete synthetic source and boundary checks.'};
  writeFileSync(join(scratch,'challenge.json'),JSON.stringify(verdict));
  const calls:string[][]=[];
- const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:mode==='moved-base'?'d'.repeat(40):base,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args[2].endsWith('/protection')?JSON.stringify({enforce_admins:{enabled:true},required_status_checks:{strict:true,contexts:['Verify']}}):args.includes('POST')?'{}':'[]';return '';};
+ const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:mode==='moved-base'?'d'.repeat(40):base,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args[2].endsWith('/protection')?JSON.stringify({enforce_admins:{enabled:true},required_status_checks:{strict:mode!=='no-protection',contexts:['Verify']}}):args.includes('POST')?'{}':'[]';if(args.includes('merge') && mode==='remote-base-race')throw Error('server requires branch up to date after concurrent base advance');return '';};
  await challengeAndMerge(s,c,execute,now);
  if(mode!=='missing')s.set(`owner-wake:${id}`,{...s.get<any>(`owner-wake:${id}`),state:mode==='blocked'?'blocked':'done',cleanupVerified:true,native:'review-native',scratch});
  await challengeAndMerge(s,c,execute,now+1);await challengeAndMerge(s,c,execute,now+2);
- expect(calls.filter(a=>a.includes('merge')).length).toBe(mode==='pass'?1:0);
- if(mode==='pass')expect(calls.find(a=>a.includes('merge'))).toContain('--match-head-commit');s.close();
+ expect(calls.filter(a=>a.includes('merge')).length).toBe(['pass','remote-base-race'].includes(mode)?1:0);
+ if(mode==='pass')expect(calls.find(a=>a.includes('merge'))).toContain('--match-head-commit');expect(s.rows('events').filter((x:any)=>x.kind==='release-merged')).toHaveLength(mode==='pass'?1:0);s.close();
 });
 test('empty/skipped/failed checks never count as green',()=>{expect(greenChecks([])).toBe(false);for(const bucket of ['skipping','cancel','fail','pending'])expect(greenChecks([{bucket}])).toBe(false);});
 test('concurrent challengers reserve the shared slot pool atomically and retain separate custody',async()=>{

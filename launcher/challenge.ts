@@ -18,7 +18,7 @@ export function daytimeMerges(now:number){const {minute}=toronto(now);return min
 export async function strictMergeProtection(repo:string,branch:string,execute=command) {
  try {
   const p=JSON.parse(await execute(['gh','api',`repos/${repo}/branches/${branch}/protection`]));
-  if(p.enforce_admins?.enabled===true && p.required_status_checks?.strict===true && p.required_status_checks.contexts?.length>0)return true;
+  if(p.enforce_admins?.enabled===true && p.required_status_checks?.strict===true && Array.isArray(p.required_status_checks.contexts) && p.required_status_checks.contexts.length>0)return true;
  }catch{/* A ruleset may protect a branch without classic protection. */}
  try {
   const rules=JSON.parse(await execute(['gh','api',`repos/${repo}/rules/branches/${branch}`]));
