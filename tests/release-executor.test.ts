@@ -35,3 +35,14 @@ test('hold epoch change refuses QA and Quality artifact mismatch refuses accepta
  const r=rig();await r.executor.run('preflight');const original=r.executor.port.snapshot;r.executor.port.snapshot=async()=>({...await original(),holdId:'changed-hold'});r.set('20:00');expect((await r.executor.run('qa')).state).toBe('refused');expect(r.calls).toEqual(['preflight']);r.s.close();
  const a=rig();await qa(a);expect(()=>accept(a,{artifact:'other-artifact'})).toThrow();a.s.close();
 });
+test('deadline release events run before old CI wakes and expired acceptance never starts',async()=>{
+ const {queueWake,pendingWakes,dispatchWake}=await import('../launcher/wake');
+ const {mkdtempSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const s=new Store(':memory:');s.set('owner-runtime:quality',{workspace:mkdtempSync(join(tmpdir(),'quality-deadline-'))});
+ queueWake(s,{id:'old-ci',owner:'quality',kind:'ci-finished',payload:{}});
+ queueWake(s,{id:'accept-now',owner:'quality',kind:'qa-deployed',payload:{deadline:Date.now()+60000}});
+ queueWake(s,{id:'accept-expired',owner:'quality',kind:'qa-deployed',payload:{deadline:Date.now()-1}});
+ expect(pendingWakes(s)[0].id).toBe('accept-now');let starts=0;
+ expect(dispatchWake(s,pendingWakes(s).find(w=>w.id==='accept-expired')!,()=>{starts++;})).toBe(false);
+ expect(starts).toBe(0);expect(s.get<{state:string}>('owner-wake:accept-expired')?.state).toBe('expired');s.close();
+});
