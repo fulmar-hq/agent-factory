@@ -58,17 +58,17 @@ test('below pace intake asks for slots plus six, rather than the old buffer',()=
  s.set('readings',{codex:weekly()});supply(e,Array.from({length:13},(_,n)=>ticket(n+1)),now);
  const round=s.get<{wake:string}>('intake-round')!;expect(s.get<any>(`owner-wake:${round.wake}`).payload.target).toBe(16);s.close();
 });
-for(const mode of ['missing','blocked','wrong-head','reject','pending','changes','pass'] as const)test(`continuous release requires native challenge and current green checks: ${mode}`,async()=>{
+for(const mode of ['missing','blocked','wrong-head','reject','pending','changes','moved-base','pass'] as const)test(`continuous release requires native challenge and current green checks: ${mode}`,async()=>{
  const s=new Store(':memory:'),c=pushConfig();s.set('paused',false);c.projects={factory:{repo:'fulmar-hq/agent-factory',owners:['builder'],tests:'bun test'}};
- const head='a'.repeat(40),base='b'.repeat(40),url='https://github.com/fulmar-hq/agent-factory/pull/7',id=`challenger:fulmar-hq/agent-factory:7:${head}`;
+ const head='a'.repeat(40),base='b'.repeat(40),url='https://github.com/fulmar-hq/agent-factory/pull/7',id=`challenger:fulmar-hq/agent-factory:7:${head}:${base}`;
  s.event('pub','launcher-publish',{id:'fixture',url,head},'retain',now);
  const scratch=mkdtempSync(join(tmpdir(),'factory-challenge-'));
  const verdict={head:mode==='wrong-head'?base:head,verdict:mode==='reject'?'CHANGES_REQUESTED':'PASS',evidence:'Inspected concrete synthetic source and boundary checks.'};
  writeFileSync(join(scratch,'challenge.json'),JSON.stringify(verdict));
  const calls:string[][]=[];
- const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args.includes('POST')?'{}':'[]';return '';};
+ const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:mode==='moved-base'?'d'.repeat(40):base,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args.includes('POST')?'{}':'[]';return '';};
  await challengeAndMerge(s,c,execute,now);
- if(mode!=='missing')s.set(`owner-wake:${id}`,{state:mode==='blocked'?'blocked':'done',cleanupVerified:true,native:'review-native',scratch});
+ if(mode!=='missing')s.set(`owner-wake:${id}`,{...s.get<any>(`owner-wake:${id}`),state:mode==='blocked'?'blocked':'done',cleanupVerified:true,native:'review-native',scratch});
  await challengeAndMerge(s,c,execute,now+1);await challengeAndMerge(s,c,execute,now+2);
  expect(calls.filter(a=>a.includes('merge')).length).toBe(mode==='pass'?1:0);
  if(mode==='pass')expect(calls.find(a=>a.includes('merge'))).toContain('--match-head-commit');s.close();
@@ -106,7 +106,7 @@ test('one unavailable PR inventory does not block another repository review',asy
  const head='c'.repeat(40),url='https://github.com/fulmar-hq/agent-factory/pull/3';s.event('pub','launcher-publish',{url,head},'retain',now);
  const execute=async(args:string[])=>{if(args.includes('fulmar-hq/alido'))throw Error('synthetic inventory offline');return JSON.stringify([{number:3,url,headRefOid:head,baseRefOid:'b'.repeat(40),baseRefName:'main',isDraft:false}]);};
  await challengeAndMerge(s,c,execute,now);
- expect(s.get<any>(`owner-wake:challenger:fulmar-hq/agent-factory:3:${head}`).state).toBe('queued');
+ expect(s.get<any>(`owner-wake:challenger:fulmar-hq/agent-factory:3:${head}:${"b".repeat(40)}`).state).toBe('queued');
  expect(s.rows('events').some((x:any)=>x.kind==='challenger-inventory-refusal')).toBe(true);s.close();
 });
 test('a proven pre-native qualification refusal defers without consuming the native run',async()=>{
@@ -137,4 +137,10 @@ test('a new capacity policy earns its own full healthy dwell',()=>{
  const c=pushConfig();expect(reconcileCapacity(s,c,10,'normal',now+60*60000,.5)!.slots).toBe(10);
  for(let minute=61;minute<90;minute++)reconcileCapacity(s,c,10,'normal',now+minute*60000,.5);
  expect(slotLimit(s,c)).toBe(10);expect(reconcileCapacity(s,c,10,'normal',now+90*60000,.5)!.slots).toBe(11);s.close();
+});
+
+test('an explicit push admission setting remains binding and its absence is supported',()=>{
+ const c=pushConfig();c.usage_push!.admit_below=.75;
+ expect(()=>usageGate(meter(.96),false,now,c,'codex')).toThrow('high benefit only');
+ delete c.usage_push!.admit_below;expect(ConfigSchema.safeParse(c).success).toBe(true);expect(()=>usageGate(meter(.96),false,now,c,'codex')).not.toThrow();
 });

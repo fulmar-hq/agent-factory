@@ -4,7 +4,7 @@ export function pushing(c:Config,now:number) {return !!c.usage_push && now<Date.
 // providers retain the original gates even while the Codex push is active.
 export function usageThresholds(c:Config,now:number,provider?:string) {
  if(!pushing(c,now) || provider!=='codex')return {admit_below:Math.min(c.usage_gates.admit_below,.7),high_benefit_only_below:Math.min(c.usage_gates.high_benefit_only_below,.9),stop_at:Math.min(c.usage_gates.stop_at,.9)};
- return c.usage_gates;
+ return {...c.usage_gates,admit_below:Math.min(c.usage_gates.admit_below,c.usage_push?.admit_below ?? c.usage_gates.admit_below)};
 }
 export function buildEffort(c:Config,t:Ticket,now:number) {
  return pushing(c,now) && t.provider==='codex' ? c.usage_push!.effort.build : t.effort ?? c.owners[t.owner].effort;

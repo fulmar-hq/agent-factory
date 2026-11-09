@@ -27,11 +27,12 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
     if(!publications.some(p=>p.url===pr.url))continue;
     const parsed=ChallengeTarget.safeParse({repo:project.repo,pr:pr.number,head:pr.headRefOid,base:pr.baseRefOid,branch:pr.baseRefName,url:pr.url});
     if(!parsed.success || pr.isDraft || (project.repo==='fulmar-hq/alido' ? pr.baseRefName!=='QA' : pr.baseRefName!=='main'))continue;
-    const target=parsed.data,id=`challenger:${project.repo}:${pr.number}:${target.head}`;
+    const target=parsed.data,id=`challenger:${project.repo}:${pr.number}:${target.head}:${target.base}`;
     queueWake(s,{id,owner:'release',kind:'challenger-review',payload:target},now);
-    const w=s.get<{state:string;native?:string;cleanupVerified?:boolean;scratch?:string}>(`owner-wake:${id}`);
+    const w=s.get<{state:string;native?:string;payload?:unknown;cleanupVerified?:boolean;scratch?:string}>(`owner-wake:${id}`);
     if(w?.state!=='done' || !w.cleanupVerified || !w.native || !w.scratch)continue;
     try {
+     const reviewed=ChallengeTarget.parse(w.payload);if(reviewed.head!==target.head || reviewed.base!==target.base)continue;
      const fd=openSync(join(w.scratch,'challenge.json'),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
      let verdict:z.infer<typeof Verdict>;
      try{const st=fstatSync(fd);if(!st.isFile() || st.size>128*1024)throw Error('invalid challenger artifact');verdict=Verdict.parse(JSON.parse(readFileSync(fd,'utf8')));}finally{closeSync(fd);}
@@ -39,7 +40,7 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
      const marker=`<!-- ${id} -->`;
      const comments=JSON.parse(await execute(['gh','api',`repos/${project.repo}/issues/${pr.number}/comments?per_page=100`]));
      if(!Array.isArray(comments) || comments.length>=100)throw Error('challenger comment readback truncated');
-     const body=`${marker}\nCodex challenger: ${verdict.verdict}\nHead: ${target.head}\nNative: ${w.native}\n\n${verdict.evidence}`;
+     const body=`${marker}\nCodex challenger: ${verdict.verdict}\nHead: ${target.head}\nBase: ${target.base}\nNative: ${w.native}\n\n${verdict.evidence}`;
      if(!comments.some(x=>x.body===body)){
       if(!s.event(`challenge-post:${id}`,'challenger-post-claimed',{target,native:w.native},undo,now))continue;
       await execute(['gh','api',`repos/${project.repo}/issues/${pr.number}/comments`,'--method','POST','-f',`body=${body}`]);
@@ -55,8 +56,8 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
       const promotions=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--base','main','--head','QA','--state','open','--json','number']));
       if(!Array.isArray(promotions) || promotions.length)continue;
      }
-     const current=JSON.parse(await execute(['gh','pr','view',String(pr.number),'--repo',project.repo,'--json','headRefOid,baseRefName,state,isDraft,reviewDecision']));
-     if(current.headRefOid!==target.head || current.baseRefName!==target.branch || current.state!=='OPEN' || current.isDraft || current.reviewDecision==='CHANGES_REQUESTED' || s.get('paused')!==false)continue;
+     const current=JSON.parse(await execute(['gh','pr','view',String(pr.number),'--repo',project.repo,'--json','headRefOid,baseRefOid,baseRefName,state,isDraft,reviewDecision']));
+     if(current.headRefOid!==target.head || current.baseRefOid!==target.base || current.baseRefName!==target.branch || current.state!=='OPEN' || current.isDraft || current.reviewDecision==='CHANGES_REQUESTED' || s.get('paused')!==false)continue;
      if(project.repo==='fulmar-hq/alido' && !daytimeMerges(Date.now()))continue;
      if(!s.event(`continuous-merge:${id}`,'release-merge-claimed',{...target,actor:'release',native:w.native},undo,now))continue;
      await execute(['gh','pr','merge',String(pr.number),'--repo',project.repo,'--squash','--match-head-commit',target.head]);

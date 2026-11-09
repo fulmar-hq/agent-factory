@@ -27,7 +27,7 @@ export const ConfigSchema = z.object({
     rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
   }).optional(),
   usage_push: z.object({
-    until: z.union([z.iso.datetime({offset:true}),z.iso.datetime({offset:true,precision:-1})]), target:z.string(), pace:z.string(), admit_below:ratio,
+    until: z.union([z.iso.datetime({offset:true}),z.iso.datetime({offset:true,precision:-1})]), target:z.string(), pace:z.string(), admit_below:ratio.optional(),
     ready_buffer:z.literal("slots + 6"), effort:z.object({build:z.literal("high"),intake:z.literal("medium"),review:z.literal("medium")}),
     challenger:z.string(), guard:z.string(),
   }).optional(),
