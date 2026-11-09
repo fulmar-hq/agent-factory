@@ -101,7 +101,7 @@ export async function tick(dir = root) {
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
       ready=await reconcile(s,c,now);
-      const count=await autoApprove(e,ready,r.billing,now);
+      const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
       if(count)ready=await reconcile(s,c,now);
       supply(e,ready,now);
       return count;
