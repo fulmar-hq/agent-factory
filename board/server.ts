@@ -1,3 +1,4 @@
+import { boardEvidence } from "./runtime";
 import { boardQuestions } from "../launcher/questions";
 import { boardModel } from "./model";
 import {slotLimit} from "../launcher/capacity";
@@ -115,7 +116,8 @@ export async function board(dir = root, port = 4318) {
       if (req.method !== "GET") return json({ error: "method refused" }, 405);
       if (url.pathname === "/api/board") {
         const readings = s.get<Awaited<ReturnType<typeof inputs>>>("readings") ?? await inputs(dir);
-        return json(boardModel(e, readings, Date.now(), url.searchParams.get("lang") === "fr" ? "fr" : "en"));
+        const now = Date.now();
+        return json(boardModel(e, readings, now, url.searchParams.get("lang") === "fr" ? "fr" : "en", await boardEvidence(dir,now), url.searchParams.get("more") === "1"));
       }
       if (url.pathname === "/api/state") {
         const r = s.get<Record<string, any>>("readings") ?? (await inputs(dir)),
