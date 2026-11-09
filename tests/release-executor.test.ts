@@ -46,3 +46,15 @@ test('deadline release events run before old CI wakes and expired acceptance nev
  expect(dispatchWake(s,pendingWakes(s).find(w=>w.id==='accept-expired')!,()=>{starts++;})).toBe(false);
  expect(starts).toBe(0);expect(s.get<{state:string}>('owner-wake:accept-expired')?.state).toBe('expired');s.close();
 });
+
+test('latched scheduled windows record skip without snapshots, debits or deploys',async()=>{
+ const r=rig();r.brake('AWS stop latched');
+ r.executor.port.snapshot=async()=>{throw Error('remote snapshot must not run');};
+ for(const [clock,stage] of [['19:00','preflight'],['20:00','qa'],['21:30','production']] as const){
+  r.set(clock);expect(await r.executor.run(stage)).toEqual({state:'skipped',reason:'QA deploy skipped: AWS stop latched'});
+  expect(r.s.get(`executor:2026-11-09:${stage}`)).toBeNull();
+ }
+ expect(r.calls).toEqual([]);
+ expect((r.s.db.query('SELECT COUNT(*) AS n FROM debits').get() as {n:number}).n).toBe(0);
+ r.s.close();
+});
