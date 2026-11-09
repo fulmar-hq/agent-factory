@@ -13,7 +13,7 @@ import {tmpdir} from 'node:os';
 function pushConfig(){const c=config();c.owners.release={harness:'codex',model:'gpt-6.1-sol',effort:'medium'};c.usage_push={until:new Date(now+48*3600000).toISOString(),target:'Useful implementation',pace:'remaining/hours',admit_below:.97,ready_buffer:'slots + 6',effort:{build:'high',intake:'medium',review:'medium'},challenger:'one per head',guard:'useful only'};c.usage_gates={admit_below:.97,high_benefit_only_below:.97,stop_at:.98,max_meter_age_minutes:15};c.capacity.controller={start:10,max:16,interval_minutes:30,busy_above:.8,failure_below:.3,mini_memory_free_floor:.25};return c;}
 const weekly=()=>({...meter(.14),nativeProvider:'codex' as const,windows:[{used:.14,resetsAt:now+48*3600000,durationMinutes:10080}]});
 test('new config validates, impossible capacity and reversed gates refuse',()=>{
- const c=pushConfig();expect(ConfigSchema.safeParse(c).success).toBe(true);
+ const c=pushConfig();expect(ConfigSchema.safeParse(c).success).toBe(true);expect(ConfigSchema.safeParse({...c,usage_push:{...c.usage_push,until:'2026-11-11T07:40-05:00'}}).success).toBe(true);
  expect(ConfigSchema.safeParse({...c,capacity:{...c.capacity,controller:{...c.capacity.controller,start:17}}}).success).toBe(false);
  expect(ConfigSchema.safeParse({...c,usage_gates:{...c.usage_gates,stop_at:.5}}).success).toBe(false);
 });
