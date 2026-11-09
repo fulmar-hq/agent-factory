@@ -139,10 +139,10 @@ test('cause restart budget pauses only that cause and diagnosis deadlines escala
 test('overlapping tick effects have one durable lease; throw releases it',async()=>{
  const e=setup();try {
   let release!:()=>void;const wait=new Promise<void>(r=>release=r);let ran=0;
-  const a=autonomyEffects(e.s,async()=>{ran++;await wait;});
-  expect(await autonomyEffects(e.s,async()=>ran++)).toBeUndefined();release();await a;expect(ran).toBe(1);
-  await expect(autonomyEffects(e.s,async()=>{throw Error('fixture');})).rejects.toThrow();
-  await autonomyEffects(e.s,async()=>ran++);expect(ran).toBe(2);
+  const a=autonomyEffects(e.s,async()=>{ran++;await wait;},()=>"fixture-process");
+  expect(await autonomyEffects(e.s,async()=>ran++,()=>"fixture-process")).toBeUndefined();release();await a;expect(ran).toBe(1);
+  await expect(autonomyEffects(e.s,async()=>{throw Error('fixture');},()=>"fixture-process")).rejects.toThrow();
+  await autonomyEffects(e.s,async()=>ran++,()=>"fixture-process");expect(ran).toBe(2);
  }finally{e.s.close();}
 });
 test('capacity grows one per continuous healthy hour, caps at 12, retains state on restart',()=>{
