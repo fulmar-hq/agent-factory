@@ -13,6 +13,23 @@ export const Verdict=z.object({head:sha,verdict:z.enum(['PASS','CHANGES_REQUESTE
 const undo='Retain review, native logs, merge claim and branches. Undo merged source with a signed revert.';
 // Preserve the existing 19:00 preflight through 22:00 release deadline.
 export function daytimeMerges(now:number){const {minute}=toronto(now);return minute<1140 || minute>=1320;}
+// A fresh base read alone has a race. The server must reject an unchanged
+// source head if another actor advances the destination before merge.
+export async function strictMergeProtection(repo:string,branch:string,execute=command) {
+ try {
+  const p=JSON.parse(await execute(['gh','api',`repos/${repo}/branches/${branch}/protection`]));
+  if(p.enforce_admins?.enabled===true && p.required_status_checks?.strict===true && p.required_status_checks.contexts?.length>0)return true;
+ }catch{/* A ruleset may protect a branch without classic protection. */}
+ try {
+  const rules=JSON.parse(await execute(['gh','api',`repos/${repo}/rules/branches/${branch}`]));
+  if(!Array.isArray(rules) || rules.length>=100)return false;
+  for(const r of rules)if(r.type==='required_status_checks' && r.parameters?.strict_required_status_checks_policy===true && r.ruleset_source_type==='Repository' && Number.isSafeInteger(r.ruleset_id)) {
+   const p=JSON.parse(await execute(['gh','api',`repos/${repo}/rulesets/${r.ruleset_id}`]));
+   if(p.enforcement==='active' && p.current_user_can_bypass==='never' && p.rules?.some((x:any)=>x.type==='required_status_checks' && x.parameters?.strict_required_status_checks_policy===true && x.parameters.required_status_checks?.length>0))return true;
+  }
+ }catch{/* Unknown server protection refuses mutation. */}
+ return false;
+}
 export function greenChecks(checks:{bucket:string}[]) {return checks.length>0 && checks.every(c=>c.bucket==='pass');}
 export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Date.now()) {
  if(!c.usage_push || s.get('paused')!==false || c.owners.release?.harness!=='codex')return;
@@ -56,6 +73,7 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
       const promotions=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--base','main','--head','QA','--state','open','--json','number']));
       if(!Array.isArray(promotions) || promotions.length)continue;
      }
+     if(!await strictMergeProtection(project.repo,target.branch,execute))throw Error('strict server-side merge protection unverified');
      const current=JSON.parse(await execute(['gh','pr','view',String(pr.number),'--repo',project.repo,'--json','headRefOid,baseRefOid,baseRefName,state,isDraft,reviewDecision']));
      if(current.headRefOid!==target.head || current.baseRefOid!==target.base || current.baseRefName!==target.branch || current.state!=='OPEN' || current.isDraft || current.reviewDecision==='CHANGES_REQUESTED' || s.get('paused')!==false)continue;
      if(project.repo==='fulmar-hq/alido' && !daytimeMerges(Date.now()))continue;

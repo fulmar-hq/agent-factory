@@ -66,7 +66,7 @@ for(const mode of ['missing','blocked','wrong-head','reject','pending','changes'
  const verdict={head:mode==='wrong-head'?base:head,verdict:mode==='reject'?'CHANGES_REQUESTED':'PASS',evidence:'Inspected concrete synthetic source and boundary checks.'};
  writeFileSync(join(scratch,'challenge.json'),JSON.stringify(verdict));
  const calls:string[][]=[];
- const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:mode==='moved-base'?'d'.repeat(40):base,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args.includes('POST')?'{}':'[]';return '';};
+ const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'main',isDraft:false,reviewDecision:mode==='changes'?'CHANGES_REQUESTED':'',headRefName:'feat/factory-fixture'}]);if(args.includes('checks'))return JSON.stringify([{bucket:mode==='pending'?'pending':'pass'}]);if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:mode==='moved-base'?'d'.repeat(40):base,baseRefName:'main',state:'OPEN',isDraft:false});if(args[1]==='api')return args[2].endsWith('/protection')?JSON.stringify({enforce_admins:{enabled:true},required_status_checks:{strict:true,contexts:['Verify']}}):args.includes('POST')?'{}':'[]';return '';};
  await challengeAndMerge(s,c,execute,now);
  if(mode!=='missing')s.set(`owner-wake:${id}`,{...s.get<any>(`owner-wake:${id}`),state:mode==='blocked'?'blocked':'done',cleanupVerified:true,native:'review-native',scratch});
  await challengeAndMerge(s,c,execute,now+1);await challengeAndMerge(s,c,execute,now+2);
@@ -143,4 +143,17 @@ test('an explicit push admission setting remains binding and its absence is supp
  const c=pushConfig();c.usage_push!.admit_below=.75;
  expect(()=>usageGate(meter(.96),false,now,c,'codex')).toThrow('high benefit only');
  delete c.usage_push!.admit_below;expect(ConfigSchema.safeParse(c).success).toBe(true);expect(()=>usageGate(meter(.96),false,now,c,'codex')).not.toThrow();
+});
+
+test('server-side up-to-date protection must be enforced for the merging actor',async()=>{
+ const {strictMergeProtection}=await import('../launcher/challenge');
+ const classic=(strict:boolean,admin:boolean)=>async(args:string[])=>args[2].endsWith('/protection')?JSON.stringify({enforce_admins:{enabled:admin},required_status_checks:{strict,contexts:['Verify']}}):'[]';
+ expect(await strictMergeProtection('example/demo','main',classic(true,true))).toBe(true);
+ expect(await strictMergeProtection('example/demo','main',classic(false,true))).toBe(false);
+ expect(await strictMergeProtection('example/demo','main',classic(true,false))).toBe(false);
+ for(const bypass of ['never','always']){
+  const execute=async(args:string[])=>{if(args[2].endsWith('/protection'))throw Error('no classic protection');return JSON.stringify(args[2].includes('/rules/branches/')?[{type:'required_status_checks',parameters:{strict_required_status_checks_policy:true},ruleset_source_type:'Repository',ruleset_id:1}]:{enforcement:'active',current_user_can_bypass:bypass,rules:[{type:'required_status_checks',parameters:{strict_required_status_checks_policy:true,required_status_checks:[{context:'Verify'}]}}]});};
+  expect(await strictMergeProtection('example/demo','main',execute)).toBe(bypass==='never');
+ }
+ expect(await strictMergeProtection('example/demo','main',async()=>{throw Error('unknown protection');})).toBe(false);
 });
