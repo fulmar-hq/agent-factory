@@ -9,6 +9,7 @@ import {Engine,claimPath} from './engine';
 import {Store} from '../tracking/store';
 import {queueWake,type Wake} from './wake';
 import {slotLimit} from './capacity';
+import {observeSupplyIdle,type SupplyObservation} from './supply-idle';
 import {command,approveIntake,intakeLabel,issueTicket,type Issue} from '../adapters/github';
 import {branchFor,executableTest} from '../adapters/delivery';
 import {available,awsRefusal} from '../wallet/ledger';
@@ -61,42 +62,71 @@ export function policyRefusal(e:Engine,t:Ticket,raw:Record<string,unknown>,round
  if(t.costCents>available(e.s,e.c,t.wallet,now,billing))return 'wallet does not fit';
  return null;
 }
-export type IntakeRound={id:string;at:number;attempt:number;wake:string;closed?:boolean};
-export function supply(e:Engine,ready:Ticket[],now:number) {
- const p=e.c.autonomy;if(!p || e.s.get('paused')!==false)return;
- // Old claimed digests do not constitute ready supply.
- const unclaimed=ready.filter(t=>!e.sessions().some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
+export type IntakeRound={id:string;at:number;attempt:number;wake:string;closed?:boolean;retryAt?:number;backoff?:number};
+export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObservation,alertPath?:string) {
+ const p=e.c.autonomy;
+ if(!p || e.s.get('paused')!==false){if(e.s.get('supply-idle'))e.s.set('supply-idle',null);return;}
+ const sessions=e.sessions(),refused=new Set(observation?.refusals.map(r=>r.ticket));
+ const unclaimed=ready.filter(t=>!refused.has(`${t.repo}#${t.number}`) && !sessions.some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
+ const idle=observation ? observeSupplyIdle(e,unclaimed.length,now,observation,alertPath) : null;
+ const idleDue=!!idle && !idle.wake && now-idle.since>=p.idle_wake_minutes*60000;
  const target=slotLimit(e.s,e.c)+p.ready_buffer;
  let round=e.s.get<IntakeRound>('intake-round');
- // Successful implementation can rearm an exhausted round. Docs-only output
- // cannot repeatedly buy another documentation round while useful work stalls.
- if(round && !round.closed && round.attempt>=2){
-  const delivered=e.s.db.query("SELECT data FROM events WHERE kind='launcher-publish' AND at>?").all(round.at) as {data:string}[];
-  if(delivered.some(r=>{const x=e.sessions().find(x=>x.id===JSON.parse(r.data).id);if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));}))round={...round,closed:true};
+ const markIdleWake=(wake:string)=>{
+  if(!idleDue)return;
+  e.s.set('supply-idle',{...idle,wake});
+  e.s.event(`supply-idle-wake:${idle!.id}`,'supply-idle-wake',{...idle,wake,minutes:p.idle_wake_minutes},undo,now);
+ };
+ // Never replace a queued/live round because another worker published or the
+ // buffer briefly filled. Native custody and cleanup remain authoritative.
+ const wake=round ? e.s.get<Wake & {state:string;cleanupVerified?:boolean}>(`owner-wake:${round.wake}`) : null;
+ if(round && wake && ['starting','running'].includes(wake.state)){
+  markIdleWake(round.wake);
+  if(now-round.at>=1800000)ownerDecision(e.s,e.c,`intake-overdue:${round.wake}`,p.intake_owner,'Intake deadline elapsed; native custody still unresolved, no duplicate started',{round,wake},now);
+  return;
  }
  if(unclaimed.length>=target){if(round)e.s.set('intake-round',{...round,closed:true});return;}
- if(round && !round.closed) {
-  const wake=e.s.get<{state:string;cleanupVerified?:boolean}>(`owner-wake:${round.wake}`);
-  if(now-round.at<1800000 && !['done','blocked'].includes(wake?.state ?? ''))return;
-  if(wake && ['starting','running'].includes(wake.state)){
-   if(now-round.at>=1800000)ownerDecision(e.s,e.c,`intake-overdue:${round.wake}`,p.intake_owner,'Intake deadline elapsed; native custody still unresolved, no duplicate started',{round,wake},now);
-   return;
-  }
-  // Expire only a never-dispatched queue entry, retaining its event. A concurrent
-  // dispatcher that acquired custody wins; do not start a second owner run.
+ if(round && (!round.closed || wake?.state==='queued' || wake?.cleanupVerified!==true)){
   if(wake?.state==='queued'){
+   markIdleWake(round.wake);
+   if(now-round.at<1800000)return;
    const expired=e.s.atomic(()=>{const current=e.s.get<Wake & {state:string}>(`owner-wake:${round!.wake}`);if(current?.state!=='queued')return false;e.s.set(`owner-wake:${round!.wake}`,{...current,state:'expired',cleanupVerified:true});return true;});
    if(!expired)return;
-  }
-  if(round.attempt>=2){
-   if(p.intake_mode==='drain')e.s.event(`drain-exhausted:${round.id}`,'drain-intake-exhausted',{round,ready:unclaimed.length,target},undo,now);
-   else ownerDecision(e.s,e.c,`intake-exhausted:${round.id}`,p.intake_owner,'Intake did not fill the ready queue after two bounded rounds',{round,ready:unclaimed.length,target},now);
+  }else if(!wake || wake.cleanupVerified!==true || !['done','blocked','expired'].includes(wake.state)){
+   if(now-round.at>=1800000)ownerDecision(e.s,e.c,`intake-custody:${round.wake}`,p.intake_owner,'Intake cleanup evidence unresolved; no duplicate started',{round,wake},now);
    return;
   }
-  round={...round,at:now,attempt:2,wake:`intake:${round.id}:2`};
- } else {const id=`${now}-${crypto.randomUUID()}`;round={id,at:now,attempt:1,wake:`intake:${id}:1`};}
+  const delivered=e.s.db.query("SELECT data FROM events WHERE kind='launcher-publish' AND at>?").all(round.at) as {data:string}[];
+  const useful=delivered.some(r=>{const x=sessions.find(x=>x.id===JSON.parse(r.data).id);if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));});
+  if(useful){round={...round,closed:true};e.s.set('intake-backoff',0);}
+  else if(round.attempt>=2){
+   if(round.retryAt===undefined){
+    const backoff=Math.min((e.s.get<number>('intake-backoff') ?? 0)+1,7);
+    const delay=Math.min(60,p.idle_wake_minutes*2**(backoff-1))*60000;
+    round={...round,retryAt:now+delay,backoff};e.s.set('intake-round',round);e.s.set('intake-backoff',backoff);
+    if(p.intake_mode==='drain')e.s.event(`drain-exhausted:${round.id}`,'drain-intake-exhausted',{round,ready:unclaimed.length,target},undo,now);
+    else ownerDecision(e.s,e.c,`intake-exhausted:${round.id}`,p.intake_owner,'Intake did not fill the ready queue after two bounded rounds; retry scheduled',{round,ready:unclaimed.length,target},now);
+    e.s.event(`intake-retry:${round.id}`,'intake-retry-scheduled',{round,delay},undo,now);
+   }
+   // A decision default rejects its proposed effects, never future read-only
+   // intake. Backoff is durable; the first idle deadline may shorten it once.
+   if(now<round.retryAt! && !idleDue)return;
+   round={...round,closed:true};
+  }else round={...round,at:now,attempt:2,wake:`intake:${round.id}:2`};
+ }
+ if(!round || round.closed){const id=`${now}-${crypto.randomUUID()}`;round={id,at:now,attempt:1,wake:`intake:${id}:1`};}
  e.s.set('intake-round',round);
- queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,existing:(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{const i=JSON.parse(r.snapshot) as Issue;return {id:r.id,title:i.title,state:i.state,labels:i.labels};}).filter(i=>i.state==='OPEN'),occupied:e.active().map(x=>({id:x.id,brief:JSON.parse(x.brief)}))}},now);
+ const publications=new Map((e.s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery') ORDER BY at").all() as {data:string}[]).map(r=>{const d=JSON.parse(r.data) as {id:string;url:string};return [d.id,d.url];}));
+ const existing=(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{
+  const i=JSON.parse(r.snapshot) as Issue;
+  const session=sessions.filter(x=>x.ticket===r.id).sort((a,b)=>b.attempt-a.attempt).find(x=>publications.has(x.id));
+  const pr=session ? publications.get(session.id) : undefined;
+  return {id:r.id,title:i.title.slice(0,180),state:i.state,labels:i.labels.filter(l=>/^(state|area|kind):/.test(l.name)).slice(0,8).map(l=>({name:l.name.slice(0,80)})),scope:i.body?.match(/```factory\s*\n([\s\S]*?)\n```/)?.[1].slice(0,1200),pr,checks:pr ? e.s.get(`board-pr:${pr}`) : undefined};
+ }).filter(i=>i.state==='OPEN');
+ const review=existing.filter(i=>i.labels.some(l=>l.name==='state:review'));
+ const brief='Free capacity is work to staff. Review-state issues need bounded review, challenge or fix-up tasks tied to their existing issue/PR; do not wait for the whole review queue or invent new scope. Inspect current evidence, avoid duplicate/occupied paths, and return source-backed factory briefs with executable checks. A rejected/defaulted proposal stays unapproved. Report concrete blockers if no safe leaf exists; the launcher retries with backoff.';
+ queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,brief,idleSince:idle?.since,free:slotLimit(e.s,e.c)-e.active().length,refusals:observation?.refusals.slice(0,20).map(r=>({...r,reason:r.reason.slice(0,500)})),reviewCount:review.length,existing:[...review,...existing.filter(i=>!review.includes(i))].slice(0,50),existingCount:existing.length,occupied:e.active().slice(0,12).map(x=>({id:x.id,ticket:x.ticket,paths:(JSON.parse(x.brief) as Ticket).paths.slice(0,30)}))}},now);
+ markIdleWake(round.wake);
 }
 // Missing proof is an escalation, not a synthesized successful session.
 export type Cause='budget'|'sandbox'|'test'|'publisher'|'timeout'|'unknown';
