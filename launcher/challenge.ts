@@ -1,3 +1,4 @@
+import {toronto} from './release';
 import {z} from 'zod';
 import {join} from 'node:path';
 import {openSync,readFileSync,fstatSync,closeSync,constants} from 'node:fs';
@@ -10,6 +11,8 @@ const sha=z.string().regex(/^[a-f0-9]{40}$/);
 export const ChallengeTarget=z.object({repo:z.enum(['fulmar-hq/alido','fulmar-hq/agent-factory']),pr:z.number().int().positive(),head:sha,base:sha,branch:z.enum(['QA','main']),url:z.string().url()}).strict();
 export const Verdict=z.object({head:sha,verdict:z.enum(['PASS','CHANGES_REQUESTED']),evidence:z.string().min(20).max(20000)}).strict();
 const undo='Retain review, native logs, merge claim and branches. Undo merged source with a signed revert.';
+// Preserve the existing 19:00 preflight through 22:00 release deadline.
+export function daytimeMerges(now:number){const {minute}=toronto(now);return minute<1140 || minute>=1320;}
 export function greenChecks(checks:{bucket:string}[]) {return checks.length>0 && checks.every(c=>c.bucket==='pass');}
 export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Date.now()) {
  if(!c.usage_push || s.get('paused')!==false || c.owners.release?.harness!=='codex')return;
@@ -46,6 +49,7 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
      const checks=JSON.parse(await execute(['gh','pr','checks',String(pr.number),'--repo',project.repo,'--required','--json','bucket']));
      if(!greenChecks(checks))continue;
      if(project.repo==='fulmar-hq/alido'){
+      if(!daytimeMerges(Date.now()))continue;
       const hold=JSON.parse(JSON.parse(await execute(['gh','api',`repos/${project.repo}/actions/variables/QA_HOLD`])).value);
       if(hold.held!==false || typeof hold.id!=='string')continue;
       const promotions=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--base','main','--head','QA','--state','open','--json','number']));

@@ -45,7 +45,7 @@ export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=pro
    // An uncertain spawn is never retried by clearing an old claim.
    if(previous && (['starting','running'].includes(previous.state) || previous.cleanupVerified!==true))return false;
   }
-  s.set(`owner-wake:${w.id}`,{...queued,state:'starting'});
+  s.set(`owner-wake:${w.id}`,{...queued,state:'starting',cleanupVerified:false});
   s.set(ownerRuntimeKey(w),{...runtime,pid:undefined,identity:undefined,wake:w.id});
   s.event(`owner-dispatch:${w.id}`,'owner-wake-dispatch',{...w,native:runtime.native},'Retain the dispatch claim even on uncertain exit');
   return true;

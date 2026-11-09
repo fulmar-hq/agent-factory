@@ -118,5 +118,15 @@ test('a proven pre-native qualification refusal defers without consuming the nat
  queueWake(s,w);expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(true);await runOwner(w.id,dir);
  const deferred=s.get<any>('owner-wake:'+w.id);expect(deferred.state).toBe('queued');expect(deferred.cleanupVerified).toBe(true);expect(deferred.prestartRefusal).toBe(true);
  expect(s.rows('events').some((x:any)=>x.kind==='owner-native-start')).toBe(false);expect(s.get<any>(ownerRuntimeKey(w)).pid).toBeUndefined();
- expect(pendingWakes(s)).toHaveLength(0);expect(pendingWakes(s,Date.now()+61000)).toHaveLength(1);expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(false);s.close();
+ expect(pendingWakes(s)).toHaveLength(0);expect(pendingWakes(s,Date.now()+61000)).toHaveLength(1);expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(false);
+ s.set('owner-wake:'+w.id,{...deferred,notBefore:0});c.capacity.controller!.start=1;c.capacity.controller!.max=1;
+ expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(true);
+ const claimed=s.get<any>('owner-wake:'+w.id);expect(claimed.cleanupVerified).toBe(false);
+ s.set('owner-wake:'+w.id,{...claimed,state:'blocked'});
+ const other={...w,id:'challenger:other'};queueWake(s,other);expect(dispatchWake(s,other,()=>{},undefined,c)).toBe(false);s.close();
+});
+
+test('daytime Alido merges preserve the existing nightly frozen candidate',async()=>{
+ const {daytimeMerges}=await import('../launcher/challenge');
+ for(const [time,allowed] of [['18:59',true],['19:00',false],['20:00',false],['21:30',false],['21:59',false],['22:00',true]] as const)expect(daytimeMerges(Date.parse(`2026-11-09T${time}:00-05:00`))).toBe(allowed);
 });
