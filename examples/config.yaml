@@ -17,6 +17,7 @@ ticket_budget_default: {estimate_tokens: 8000000, checkpoint_tokens: 14400000, p
 
 # Opt in only after reviewing the structured owner-result contract.
 autonomy:
+  intake_mode: drain # build permits new product scope after deliberate reprioritization
   intake_owner: builder
   ready_buffer: 3
   auto_approval:

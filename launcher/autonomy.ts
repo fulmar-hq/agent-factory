@@ -1,9 +1,10 @@
 import {pushPace} from "./push";
 import {z} from 'zod';
+import {enforceIntakeMode} from './intake-policy';
 import {join} from 'node:path';
 import {readFileSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {type Config,type Ticket,type Billing,TicketSchema} from './config';
+import {type Config,type Ticket,type Billing,TicketSchema,root} from './config';
 import {processIdentity} from './process';
 import {Engine,claimPath} from './engine';
 import {Store} from '../tracking/store';
@@ -89,11 +90,16 @@ export function supply(e:Engine,ready:Ticket[],now:number) {
    const expired=e.s.atomic(()=>{const current=e.s.get<Wake & {state:string}>(`owner-wake:${round!.wake}`);if(current?.state!=='queued')return false;e.s.set(`owner-wake:${round!.wake}`,{...current,state:'expired',cleanupVerified:true});return true;});
    if(!expired)return;
   }
-  if(round.attempt>=2){ownerDecision(e.s,e.c,`intake-exhausted:${round.id}`,p.intake_owner,'Intake did not fill the ready queue after two bounded rounds',{round,ready:unclaimed.length,target},now);return;}
+  if(round.attempt>=2){
+   if(p.intake_mode==='drain')e.s.event(`drain-exhausted:${round.id}`,'drain-intake-exhausted',{round,ready:unclaimed.length,target},undo,now);
+   else ownerDecision(e.s,e.c,`intake-exhausted:${round.id}`,p.intake_owner,'Intake did not fill the ready queue after two bounded rounds',{round,ready:unclaimed.length,target},now);
+   return;
+  }
   round={...round,at:now,attempt:2,wake:`intake:${round.id}:2`};
  } else {const id=`${now}-${crypto.randomUUID()}`;round={id,at:now,attempt:1,wake:`intake:${id}:1`};}
  e.s.set('intake-round',round);
- queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,pace,projects:e.c.projects,policy:p.auto_approval,existing:(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{const i=JSON.parse(r.snapshot) as Issue;return {id:r.id,title:i.title,state:i.state,labels:i.labels};}).filter(i=>i.state==='OPEN'),occupied:e.active().map(x=>({id:x.id,brief:JSON.parse(x.brief)}))}},now);
+ queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,pace,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,existing:(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{const i=JSON.parse(r.snapshot) as Issue;return {id:r.id,title:i.title,state:i.state,labels:i.labels};}).filter(i=>i.state==='OPEN'),occupied:e.active().map(x=>({id:x.id,brief:JSON.parse(x.brief)}))}},now);
+
 }
 // Missing proof is an escalation, not a synthesized successful session.
 export type Cause='budget'|'sandbox'|'test'|'publisher'|'timeout'|'unknown';
@@ -154,6 +160,7 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
      const brief:Record<string,unknown>={...proposal.brief,owner:w.owner,creator:`launcher:${w.id}`,source:`factory-event:${w.id}`,approved:true};
      const fake:Issue={number:1,title:proposal.title,body:'```factory\n'+JSON.stringify(brief,null,2)+'\n```',url:'',updatedAt:'',state:'OPEN',labels:[{name:`kind:${String(brief.kind)}`},{name:`area:${String(brief.area)}`} ]};
      const t=prospective(proposal.repo,fake);executableTest(t.test);
+     await enforceIntakeMode(e,proposal.repo,brief,dir,execute);
      // Durable marker recovers an uncertain create without duplicating issues.
      let number=e.s.get<number>(key);
      if(!number) {
@@ -223,7 +230,7 @@ async function retryFailure(e:Engine,data:z.infer<typeof Retry>,now:number,execu
  e.s.event(`auto-retry-approved:${x.ticket}`,'automatic-retry-approved',{...f,digest:plan.to},undo,now);
 }
 const witness=(text:string)=>text.slice(0,1000);
-export async function autoApprove(e:Engine,ready:Ticket[],billing:Billing|undefined,now:number,execute=command) {
+export async function autoApprove(e:Engine,ready:Ticket[],billing:Billing|undefined,now:number,execute=command,dir=root) {
  if(!e.c.autonomy || e.s.get('paused')!==false)return 0;
  let approved=0;
  const round=e.s.get<IntakeRound>('intake-round')?.id ?? 'initial';
@@ -238,6 +245,7 @@ export async function autoApprove(e:Engine,ready:Ticket[],billing:Billing|undefi
   const r=e.s.get<string>(`proposal-round:${row.id}`) ?? round;
   try {
    t=prospective(repo,i);
+   await enforceIntakeMode(e,repo,block(i),dir,execute);
    if(e.s.db.query("SELECT id FROM events WHERE id=?").get(`auto-approved:${row.id}:${t.approvalDigest}`)){others.push(t);continue;}
    const refusal=policyRefusal(e,t,block(i),r,billing,now,others);
    if(refusal)throw Error(refusal);

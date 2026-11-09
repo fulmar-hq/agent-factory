@@ -50,7 +50,7 @@ test('capacity adopts new start, steps below start on memory/failure, grows only
 });
 test('below pace intake asks for slots plus six, rather than the old buffer',()=>{
  const c=pushConfig(),s=new Store(':memory:'),e=new Engine(s,c);e.pause(false,'owner');
- c.autonomy={intake_owner:'builder',ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['AGENTS.md']},restart:{max_retries:1,causes_per_hour:3}};
+ c.autonomy={intake_owner:'builder',intake_mode:'build',ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['AGENTS.md']},restart:{max_retries:1,causes_per_hour:3}};
  s.set('readings',{codex:weekly()});supply(e,Array.from({length:13},(_,n)=>ticket(n+1)),now);
  const round=s.get<{wake:string}>('intake-round')!;expect(s.get<any>(`owner-wake:${round.wake}`).payload.target).toBe(16);s.close();
 });
