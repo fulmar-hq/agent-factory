@@ -24,7 +24,7 @@ export function reconcileCapacity(s:Store,c:Config,active:number,pressure:Capaci
   const outcomes=new Map<string,boolean>();for(const r of exits){const d=JSON.parse(r.data);outcomes.set(d.id,outcomes.get(d.id)===false ? false : r.kind!=='worker-exit' ? false : d.ok);}
   const failureRate=outcomes.size ? [...outcomes.values()].filter(x=>!x).length/outcomes.size : 0;
   const busy=active/slots,healthy=busy>p.busy_above && pressure==='normal' && failureRate<p.failure_below && (p.mini_memory_free_floor===undefined || (memoryFree!==null && memoryFree>=p.mini_memory_free_floor));
-  let healthySince=healthy ? (prior && now>=prior.at && now-prior.at<=120000 ? prior.healthySince ?? now : now) : null;
+  let healthySince=healthy ? (prior?.policy===policy && now>=prior.at && now-prior.at<=120000 ? prior.healthySince ?? now : now) : null;
   let reason=!healthy ? pressure!=='normal'?'memory pressure not normal':busy<=p.busy_above?'occupancy below threshold':'failure rate too high' : 'collecting healthy interval';
   if(healthySince!==null && now-healthySince>=p.interval_minutes*60000 && slots<p.max){slots++;healthySince=null;reason='added one slot after healthy interval';s.event(`capacity:${now}`,'capacity-increased',{from:slots-1,to:slots,busy,pressure,failureRate},'Disable controller or append a reviewed capacity decision; retain evidence',now);}
   const lowMemory=p.mini_memory_free_floor!==undefined && memoryFree!==null && memoryFree<p.mini_memory_free_floor;

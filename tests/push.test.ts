@@ -130,3 +130,11 @@ test('daytime Alido merges preserve the existing nightly frozen candidate',async
  const {daytimeMerges}=await import('../launcher/challenge');
  for(const [time,allowed] of [['18:59',true],['19:00',false],['20:00',false],['21:30',false],['21:59',false],['22:00',true]] as const)expect(daytimeMerges(Date.parse(`2026-11-09T${time}:00-05:00`))).toBe(allowed);
 });
+
+test('a new capacity policy earns its own full healthy dwell',()=>{
+ const s=new Store(':memory:'),old=config();old.capacity.controller={start:6,max:12,interval_minutes:60,busy_above:.8,failure_below:.3};
+ for(let minute=0;minute<60;minute++)reconcileCapacity(s,old,6,'normal',now+minute*60000);
+ const c=pushConfig();expect(reconcileCapacity(s,c,10,'normal',now+60*60000,.5)!.slots).toBe(10);
+ for(let minute=61;minute<90;minute++)reconcileCapacity(s,c,10,'normal',now+minute*60000,.5);
+ expect(slotLimit(s,c)).toBe(10);expect(reconcileCapacity(s,c,10,'normal',now+90*60000,.5)!.slots).toBe(11);s.close();
+});
