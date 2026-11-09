@@ -5,7 +5,7 @@
   /* ---------- Words ---------- */
   var STR = {
     en: {
-      updated: 'Updated {t}', idleShort: 'Nothing is running. 12 tasks are ready.', flowLabel: 'Flow', fRunning: 'Running', f48: '48 h',
+      updated: 'Updated {t}', fOver: '{n} over', fQuiet: '{n} quiet', fFix: '{n} need a fix', noAct: 'No activity for {d}', high: 'High', atLimit: 'At limit', legend: 'What the colours mean', lgOk: 'Moving', lgInfo: 'Waiting', lgWarn: 'Attention', lgBad: 'Stopped', lgRest: 'Inactive', idleShort: 'Nothing is running. 12 tasks are ready.', flowLabel: 'Flow', fRunning: 'Running', f48: '48 h',
       usedOf: '{u} of about {d}', overLine: '{u}, past its {d} estimate', lastAct: 'Last activity {d} ago', ownerRun: 'Owner run',
       doneTitle: 'Recently completed', doneSum: '{n} done in 48 h · typical task {d} · {o} ran over', tookLine: 'took {u} · expected {d}',
       todayAt: 'Today, {t}', started: 'Started', finished: 'Finished', took: 'Took', expected: 'Expected',
@@ -55,7 +55,7 @@
       dClosed: 'This was finished without needing a release. Nothing changed for customers.'
     },
     fr: {
-      updated: 'Mis à jour à {t}', idleShort: 'Rien n’est en cours. 12 tâches sont prêtes.', flowLabel: 'Parcours', fRunning: 'En cours', f48: '48 h',
+      updated: 'Mis à jour à {t}', fOver: '{n} en retard', fQuiet: '{n} sans activité', fFix: '{n} à corriger', noAct: 'Aucune activité depuis {d}', high: 'Élevé', atLimit: 'À la limite', legend: 'Ce que signifient les couleurs', lgOk: 'En marche', lgInfo: 'En attente', lgWarn: 'Attention', lgBad: 'Arrêté', lgRest: 'Inactif', idleShort: 'Rien n’est en cours. 12 tâches sont prêtes.', flowLabel: 'Parcours', fRunning: 'En cours', f48: '48 h',
       usedOf: '{u} sur environ {d}', overLine: '{u}, estimation de {d} dépassée', lastAct: 'Actif il y a {d}', ownerRun: 'Routine',
       doneTitle: 'Terminé récemment', doneSum: '{n} terminées en 48 h · tâche type {d} · {o} en dépassement', tookLine: 'a pris {u} · prévu {d}',
       todayAt: 'Aujourd’hui, {t}', started: 'Début', finished: 'Fin', took: 'Durée', expected: 'Prévu',
@@ -139,12 +139,13 @@
     return '$' + n;
   }
   var CHEV = '<svg class="chev" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  var OUT = { live: ['oLive', 'good'], test: ['oTest', ''], closed: ['oClosed', 'quiet'] };
+  var OUT = { live: ['oLive', 'good'], test: ['oTest', 'info'], closed: ['oClosed', 'quiet'] };
 
   function heroMode() { return data.hero.mode; }
   function runCount() { return RUNNING.length; }
   var ARROW = '<svg class="flow-arrow" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h8M7 3l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  function bar(pct, over) { return '<span class="track" aria-hidden="true"><progress max="100" value="' + Math.max(0, Math.min(100, pct || 0)) + '" class="' + (over ? 'over' : '') + '"></progress></span>'; }
+  function bar(pct, tone) { return '<span class="track" aria-hidden="true"><progress max="100" value="' + Math.max(0, Math.min(100, pct || 0)) + '" class="' + (tone || 'rest') + '"></progress></span>'; }
+  function pillTone(tone) { return {ok:'good',info:'info',warn:'warn',bad:'bad',rest:'quiet'}[tone] || 'quiet'; }
   function localTime(at, date) {
     if (!at) return '—';
     var d = new Date(at), c = clock(d.getHours(), d.getMinutes());
@@ -152,35 +153,38 @@
   }
   function band() {
     var m = heroMode(), dot = m === 'working' ? 'is-working' : (m === 'needs' ? 'is-warn' : '');
-    function meter(label, value, pct, sub) {
+    function meter(label, value, pct, sub, tone) {
       return '<div class="meter"><div class="meter-label">' + esc(t(label)) + '</div><div class="meter-value num">' + value + '</div>' +
-        (pct === null ? '' : bar(pct)) + '<div class="meter-sub num">' + sub + '</div></div>';
+        (pct === null ? '' : bar(pct, tone)) + '<div class="meter-sub num">' + sub + '</div></div>';
     }
     var meters = data.usage.map(function (u) {
       var reset = u.resetsAt ? new Intl.DateTimeFormat(S.lang === 'fr' ? 'fr-CA' : 'en-CA', { weekday: 'short' }).format(u.resetsAt) : '';
       return meter(u.provider, u.percent === null ? '—' : u.percent + ' %', u.percent === null ? 0 : u.percent,
-        esc(u.percent === null ? t('notAvailable') : t('resets', { d: reset, t: localTime(u.resetsAt) })));
+        (u.tone === 'warn' || u.tone === 'bad' ? '<span class="pill ' + pillTone(u.tone) + '">' + esc(t(u.tone === 'bad' ? 'atLimit' : 'high')) + '</span>' : '') + esc(u.percent === null ? t('notAvailable') : t('resets', { d: reset, t: localTime(u.resetsAt) })), u.tone);
     }).join('');
     return '<section class="band"><div class="status" aria-live="polite"><h1><span class="dot ' + dot + '" aria-hidden="true"></span>' + esc(data.hero.title) +
       ' <span class="soft">' + esc(data.hero.soft) + '</span></h1><div class="status-line"><p class="lede">' + esc(data.questions.length ? data.hero.lede : t('nothingNeeds')) + '</p></div></div><div class="meters">' + meters +
       meter('aws', (data.aws.dollars === null ? '—' : money(data.aws.dollars.toFixed(2))) + ' <span class="unit">' + esc(t('of')) + ' ' + money(data.aws.ceiling) + '</span>', data.aws.dollars === null ? 0 : data.aws.dollars / data.aws.ceiling * 100,
-        data.aws.stopped ? '<span class="pill">' + esc(t('awsStopped')) + '</span>' : esc(data.aws.dollars === null ? t('notAvailable') : t('today'))) +
+        data.aws.stopped ? '<span class="pill bad">' + esc(t('awsStopped')) + '</span>' : esc(data.aws.dollars === null ? t('notAvailable') : t('today')), data.aws.tone) +
       meter('nextRelease', localTime(data.nextRelease.at) + ' <span class="unit">' + esc(t(data.nextRelease.name === 'QA' ? 'test' : 'live')) + '</span>', null,
         localTime(data.nextLiveAt) + ' ' + esc(t('live'))) + '</div></section>';
   }
   function tonight() {
     return '<section class="tstrip" aria-label="' + esc(t('tonight')) + '"><span class="tstrip-label">' + esc(t('tonight')) + '</span><div class="tsteps">' +
-      data.releases.map(function (r, i) { return (i ? ARROW.replace('flow-arrow', 't-arrow') : '') + '<div class="tstep"><span class="t-time num">' + localTime(r.at) + '</span><span class="t-name">' + esc(t(i ? 'liveRelease' : 'testRelease')) + '</span><span class="pill ' + (r.state === 'passed' ? 'good' : r.state === 'failed' ? 'bad' : '') + '">' + esc(r.label) + '</span></div>'; }).join('') + '</div></section>';
+      data.releases.map(function (r, i) { return (i ? ARROW.replace('flow-arrow', 't-arrow') : '') + '<div class="tstep"><span class="t-time num">' + localTime(r.at) + '</span><span class="t-name">' + esc(t(i ? 'liveRelease' : 'testRelease')) + '</span><span class="pill ' + pillTone(r.tone) + '">' + esc(r.label) + '</span></div>'; }).join('') + '</div></section>';
   }
   function flow() {
     var total = WAITING.reduce(function (a, g) { return a + g.total; }, 0);
-    function cell(k, n, label, extra) {
+    var over = RUNNING.filter(function(x){return x.over;}).length;
+    var quiet = RUNNING.filter(function(x){return x.quiet;}).length;
+    var fix = data.waiting.filter(function(x){return x.waitGroup === 'fix';}).length;
+    function cell(k, n, label, tone, lines, calm) {
       return '<button type="button" class="flow-cell" data-act="flow" data-v="' + k + '" data-k="flow-' + k + '" aria-pressed="' + (S.hl === k) + '">' +
-        '<span class="flow-n num">' + n + (extra ? ' <small>' + esc(extra) + '</small>' : '') + '</span><span class="flow-l">' + esc(t(label)) + '</span></button>';
+        '<span class="flow-n num"><span class="sdot ' + tone + '" aria-hidden="true"></span>' + n + '</span><span class="flow-l">' + esc(t(label)) + '</span>' + (lines || []).map(function(line){return '<span class="flow-t num' + (calm ? ' calm' : '') + '">' + esc(line) + '</span>';}).join('') + '</button>';
     }
     return '<nav class="flow" aria-label="' + esc(t('flowLabel')) + '">' +
-      cell('next', data.counts.upNext, 'upNext') + ARROW + cell('running', runCount(), 'fRunning') + ARROW +
-      cell('waiting', total, 'waiting') + ARROW + cell('done', DONE_TOTAL, 'done', t('f48')) + '</nav>';
+      cell('next', data.counts.upNext, 'upNext', 'rest') + ARROW + cell('running', runCount(), 'fRunning', runCount() ? 'ok' : 'rest', [over ? t('fOver',{n:over}) : '',quiet ? t('fQuiet',{n:quiet}) : ''].filter(Boolean)) + ARROW +
+      cell('waiting', total, 'waiting', 'info', fix ? [t('fFix',{n:fix})] : []) + ARROW + cell('done', DONE_TOTAL, 'done', 'ok', [t('f48')], true) + '</nav>';
   }
 
   function hasAsk() { return data.questions.length > 0; }
@@ -192,9 +196,9 @@
         '</div><p class="ask-default">' + esc(q.defaultLine) + '</p></div></section>';
     }).join('');
   }
-  function col(key, head, count, body) {
+  function col(key, head, count, body, tone) {
     return '<section class="col' + (S.hl === key ? ' hl' : '') + '" id="col-' + key + '">' +
-      '<div class="sec-head"><h2 id="h-' + key + '" tabindex="-1">' + esc(t(head)) + '</h2>' + count + '</div>' +
+      '<div class="sec-head"><h2 id="h-' + key + '" tabindex="-1"><span class="sdot ' + (tone || 'rest') + '" aria-hidden="true"></span>' + esc(t(head)) + '</h2>' + count + '</div>' +
       '<div class="col-body" data-scroll="' + key + '">' + body + '</div></section>';
   }
 
@@ -204,19 +208,19 @@
       body = '<p class="quiet-line">' + esc(t(S.mode === 'paused' ? 'nothingRunningPaused' : 'nothingRunning')) + '</p>';
     } else {
       body = '<ul class="rows">' + RUNNING.map(function (x) {
-        var over = x.est !== null && x.used > x.est;
-        var pct = Math.min(100, Math.round(x.est ? x.used / x.est * 100 : 0));
+        var over = x.over;
+        var pct = Math.min(100, Math.round(x.estimateSeconds ? x.seconds / x.estimateSeconds * 100 : 0));
         return '<li><button type="button" class="row run" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
           '<span class="row-top"><span class="row-title">' + title(x) + '</span><span class="chips">' +
             (x.run ? '<span class="chip line">' + esc(t('ownerRun')) + '</span>' : '') + '<span class="chip">' + esc(t(x.o)) + '</span></span></span>' +
-          bar(pct, over) +
+          bar(pct, x.barTone) +
           '<span class="row-foot"><span class="est num' + (over ? ' over' : '') + '">' +
             esc(t(over ? 'overLine' : 'usedOf', { u: dur(x.used), d: x.est === null ? '—' : dur(x.est) })) + '</span>' +
-            '<span class="act num">' + esc(x.act === null ? t('notAvailable') : t('lastAct', { d: dur(x.act) })) + '</span></span>' +
+            '<span class="act num' + (x.quiet ? ' quiet' : '') + '">' + esc(x.act === null ? t('notAvailable') : t(x.quiet ? 'noAct' : 'lastAct', { d: dur(x.act) })) + '</span></span>' +
           '</button></li>';
       }).join('') + '</ul>';
     }
-    return col('running', 'running', '<span class="count num">' + n + '</span>', body);
+    return col('running', 'running', '<span class="count num">' + n + '</span>', body, n ? 'ok' : 'rest');
   }
 
   function upNext() {
@@ -235,7 +239,7 @@
         var open = !!S.open[g.k];
         var rest = g.total - g.items.length;
         return '<li class="group' + (open ? ' open' : '') + '"><button type="button" class="group-btn" data-act="group" data-v="' + g.k + '" data-k="g-' + g.k + '" aria-expanded="' + open + '" aria-controls="gb-' + g.k + '">' +
-          '<span class="group-name">' + esc(t(g.label)) + '<span class="count num">' + g.total + '</span></span>' + CHEV + '</button>' +
+          '<span class="group-name"><span class="sdot ' + (g.k === 'fix' ? 'warn' : 'info') + '" aria-hidden="true"></span>' + esc(t(g.label)) + '<span class="count num">' + g.total + '</span></span>' + CHEV + '</button>' +
           '<div class="group-body" id="gb-' + g.k + '"><ul class="rows">' +
           g.items.map(function (x) {
             return '<li class="g-item"><button type="button" class="row" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '"><span class="row-title">' + title(x) + '</span></button></li>';
@@ -244,29 +248,29 @@
           (rest > 0 ? '<p class="note">' + esc(t('andMore', { n: rest })) + '</p>' : '') +
           '</div></li>';
       }).join('') + '</ul>';
-    return col('waiting', 'waiting', '<span class="count num">' + total + '</span>', body);
+    return col('waiting', 'waiting', '<span class="count num">' + total + '</span>', body, 'info');
   }
 
   function done() {
     var body = '<p class="summary num">' + esc(t('doneSum', { n: DONE_TOTAL, d: data.completed.medianSeconds === null ? '—' : dur(Math.round(data.completed.medianSeconds / 60)), o: data.completed.over })) + '</p>' +
       '<ul class="rows' + (S.allDone ? '' : ' clip') + '">' + DONE.map(function (x, i) {
-        var o = OUT[x.out], over = x.est !== null && x.used > x.est;
-        var pct = Math.min(100, Math.round(x.est ? x.used / x.est * 100 : 0));
+        var o = OUT[x.out], over = x.over;
+        var pct = Math.min(100, Math.round(x.estimateSeconds ? x.seconds / x.estimateSeconds * 100 : 0));
         return '<li' + (i >= 5 ? ' class="extra"' : '') + '><button type="button" class="row flat" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
           '<span class="row-title">' + title(x) + '</span>' +
           '<span class="trail"><span class="pill ' + o[1] + '">' + esc(t(o[0])) + '</span><span class="when num">' + when(x.w) + '</span></span>' +
-          '<span class="took">' + bar(pct, over) + '' +
+          '<span class="took">' + bar(pct, x.barTone) + '' +
           '<span class="est num' + (over ? ' over' : '') + '">' + esc(t('tookLine', { u: x.seconds === null ? '—' : dur(x.used), d: x.est === null ? '—' : dur(x.est) })) + '</span></span>' +
           '</button></li>';
       }).join('') + '</ul>' +
       (S.allDone || DONE_TOTAL <= 5 ? '' : '<button type="button" class="more small-only" data-act="allDone" data-k="allDone">' + esc(t('showAll', { n: DONE_TOTAL })) + '</button>');
-    return col('done', 'doneTitle', '<span class="count num">' + DONE_TOTAL + '</span>', body);
+    return col('done', 'doneTitle', '<span class="count num">' + DONE_TOTAL + '</span>', body, 'ok');
   }
 
   function doneFacts(x) {
     function f(k, v, cls) { return '<div><dt>' + esc(t(k)) + '</dt><dd class="num' + (cls || '') + '">' + esc(v) + '</dd></div>'; }
     return f('started', localTime(x.started, true)) + f('finished', localTime(x.at, true)) +
-      f('took', x.seconds === null ? '—' : dur(x.used), x.est !== null && x.used > x.est ? ' over' : '') + f('expected', x.est === null ? '—' : dur(x.est));
+      f('took', x.seconds === null ? '—' : dur(x.used), x.over ? ' over' : '') + f('expected', x.est === null ? '—' : dur(x.est));
   }
   function technical(x) {
     var fields = x.technical || {};
@@ -277,7 +281,7 @@
   function sheetHtml(x) {
     if (x.kind === 'question') return '<h2 id="sheet-title" tabindex="-1">' + esc(x.title) + '</h2><p class="sheet-desc">' + esc(x.context) + '</p><p class="summary">' + esc(x.defaultLine) + '</p>' + technical(x);
     var status = x.kind === 'done' ? t(OUT[x.out][0]) : x.kind === 'running' ? t('stRunning') : x.kind === 'next' ? t('stNext', {n:x.pos}) : x.status;
-    return '<h2 id="sheet-title" tabindex="-1">' + title(x) + '</h2><div class="sheet-status"><span class="pill">' + esc(status) + '</span>' + (x.run ? '<span class="chip line">' + esc(t('ownerRun')) + '</span>' : '') + '</div>' +
+    return '<h2 id="sheet-title" tabindex="-1">' + title(x) + '</h2><div class="sheet-status"><span class="pill ' + pillTone(x.tone) + '">' + esc(status) + '</span>' + (x.run ? '<span class="chip line">' + esc(t('ownerRun')) + '</span>' : '') + '</div>' +
       '<p class="sheet-desc">' + esc(x.d) + '</p><dl class="facts"><div><dt>' + esc(t('owner')) + '</dt><dd>' + esc(x.o) + '</dd></div>' +
       (x.kind === 'done' ? doneFacts(x) : '<div><dt>' + esc(t('timeUsed')) + '</dt><dd>' + (x.started ? esc(t('usedOf', {u:dur(x.used),d:x.est === null ? '—' : dur(x.est)})) : esc(t('notStarted'))) + '</dd></div>') + '</dl>' +
       (x.pr || x.issue ? '<a class="btn" href="' + esc(x.pr || x.issue) + '" target="_blank" rel="noopener noreferrer">' + esc(t('viewWork')) + '</a>' : '') + technical(x);
@@ -332,6 +336,8 @@
     app.innerHTML = band() + '<div class="mid">' + tonight() + flow() + '</div>' + needs() +
       '<div class="board' + (hasAsk() ? ' with-ask' : '') + '">' + (wide.matches ? upNext() + running() : running() + upNext()) + waiting() + done() + '</div>';
     app.querySelectorAll('[data-scroll]').forEach(function (el) { el.scrollTop = keep[el.getAttribute('data-scroll')] || 0; });
+    document.getElementById('legend-sum').innerHTML = esc(t('legend')) + CHEV;
+    document.getElementById('legend-list').innerHTML = [['ok','lgOk'],['info','lgInfo'],['warn','lgWarn'],['bad','lgBad'],['rest','lgRest']].map(function(l){return '<li><span class="sdot ' + l[0] + '" aria-hidden="true"></span>' + esc(t(l[1])) + '</li>';}).join('');
     if (S.sheet && !ITEMS[S.sheet]) closeSheet();
     if (focusKey) { var el = Array.from(document.querySelectorAll('[data-k]')).find(function (node) { return node.dataset.k === focusKey; }); if (el) el.focus({ preventScroll: true }); }
   }
@@ -387,7 +393,7 @@
     await refresh();
   }
   function prepare(item, kind, i) {
-    var x = Object.assign({}, item, { id:kind + ':' + item.id, kind:kind, t:item.title, o:item.owner, d:item.purpose, used:item.seconds === null ? 0 : Math.round(item.seconds / 60), est:item.estimateSeconds === null ? null : Math.round(item.estimateSeconds / 60), act:item.lastActivity ? Math.max(0, Math.round((data.now - item.lastActivity) / 60000)) : null, run:!!item.ownerRun, pos:i+1, w:{ago:Math.max(0, Math.round((data.now - item.at) / 60000))} });
+    var x = Object.assign({}, item, { id:kind + ':' + item.id, kind:kind, t:item.title, o:item.owner, d:item.purpose, used:item.seconds === null ? 0 : item.over ? Math.ceil(item.seconds / 60) : Math.round(item.seconds / 60), est:item.estimateSeconds === null ? null : Math.round(item.estimateSeconds / 60), act:item.lastActivity ? Math.max(0, Math.floor((data.now - item.lastActivity) / 60000)) : null, run:!!item.ownerRun, pos:i+1, w:{ago:Math.max(0, Math.round((data.now - item.at) / 60000))} });
     ITEMS[x.id] = x; return x;
   }
   async function refresh(focusKey) {

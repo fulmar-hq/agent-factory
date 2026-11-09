@@ -1,3 +1,4 @@
+import { usageTone, spendTone, timingTone, type Tone } from "./tones";
 import { questionFields } from "./questions";
 import { slotLimit } from "../launcher/capacity";
 import type { BoardEvidence } from "./runtime";
@@ -225,6 +226,7 @@ export function boardModel(
       session: x?.native_id ?? null,
       sessionStatus: x?.status ?? null,
       status: "",
+      tone: "rest" as Tone,
       at: null as number | null,
       technical: { tIssue: id, ...(x?.native_id ? {session:x.native_id} : {}) } as Record<string,string>,
     };
@@ -310,6 +312,7 @@ export function boardModel(
       }
     }
     item.waitGroup = item.status === t.checks ? "checks" : item.status === t.release ? "release" : [t.fixChecks,t.stopped,t.investigate].includes(item.status) ? "fix" : "review";
+    item.tone = item.status === t.stopped ? "bad" : item.waitGroup === "fix" ? "warn" : "info";
     if (item.status) waiting.push(item);
   }
   running.sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
@@ -379,7 +382,7 @@ export function boardModel(
       now - meter.observedAt <= e.c.usage_gates.max_meter_age_minutes * 60000 &&
       window &&
       window.resetsAt > now;
-    return { provider, percent: fresh ? Math.round(window.used * 100) : null, resetsAt:fresh ? window.resetsAt : null };
+    return { provider, percent: fresh ? Math.floor(window.used * 1000) / 10 : null, resetsAt:fresh ? window.resetsAt : null, tone:usageTone(fresh ? window.used : null,e.c.usage_gates) };
   });
   const billing = readings.billing,
     freshBilling =
@@ -393,6 +396,8 @@ export function boardModel(
       ? (billing.postedCents + billing.unpostedCents) / 100
       : null,
     ceiling: e.c.wallet.aws.ceiling_usd_month,
+    plan: e.c.wallet.aws.planned_usd ?? e.c.wallet.aws.hold_at_projected,
+    redAbove: e.c.board.aws_red_above_usd,
   };
   const { day, minute } = toronto(now);
   const releases = (
@@ -426,7 +431,8 @@ export function boardModel(
       id: `release:${r.stage}`,
       title: r.name,
       at: deadlineAt(now,r.minute),
-      state: state === t.passed ? "passed" : state === t.failed ? "failed" : "scheduled",
+      state: state === t.passed ? "passed" : state === t.failed ? "failed" : state === t.skipped || state === t.missed ? "skipped" : state === t.checking ? "checking" : "scheduled",
+      tone: state === t.passed ? "ok" : state === t.failed ? "bad" : state === t.skipped || state === t.missed ? "rest" : "info",
       label: state === t.skipped ? (lang === "fr" ? "Annulée : AWS est éteint" : "Skipped: AWS is off") : state,
       time: time(deadlineAt(now, r.minute)),
       status: state,
@@ -457,14 +463,14 @@ export function boardModel(
     paused: s.get("paused") === true,
     notice: delayed ? t.stale : sourceError ? t.sources : null,
     usage,
-    aws,
+    aws: {...aws,tone:spendTone(aws.dollars,aws.plan,aws.redAbove)},
     nextRelease: { ...next, time: time(next.at), tomorrow: minute >= 1290 },
     questions,
-    running,
+    running: running.map(x=>({...x,tone:"ok" as Tone,...timingTone(x.seconds,x.estimateSeconds,x.lastActivity,now,e.c.board.quiet_after_minutes)})),
     upNext: more ? upNext : upNext.slice(0, 5),
     more: Math.max(0, upNext.length - 5),
     waiting,
-    done,
+    done: done.map(x=>({...x,tone:x.out === "live" ? "ok" : x.out === "test" ? "info" : "rest",...timingTone(x.seconds,x.estimateSeconds,null,now,e.c.board.quiet_after_minutes)})),
     releases,
     counts: {
       running: running.length,
