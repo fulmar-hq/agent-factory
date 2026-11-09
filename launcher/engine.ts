@@ -1,5 +1,5 @@
 import {buildEffort, usageThresholds} from "./push";
-import { slotLimit } from "./capacity";
+import { slotLimit,challengerCount } from "./capacity";
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -219,7 +219,7 @@ export class Engine {
       )
         blocked("worker unqualified");
       const active = this.active();
-      if (active.length >= slotLimit(this.s, this.c))
+      if (active.length+challengerCount(this.s) >= slotLimit(this.s, this.c))
         blocked("slots full");
       if (
         t.heavy &&

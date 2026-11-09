@@ -5,14 +5,14 @@ import {qualificationFor} from "./push";
 import {optionalJSON,QualificationSchema} from "./config";
 import {intakeInstructions} from './intake-policy';
 import {join} from 'node:path';
-import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync} from 'node:fs';
+import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync,cpSync,existsSync} from 'node:fs';
 import {Store} from '../tracking/store';
 import {configAt,root,type Ticket} from './config';
 import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings} from '../adapters/workers';
 import {NativeReceipt} from '../adapters/native';
 import {spawnWorker} from './child';
 import {processIdentity} from './process';
-import {type Wake,type OwnerRuntime} from './wake';
+import {type Wake,type OwnerRuntime,ownerRuntimeKey} from './wake';
 import {recordAcceptance} from './release';
 // Permanent owners review events; ticket work is admitted separately. Their
 // command tools get read-only source plus this wake's scratch, never publisher
@@ -46,8 +46,8 @@ export async function runOwner(id:string,dir=root) {
  try {
   const claimed=s.atomic(()=>{
    const w=s.get<Wake & {state:string}>(`owner-wake:${id}`);if(w?.state!=='starting')return null;
-   const r=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);if(!r || r.wake!==id || r.pid)return null;
-   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(`owner-runtime:${w.owner}`,{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
+   const r=s.get<OwnerRuntime>(ownerRuntimeKey(w));if(!r || r.wake!==id || r.pid)return null;
+   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(ownerRuntimeKey(w),{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
   });
   if(!claimed)return;
   wake=claimed.w;runtime=claimed.r;
@@ -71,6 +71,7 @@ export async function runOwner(id:string,dir=root) {
    await command(['git','init','-q',workspace]);
    await command(['git','-C',workspace,'fetch','--depth=1',`https://github.com/${target.repo}.git`,target.head,target.base],undefined,120000);
    await command(['git','-C',workspace,'checkout','--detach',target.head]);
+   if(existsSync(join(source,'node_modules')))cpSync(join(source,'node_modules'),join(workspace,'node_modules'),{recursive:true});
    t.provider='codex';t.effort='medium';
    t.outcome=`Independent Codex challenger review. Read project AGENTS.md and contracts. Inspect git diff ${target.base} ${target.head}. Try to break the change; identify correctness, security, validation and regression gaps. Read-only source, no edits, messages or effects. Write ${join(scratch,'challenge.json')} with exactly {head:"${target.head}",verdict:"PASS" or "CHANGES_REQUESTED",evidence:"concrete source-backed findings, at least 20 characters"}. Missing evidence or a blocking defect means CHANGES_REQUESTED. The trusted launcher posts your verdict on ${target.url}; you have no GitHub credentials.
 Owner record:
@@ -111,7 +112,7 @@ ${brief}`;
   timer=setInterval(sample,500);
   let pending='';for await(const chunk of child.stdout){writeSync(fd,chunk);pending+=new TextDecoder().decode(chunk);let end:number;
    while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);const event=accounting.ingest(t.provider,line);
-    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,workspace,spec.env.HOME,Date.now());if(wake.kind!=='challenger-review')s.set(`owner-runtime:${wake.owner}`,{...s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`),native});}
+    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,workspace,spec.env.HOME,Date.now());if(wake.kind!=='challenger-review')s.set(ownerRuntimeKey(wake),{...s.get<OwnerRuntime>(ownerRuntimeKey(wake)),native});}
     if(event.done)done=true;sample();
    }
   }
@@ -127,7 +128,7 @@ ${brief}`;
   if(timer)clearInterval(timer);
   if(onSignal){process.off("SIGTERM",onSignal);process.off("SIGINT",onSignal);}
   try{if(child){await child.stop();await child.exited;}}
-  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`);if(r?.wake===id)s.set(`owner-runtime:${wake.owner}`,{...r,pid:undefined,identity:undefined});}s.close();}
+  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(ownerRuntimeKey(wake));if(r?.wake===id)s.set(ownerRuntimeKey(wake),{...r,pid:undefined,identity:undefined});}s.close();}
  }
 }
 if(import.meta.main)await runOwner(process.argv[2]);

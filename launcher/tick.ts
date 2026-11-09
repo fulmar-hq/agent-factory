@@ -1,6 +1,6 @@
 import {challengeAndMerge} from "./challenge";
 import {buildEffort,qualificationFor} from "./push";
-import { memoryPressure, memoryFreeRatio, reconcileCapacity } from "./capacity";
+import { memoryPressure, memoryFreeRatio, challengerCount, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
 import { Engine, type Admission } from "./engine";
@@ -96,7 +96,7 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
-    reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now,await memoryFreeRatio());
+    reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length+challengerCount(s,true),await memoryPressure(),now,await memoryFreeRatio());
     expireDecisions(s,now);
     failures(e,now);
     let ready = await reconcile(s, c, now);
@@ -113,7 +113,7 @@ export async function tick(dir = root) {
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
     catch(error){ownerReconciled=false;s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
-    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
+    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir),undefined,c);
     if(ownerReconciled && Object.values(c.projects).every(p=>{
       const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
     }))s.set("last-successful-reconciliation",Date.now());

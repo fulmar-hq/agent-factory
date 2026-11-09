@@ -1,3 +1,4 @@
+import {slotLimit,challengerCount} from './capacity';
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
 import {existsSync} from 'node:fs';
@@ -18,7 +19,8 @@ const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-veri
 export function pendingWakes(s:Store) {
  return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
 }
-export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity) {
+export const ownerRuntimeKey=(w:Wake)=>`owner-runtime:${w.kind==='challenger-review'?w.id:w.owner}`;
+export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity,c?:Config) {
  const claimed=s.atomic(()=>{
   const queued=s.get<Wake & {state:string}>(`owner-wake:${w.id}`);
   if(queued?.state!=='queued')return false;
@@ -29,7 +31,13 @@ export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=pro
     s.event(`owner-deadline:${w.id}`,'owner-wake-expired',{id:w.id,deadline},'Retain missed acceptance deadline; never start a late Quality turn');return false;
    }
   }
-  const runtime=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);
+  if(w.kind==='challenger-review'){
+   if(!c)return false;
+   const builds=(s.db.query("SELECT count(*) n FROM sessions WHERE status NOT IN ('finished','archived')").get() as {n:number}).n;
+   if(builds+challengerCount(s)>=slotLimit(s,c))return false;
+   if(!s.get(ownerRuntimeKey(w))){const r=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);if(r)s.set(ownerRuntimeKey(w),{workspace:r.workspace});}
+  }
+  const runtime=s.get<OwnerRuntime>(ownerRuntimeKey(w));
   if(!runtime || !existsSync(runtime.workspace))return false;
   if(runtime.pid && (!runtime.identity || identity(runtime.pid)===runtime.identity))return false;
   if(runtime.wake) {
@@ -38,7 +46,7 @@ export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=pro
    if(previous && (['starting','running'].includes(previous.state) || previous.cleanupVerified!==true))return false;
   }
   s.set(`owner-wake:${w.id}`,{...queued,state:'starting'});
-  s.set(`owner-runtime:${w.owner}`,{...runtime,pid:undefined,identity:undefined,wake:w.id});
+  s.set(ownerRuntimeKey(w),{...runtime,pid:undefined,identity:undefined,wake:w.id});
   s.event(`owner-dispatch:${w.id}`,'owner-wake-dispatch',{...w,native:runtime.native},'Retain the dispatch claim even on uncertain exit');
   return true;
  });

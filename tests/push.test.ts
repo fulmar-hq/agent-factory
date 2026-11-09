@@ -27,6 +27,9 @@ test('temporary Codex thresholds end automatically and do not raise Claude gates
  const c=pushConfig();expect(()=>usageGate({...meter(.96),nativeProvider:'codex'},false,now,c,'codex')).not.toThrow();
  expect(()=>usageGate(meter(.98),true,now,c,'codex')).toThrow('usage stop');
  expect(usageThresholds(c,now,'claude').stop_at).toBe(.9);
+ const removed={...c,usage_push:undefined};
+ expect(ConfigSchema.safeParse(removed).success).toBe(false);
+ for(const provider of ['claude','codex'])expect(usageThresholds(removed,now,provider).stop_at).toBe(.9);
  expect(usageThresholds(c,Date.parse(c.usage_push!.until),'codex').admit_below).toBe(.7);
 });
 test('high builds require an actual matching high qualification',()=>{
@@ -70,3 +73,19 @@ for(const mode of ['missing','blocked','wrong-head','reject','pending','changes'
  if(mode==='pass')expect(calls.find(a=>a.includes('merge'))).toContain('--match-head-commit');s.close();
 });
 test('empty/skipped/failed checks never count as green',()=>{expect(greenChecks([])).toBe(false);for(const bucket of ['skipping','cancel','fail','pending'])expect(greenChecks([{bucket}])).toBe(false);});
+test('concurrent challengers reserve the shared slot pool atomically and retain separate custody',async()=>{
+ const {queueWake,dispatchWake,ownerRuntimeKey}=await import('../launcher/wake');
+ const {challengerCount}=await import('../launcher/capacity');
+ const c=pushConfig(),s=new Store(':memory:'),e=new Engine(s,c);e.pause(false,'owner');
+ s.set('owner-runtime:release',{workspace:mkdtempSync(join(tmpdir(),'factory-review-owner-')),native:'permanent-owner'});
+ const wakes=Array.from({length:11},(_,n)=>({id:`challenger:fixture:${n}`,owner:'release',kind:'challenger-review',payload:{}}));
+ for(const w of wakes)queueWake(s,w,now);
+ for(const w of wakes.slice(0,10))expect(dispatchWake(s,w,()=>{},undefined,c)).toBe(true);
+ expect(challengerCount(s)).toBe(10);expect(dispatchWake(s,wakes[10],()=>{},undefined,c)).toBe(false);
+ expect(()=>e.admit(ticket(),{...admission(),qualification:{...qualification(),effort:'high'}})).toThrow('slots full');
+ const key=`owner-wake:${wakes[0].id}`,w=s.get<any>(key);s.set(key,{...w,state:'blocked',cleanupVerified:false});
+ expect(dispatchWake(s,wakes[10],()=>{},undefined,c)).toBe(false);
+ s.set(key,{...w,state:'done',cleanupVerified:true});expect(dispatchWake(s,wakes[10],()=>{},undefined,c)).toBe(true);
+ expect(s.get<any>('owner-runtime:release').native).toBe('permanent-owner');
+ expect(ownerRuntimeKey(wakes[0])).not.toBe(ownerRuntimeKey(wakes[1]));s.close();
+});

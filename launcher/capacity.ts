@@ -40,3 +40,9 @@ export async function memoryFreeRatio(execute=command):Promise<number|null> {
  if(process.platform!=='darwin')return null;
  try {const out=await execute(['memory_pressure','-Q'],undefined,3000);const m=out.match(/System-wide memory free percentage:\s*(\d+(?:\.\d+)?)%/);const n=m?Number(m[1])/100:NaN;return Number.isFinite(n)&&n>=0&&n<=1?n:null;}catch{return null;}
 }
+
+// Independent challenger custody consumes the same measured pool as builds.
+export function challengerCount(s:Store,busyOnly=false) {
+ return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:challenger:%'").all() as {value:string}[])
+  .map(r=>JSON.parse(r.value)).filter(w=>w.kind==='challenger-review' && (['starting','running'].includes(w.state) || (!busyOnly && w.state==='blocked' && w.cleanupVerified!==true))).length;
+}

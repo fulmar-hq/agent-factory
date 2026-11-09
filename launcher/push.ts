@@ -3,7 +3,7 @@ export function pushing(c:Config,now:number) {return !!c.usage_push && now<Date.
 // The temporary higher Codex thresholds end at the authorized reset. Other
 // providers retain the original gates even while the Codex push is active.
 export function usageThresholds(c:Config,now:number,provider?:string) {
- if(c.usage_push && (!pushing(c,now) || provider!=='codex'))return {admit_below:.7,high_benefit_only_below:.9,stop_at:.9};
+ if(!pushing(c,now) || provider!=='codex')return {admit_below:.7,high_benefit_only_below:.9,stop_at:.9};
  return c.usage_gates;
 }
 export function buildEffort(c:Config,t:Ticket,now:number) {

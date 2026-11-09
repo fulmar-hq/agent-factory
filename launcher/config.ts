@@ -70,7 +70,7 @@ export const ConfigSchema = z.object({
       tests: z.string(),
     }),
   ),
-}).refine(c=>c.usage_gates.admit_below<=c.usage_gates.high_benefit_only_below && c.usage_gates.high_benefit_only_below<=c.usage_gates.stop_at,{message:"usage thresholds must be ordered"});
+}).refine(c=>!!c.usage_push || (c.usage_gates.admit_below<=.7 && c.usage_gates.high_benefit_only_below<=.9 && c.usage_gates.stop_at<=.9),{message:"raised usage gates require a dated Codex push"}).refine(c=>c.usage_gates.admit_below<=c.usage_gates.high_benefit_only_below && c.usage_gates.high_benefit_only_below<=c.usage_gates.stop_at,{message:"usage thresholds must be ordered"});
 export type Config = z.infer<typeof ConfigSchema>;
 export const MeterSchema = z.object({
   observedAt: z.number().int().positive(),
