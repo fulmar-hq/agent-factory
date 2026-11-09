@@ -57,6 +57,7 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
      }
      const current=JSON.parse(await execute(['gh','pr','view',String(pr.number),'--repo',project.repo,'--json','headRefOid,baseRefName,state,isDraft,reviewDecision']));
      if(current.headRefOid!==target.head || current.baseRefName!==target.branch || current.state!=='OPEN' || current.isDraft || current.reviewDecision==='CHANGES_REQUESTED' || s.get('paused')!==false)continue;
+     if(project.repo==='fulmar-hq/alido' && !daytimeMerges(Date.now()))continue;
      if(!s.event(`continuous-merge:${id}`,'release-merge-claimed',{...target,actor:'release',native:w.native},undo,now))continue;
      await execute(['gh','pr','merge',String(pr.number),'--repo',project.repo,'--squash','--match-head-commit',target.head]);
      s.event(`continuous-merged:${id}`,'release-merged',target,undo,now);
