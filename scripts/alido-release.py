@@ -20,15 +20,32 @@ REPO = 'fulmar-hq/alido'
 SHA = re.compile(r'[a-f0-9]{40}')
 
 
+def journal(kind, data):
+    path = os.environ.get('FACTORY_EFFECT_JOURNAL')
+    if not path:
+        return
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, (json.dumps({'at': int(time.time() * 1000), 'kind': kind, **data}) + '\n').encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def api(path, method='GET', body=None):
     args = ['gh', 'api', '--method', method, 'repos/' + REPO + '/' + path]
     if body is not None:
         args += ['--input', '-']
+    if method != 'GET':
+        journal('mutation-intent', {'method': method, 'path': path, 'body': body})
     p = subprocess.run(args, input=json.dumps(body) if body is not None else None,
                        text=True, capture_output=True, timeout=45)
     if p.returncode:
         raise RuntimeError('GitHub operation failed; reconcile outcome before any retry: ' + p.stderr[:300])
-    return json.loads(p.stdout) if p.stdout.strip() else None
+    value = json.loads(p.stdout) if p.stdout.strip() else None
+    if method != 'GET':
+        journal('mutation-response', {'method': method, 'path': path, 'response': value})
+    return value
 
 
 def validate(c, now=None, effect=True):
@@ -90,6 +107,7 @@ def freeze(c):
             stream.write(content)
     validate(c)
     guard(c, c['hold_id'])
+    journal('freeze-intent', {'expectedHold': c['hold_id'], 'tree': c['tree'], 'source': c['executor_source']})
     subprocess.run(['/usr/bin/python3', '-B', str(directory / 'infra/ci/release_captain.py'),
                     'hold', 'on', '--expect', c['hold_id'], '--reason', 'Factory frozen tree ' + c['tree']],
                    check=True, capture_output=True, text=True, timeout=120, cwd=directory)
@@ -328,6 +346,7 @@ if __name__ == '__main__':
     try:
         c = json.loads(pathlib.Path(sys.argv[1]).read_text())
         os.environ['FACTORY_DISPATCHED_AT'] = c['dispatched_at']
+        os.environ['FACTORY_EFFECT_JOURNAL'] = str(pathlib.Path(c['scratch']) / 'mutations.jsonl')
         result = {'state': 'success', 'evidence': run(c)}
     except Exception as error:
         result = {'state': 'failure', 'evidence': {'reason': type(error).__name__ + ': ' + str(error)}}
