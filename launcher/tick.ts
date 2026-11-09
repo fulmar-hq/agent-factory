@@ -90,6 +90,7 @@ export async function tick(dir = root) {
       if (meter && (!r[provider] || meter.observedAt > r[provider]!.observedAt)) r[provider] = meter;
     }
     s.set("readings", r);
+    for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
     const ready = await reconcile(s, c, now);
     localWakes(s,c,ready,{},now);
@@ -119,6 +120,7 @@ export async function tick(dir = root) {
           meter: r[t.provider],
           billing: r.billing,
           qualification: qualifications[t.provider],
+          recoverUsage: true,
         }, (id) => spawnSupervisor(id, dir));
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
