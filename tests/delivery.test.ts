@@ -5,6 +5,11 @@ import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission } from "./fixtures";
 
+test("source command timeout retains an explicit failure diagnostic",async()=>{
+ const {command}=await import("../adapters/github");
+ await expect(command([process.execPath,"-e","setTimeout(()=>{},10000)"],undefined,50)).rejects.toThrow("timed out after 50ms");
+});
+
 test("retained test scratch stays outside the source tree while source edits remain dirty",async()=>{
  const {mkdtempSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {prepareTestScratch}=await import("../adapters/delivery"),{command}=await import("../adapters/github");

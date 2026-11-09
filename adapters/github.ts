@@ -10,7 +10,7 @@ export type Issue = {
   state: string;
   labels: { name: string }[];
 };
-export async function command(args: string[], cwd?: string) {
+export async function command(args: string[], cwd?: string, timeoutMs=30000) {
   const p = Bun.spawn(args, {
     cwd,
     env: process.env,
@@ -18,14 +18,15 @@ export async function command(args: string[], cwd?: string) {
     stderr: "pipe",
     stdin: "ignore",
   });
-  const timer = setTimeout(() => p.kill(), 30000);
+  let timedOut=false;
+  const timer = setTimeout(() => {timedOut=true;p.kill();}, timeoutMs);
   try {
     const [out, err, code] = await Promise.all([
       new Response(p.stdout).text(),
       new Response(p.stderr).text(),
       p.exited,
     ]);
-    if (code !== 0) throw Error(`${args[0]} failed: ${err.slice(0, 500)}`);
+    if (code !== 0) throw Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${err.slice(0, 500)}`);
     return out;
   } finally {
     clearTimeout(timer);
@@ -90,7 +91,7 @@ export async function reconcile(
           "1000",
           "--json",
           "number,title,body,url,updatedAt,state,labels",
-        ]),
+        ],undefined,120000),
       ) as Issue[];
       s.atomic(() => {
         for (const i of issues) {
