@@ -455,3 +455,50 @@ test("idle duration includes the last owner-run result",()=>{
   const {s,e}=fixture();
   try{const m=boardModel(e,{},now,"en",{ownerRuns:[],activity:{},ownerFinishedAt:now-120000});expect(m.hero.mode).toBe('idle');expect(m.hero.soft).toBe('for 2 min');}finally{s.close();}
 });
+
+test("board colours use policy gates, independent AWS spend, and real log timestamps",()=>{
+  const {s,e,add,session}=fixture();
+  try {
+    add(1); const id=session(1,'running');
+    e.c.board.quiet_after_minutes=5;
+    e.c.wallet.aws.stop_at_actual=24;
+    e.c.wallet.aws.planned_usd=60;
+    const readings={codex:{observedAt:now,source:'fictional',windows:[{used:.7,resetsAt:now+86400000,durationMinutes:10080}]},billing:{...billing(),postedCents:2752,unpostedCents:0}};
+    s.set('aws-stop-latched',true);
+    let m=boardModel(e,readings,now,'en',{activity:{[id]:now-300000},ownerRuns:[]});
+    expect(m.usage[0].tone).toBe('warn');expect(m.usage[1].tone).toBe('rest');
+    expect(m.aws.tone).toBe('ok');expect(m.aws.stopped).toBe(true);
+    expect(m.running[0].quiet).toBe(true);expect(m.running[0].over).toBe(false);expect(m.running[0].barTone).toBe('warn');
+    expect(m.releases.every(r=>r.tone==='rest')).toBe(true);
+    readings.codex.windows[0].used=.9;
+    readings.billing.postedCents=6500;
+    m=boardModel(e,readings,now,'fr');
+    expect(m.usage[0].tone).toBe('bad');expect(m.aws.tone).toBe('warn');
+    expect(m.running[0].quiet).toBe(false);expect(m.running[0].barTone).toBe('ok');
+    readings.billing.postedCents=6501;
+    expect(boardModel(e,readings,now).aws.tone).toBe('bad');
+    expect(boardModel(e,readings,now+86400001).aws.tone).toBe('rest');
+  } finally{s.close();}
+});
+
+test("outcomes and release pills distinguish waiting, stopped, passed and skipped",()=>{
+  const {s,e,add,session}=fixture();
+  try {
+    add(1);session(1,'paused');add(2,'OPEN',['state:checks']);
+    for(const [n,labels] of [[3,['state:live']],[4,['state:qa']],[5,[]]] as const) {
+      add(n,'CLOSED',[...labels],new Date(now-60000).toISOString());const id=session(n,'finished');
+      s.event(`done-${n}`,'worker-exit',{id,ok:true},'retain',now-60000);
+    }
+    for(const lang of ['en','fr'] as const) {
+      const m=boardModel(e,{},now,lang);
+      expect(m.waiting.map(x=>x.tone)).toEqual(['bad','info']);
+      expect(m.done.map(x=>x.tone)).toEqual(['ok','info','rest']);
+      expect(m.done.every(x=>x.barTone==='ok')).toBe(true);
+      expect(m.releases.every(r=>r.tone==='info')).toBe(true);
+    }
+    s.set('executor:2026-11-07:qa',{state:'failure'});
+    expect(boardModel(e,{},now).releases[0].tone).toBe('bad');
+    s.set('executor:2026-11-07:qa',{state:'success'});
+    expect(boardModel(e,{},now).releases[0].tone).toBe('ok');
+  }finally{s.close();}
+});

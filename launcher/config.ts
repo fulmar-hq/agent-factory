@@ -23,6 +23,10 @@ export const ConfigSchema = z.object({
     stop_at: z.literal(0.9),
     max_meter_age_minutes: finite.positive().max(15),
   }),
+  board: z.object({
+    quiet_after_minutes: finite.positive().default(15),
+    aws_red_above_usd: finite.default(65),
+  }).prefault({}),
   usage_windows: z.object({
     rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
   }).optional(),
@@ -52,6 +56,7 @@ export const ConfigSchema = z.object({
   wallet: z.object({
     aws: z.object({
       ceiling_usd_month: finite,
+      planned_usd: finite.optional(),
       reserve_usd: finite,
       hold_at_projected: finite,
       stop_at_actual: finite,

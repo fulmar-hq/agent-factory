@@ -1,7 +1,7 @@
 import { readdir, stat, readFile } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 
-export type OwnerRun = { id: string; title: string; owner: string; started: number; lastActivity: number; estimateSeconds: number | null };
+export type OwnerRun = { id: string; title: string; owner: string; started: number; lastActivity: number | null; estimateSeconds: number | null };
 export type BoardEvidence = { ownerRuns: OwnerRun[]; activity: Record<string, number>; ownerFinishedAt?: number };
 export function ownerTitle(brief: string) {
   const sentence = brief.split(/(?<=[.!?])\s|\n/)[0]!.replace(/^#+\s*/, "").trim();
@@ -62,7 +62,7 @@ export async function boardEvidence(dir: string, now = Date.now()): Promise<Boar
       const brief = (await readFile(join(path,briefName),"utf8")).slice(0,12000);
       const title = ownerTitle(brief);
       const logName = ["log.txt","native.jsonl","log.jsonl"].find(n=>names.includes(n));
-      const lastActivity = logName ? (await stat(join(path,logName))).mtimeMs : started;
+      const lastActivity = logName ? (await stat(join(path,logName))).mtimeMs : null;
       const estimate = /estimateSeconds["'\s:]+(\d+)/.exec(brief);
       ownerRuns.push({id:relative(join(dir,"work"),path),title,owner:relative(join(dir,"work"),path).split(sep)[0]!,started,lastActivity,estimateSeconds:estimate ? Number(estimate[1]) : null});
     }

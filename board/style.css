@@ -1,7 +1,4 @@
-
-/* Layout: one calm column on a phone, read top to bottom in ten seconds.
-   On a wide screen the status spans the top and the lists split into two quiet columns.
-   Hairlines separate rows; only the one thing that needs an answer gets a filled card. */
+/* Hairlines separate rows; colour communicates status alongside words. */
 :root {
   --bg: #F7F6F3;
   --surface: #FFFFFF;
@@ -20,6 +17,11 @@
   --warn-ink: #6B4100;
   --bad-soft: #F8E1DD;
   --bad-ink: #8E2416;
+  --bad: #C23B2A;
+  --ok: #0E8A66;
+  --info: #2F6FD0;
+  --info-soft: #DFE9F8;
+  --info-ink: #1D4E9E;
   --rest: #8B8A85;
   --scrim: rgba(20, 20, 18, 0.38);
   --shadow: 0 -8px 40px rgba(20, 20, 18, 0.16);
@@ -53,6 +55,11 @@
     --warn-ink: #F3CD86;
     --bad-soft: #40201B;
     --bad-ink: #F5A99C;
+    --bad: #F0705E;
+    --ok: #5AD1A8;
+    --info: #6FA8F5;
+    --info-soft: #17293F;
+    --info-ink: #A9CBFA;
     --rest: #7D7C77;
     --scrim: rgba(0, 0, 0, 0.58);
     --shadow: 0 -8px 40px rgba(0, 0, 0, 0.5);
@@ -77,6 +84,11 @@
   --warn-ink: #F3CD86;
   --bad-soft: #40201B;
   --bad-ink: #F5A99C;
+  --bad: #F0705E;
+  --ok: #5AD1A8;
+  --info: #6FA8F5;
+  --info-soft: #17293F;
+  --info-ink: #A9CBFA;
   --rest: #7D7C77;
   --scrim: rgba(0, 0, 0, 0.58);
   --shadow: 0 -8px 40px rgba(0, 0, 0, 0.5);
@@ -165,8 +177,13 @@ ol, ul { list-style: none; }
 .meter-value .unit { font-size: var(--t-micro); font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .track { display: block; height: 4px; border-radius: 4px; background: var(--tint-strong); overflow: hidden; }
 .track > i { display: block; height: 100%; border-radius: 4px; background: var(--bar); }
-.track > i.over { background: var(--warn); }
-.meter-sub { font-size: var(--t-micro); color: var(--muted); min-height: 1.45em; display: flex; align-items: center; }
+.track > i.ok { background: var(--ok); }
+.track > i.warn { background: var(--warn); }
+.track > i.bad { background: var(--bad); }
+/* Colour means status and nothing else: green moving, blue waiting on something else, amber attention, red stopped, grey inactive */
+.sdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rest); flex: none; }
+.sdot.ok { background: var(--ok); } .sdot.info { background: var(--info); } .sdot.warn { background: var(--warn); } .sdot.bad { background: var(--bad); }
+.meter-sub { font-size: var(--t-micro); color: var(--muted); min-height: 1.45em; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
 .meter-sub .pill { padding: 4px 8px; }
 
 /* Pills and chips: words first, a quiet tint behind them */
@@ -179,6 +196,7 @@ ol, ul { list-style: none; }
 .chip.line { background: none; box-shadow: inset 0 0 0 1px var(--line); }
 .pill.good { background: var(--accent-soft); color: var(--accent-ink); }
 .pill.warn { background: var(--warn-soft); color: var(--warn-ink); }
+.pill.info { background: var(--info-soft); color: var(--info-ink); }
 .pill.bad { background: var(--bad-soft); color: var(--bad-ink); }
 .pill.quiet { color: var(--muted); }
 
@@ -203,6 +221,18 @@ ol, ul { list-style: none; }
 }
 .flow-cell:hover { background: var(--tint); }
 .flow-cell[aria-pressed="true"] { background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+.flow-n { display: inline-flex; align-items: center; gap: 6px; }
+.flow-n small { margin-left: -2px; }
+.flow-t { display: block; font-size: 0.75rem; font-weight: 600; line-height: 1.25; color: var(--warn-ink); }
+.flow-t.calm { color: var(--muted); font-weight: 500; }
+.sec-head h2 .sdot, .group-name .sdot { margin-right: 8px; vertical-align: 0.12em; }
+.row-foot .act.quiet { color: var(--warn-ink); }
+.legend { margin-top: 16px; font-size: var(--t-micro); color: var(--muted); }
+.legend summary { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; cursor: pointer; font-weight: 600; list-style: none; border-radius: 8px; }
+.legend summary::-webkit-details-marker { display: none; }
+.legend[open] summary .chev { transform: rotate(90deg); }
+.legend ul { display: flex; flex-wrap: wrap; gap: 8px 20px; padding-bottom: 8px; }
+.legend li { display: inline-flex; align-items: center; gap: 7px; }
 .flow-n { font-family: var(--font-display); font-size: 1.375rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
 .flow-n small { font-size: var(--t-micro); font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .flow-l { font-size: var(--t-micro); color: var(--muted); white-space: nowrap; }
@@ -357,9 +387,9 @@ ol, ul { list-style: none; }
   .board {
     grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1.05fr);
     column-gap: 12px; margin-top: 14px;
-    height: clamp(440px, calc(100vh - 292px), 820px);
+    height: clamp(440px, calc(100vh - 316px), 820px);
   }
-  .board.with-ask { height: clamp(440px, calc(100vh - 384px), 820px); }
+  .board.with-ask { height: clamp(440px, calc(100vh - 408px), 820px); }
   .half { display: contents; }
   .col { display: flex; flex-direction: column; min-height: 0; margin: 0; padding: 12px 6px 0; }
   #col-next { order: 1; } #col-running { order: 2; } #col-waiting { order: 3; } #col-done { order: 4; }
@@ -388,10 +418,17 @@ input { font: inherit; color: var(--fg); background: var(--surface); border: 1px
 .track progress { display: block; width: 100%; height: 100%; appearance: none; border: 0; background: transparent; }
 .track progress::-webkit-progress-bar { background: transparent; }
 .track progress::-webkit-progress-value { background: var(--bar); border-radius: 4px; }
-.track progress.over::-webkit-progress-value { background: var(--warn); }
 .track progress::-moz-progress-bar { background: var(--bar); }
-.track progress.over::-moz-progress-bar { background: var(--warn); }
 @media (min-width: 720px) and (max-width: 1099px) { .half { display: contents; } .col-body { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; } }
 
 body.sheet-open { overflow: hidden; }
 @media (min-width: 720px) and (max-width: 1099px) { #col-running { grid-area: 1 / 1; } #col-next { grid-area: 2 / 1; } #col-waiting { grid-area: 1 / 2; } #col-done { grid-area: 2 / 2; } }
+
+.track progress.ok::-webkit-progress-value { background: var(--ok); border-radius: 4px; }
+.track progress.warn::-webkit-progress-value { background: var(--warn); border-radius: 4px; }
+.track progress.bad::-webkit-progress-value { background: var(--bad); border-radius: 4px; }
+.track progress.rest::-webkit-progress-value { background: var(--rest); border-radius: 4px; }
+.track progress.ok::-moz-progress-bar { background: var(--ok); border-radius: 4px; }
+.track progress.warn::-moz-progress-bar { background: var(--warn); border-radius: 4px; }
+.track progress.bad::-moz-progress-bar { background: var(--bad); border-radius: 4px; }
+.track progress.rest::-moz-progress-bar { background: var(--rest); border-radius: 4px; }

@@ -1,5 +1,10 @@
 # Factory at a glance
 
+The approved November 9 rebuild and colour follow-up supersede the original
+layout sketch below. [The board contract](../board/README.md) records the exact
+private reference hashes, current layout, colour meanings and configuration.
+Colour always has a text equivalent; coloured left borders are prohibited.
+
 Vincent opens this on his phone for ten seconds. The page answers, in order:
 is it working, does it need me, what is happening, and what finished?
 Independent styling: quiet system type, generous space, whole-row tints and no
