@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {claimableReady} from './queue';
 import {enforceIntakeMode} from './intake-policy';
 import {join} from 'node:path';
 import {readFileSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
@@ -65,14 +66,14 @@ export type IntakeRound={id:string;at:number;attempt:number;wake:string;closed?:
 export function supply(e:Engine,ready:Ticket[],now:number) {
  const p=e.c.autonomy;if(!p || e.s.get('paused')!==false)return;
  // Old claimed digests do not constitute ready supply.
- const unclaimed=ready.filter(t=>!e.sessions().some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
+ const unclaimed=claimableReady(e,ready);
  const target=slotLimit(e.s,e.c)+p.ready_buffer;
  let round=e.s.get<IntakeRound>('intake-round');
  // Successful implementation can rearm an exhausted round. Docs-only output
  // cannot repeatedly buy another documentation round while useful work stalls.
  if(round && !round.closed && round.attempt>=2){
-  const delivered=e.s.db.query("SELECT data FROM events WHERE kind='launcher-publish' AND at>?").all(round.at) as {data:string}[];
-  if(delivered.some(r=>{const x=e.sessions().find(x=>x.id===JSON.parse(r.data).id);if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));}))round={...round,closed:true};
+  const delivered=e.s.db.query("SELECT data FROM events WHERE (kind='launcher-publish' OR (kind='github-state' AND json_extract(data,'$.state')='review')) AND at>?").all(round.at) as {data:string}[];
+  if(delivered.some(r=>{const data=JSON.parse(r.data);const x=e.sessions().find(x=>x.id===(data.session ?? data.id));if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));}))round={...round,closed:true};
  }
  if(unclaimed.length>=target){if(round)e.s.set('intake-round',{...round,closed:true});return;}
  if(round && !round.closed) {

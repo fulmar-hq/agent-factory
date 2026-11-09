@@ -1,3 +1,5 @@
+import {claimableReady,reviewPublished} from './queue';
+import {observeClaimProgress} from './watchdog';
 import { memoryPressure, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
@@ -17,7 +19,7 @@ import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
-import { qualificationAlerts } from "./alerts";
+import { qualificationAlerts,watchdogAlert } from "./alerts";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
   if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
@@ -97,12 +99,14 @@ export async function tick(dir = root) {
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
     expireDecisions(s,now);
     failures(e,now);
-    let ready = await reconcile(s, c, now);
+    let observed = await reconcile(s,c,now);
+    if(await reviewPublished(e))observed=await reconcile(s,c,now);
+    let ready = claimableReady(e,observed);
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
-      ready=await reconcile(s,c,now);
+      ready=claimableReady(e,await reconcile(s,c,now));
       const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
-      if(count)ready=await reconcile(s,c,now);
+      if(count)ready=claimableReady(e,await reconcile(s,c,now));
       supply(e,ready,now);
       return count;
     }) ?? 0 : 0;
@@ -148,6 +152,8 @@ export async function tick(dir = root) {
     }
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, claimed, refusals };
+    observeClaimProgress(e,heartbeat);
+    watchdogAlert(s,heartbeat.at);
     s.set("heartbeat", heartbeat);
     return heartbeat;
   } finally {
