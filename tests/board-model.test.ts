@@ -450,3 +450,8 @@ test("owner-run titles derive from the first sentence without setup instructions
   expect(ownerTitle('You are Alido · Product (board) in ~/Developer/example (pull first). Repair it.')).toBe('Product board work');
   expect(ownerTitle('Repair the booking timezone. Preserve the work.')).toBe('Repair the booking timezone.');
 });
+
+test("idle duration includes the last owner-run result",()=>{
+  const {s,e}=fixture();
+  try{const m=boardModel(e,{},now,"en",{ownerRuns:[],activity:{},ownerFinishedAt:now-120000});expect(m.hero.mode).toBe('idle');expect(m.hero.soft).toBe('for 2 min');}finally{s.close();}
+});

@@ -344,7 +344,7 @@ export function boardModel(
   running.sort((a,b)=>(a.started ?? 0)-(b.started ?? 0));
   const lastExit = events.find((ev) => ev.kind === "worker-exit")?.at;
   const lastStart = sessions.reduce((at, x) => Math.max(at, x.started ?? 0), 0);
-  const idleSince = Math.max(lastExit ?? 0, lastStart);
+  const idleSince = Math.max(lastExit ?? 0, lastStart, evidence.ownerFinishedAt ?? 0);
   const idleSeconds = idleSince ? Math.max(0, (now - idleSince) / 1000) : null;
   const heartbeat = s.get<{ at: number; status: string }>("heartbeat");
   const delayed =
