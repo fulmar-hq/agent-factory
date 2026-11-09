@@ -157,3 +157,25 @@ test('server-side up-to-date protection must be enforced for the merging actor',
  }
  expect(await strictMergeProtection('example/demo','main',async()=>{throw Error('unknown protection');})).toBe(false);
 });
+for(const mode of ['unchanged','hold-after-protection','promotion-after-protection','hold-during-promotion'] as const)test(`Alido rechecks release authority at mutation admission: ${mode}`,async()=>{
+ const s=new Store(':memory:'),c=pushConfig();s.set('paused',false);c.projects={alido:{repo:'fulmar-hq/alido',owners:['builder'],tests:'bun test'}};
+ const head='a'.repeat(40),base='b'.repeat(40),url='https://github.com/fulmar-hq/alido/pull/7',id=`challenger:fulmar-hq/alido:7:${head}:${base}`;
+ s.event('pub','launcher-publish',{url,head},'retain',now);
+ let held=false,promotion=false,protectedRead=false,mergeCount=0,promotionReads=0;
+ const execute=async(args:string[])=>{
+  if(args.includes('list') && args.includes('--head')){promotionReads++;if(mode==='hold-during-promotion' && promotionReads===2)held=true;return JSON.stringify(promotion?[{number:99}]:[]);}
+  if(args.includes('list'))return JSON.stringify([{number:7,url,headRefOid:head,baseRefOid:base,baseRefName:'QA',isDraft:false}]);
+  if(args.includes('checks'))return '[{"bucket":"pass"}]';
+  if(args.includes('view'))return JSON.stringify({headRefOid:head,baseRefOid:base,baseRefName:'QA',state:'OPEN',isDraft:false});
+  if(args.includes('merge')){expect(held).toBe(false);expect(promotion).toBe(false);mergeCount++;return '';}
+  if(args[2].endsWith('QA_HOLD'))return JSON.stringify({value:JSON.stringify({held,id:held?'hold-2':'hold-1'})});
+  if(args[2].endsWith('/protection')){protectedRead=true;if(mode==='hold-after-protection')held=true;if(mode==='promotion-after-protection')promotion=true;return JSON.stringify({enforce_admins:{enabled:true},required_status_checks:{strict:true,contexts:['Verify']}});}
+  return args.includes('POST')?'{}':'[]';
+ };
+ const clock=()=>Date.parse('2026-11-09T12:00:00-05:00');
+ await challengeAndMerge(s,c,execute,now,clock);
+ const scratch=mkdtempSync(join(tmpdir(),'factory-hold-review-'));writeFileSync(join(scratch,'challenge.json'),JSON.stringify({head,verdict:'PASS',evidence:'Concrete synthetic source boundary review passed.'}));
+ s.set('owner-wake:'+id,{...s.get<any>('owner-wake:'+id),state:'done',cleanupVerified:true,native:'synthetic-review',scratch});
+ await challengeAndMerge(s,c,execute,now+1,clock);
+ expect(protectedRead).toBe(true);expect(mergeCount).toBe(mode==='unchanged'?1:0);s.close();
+});

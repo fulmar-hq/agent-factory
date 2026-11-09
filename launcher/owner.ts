@@ -8,7 +8,7 @@ import {join} from 'node:path';
 import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync,cpSync,existsSync} from 'node:fs';
 import {Store} from '../tracking/store';
 import {configAt,root,type Ticket} from './config';
-import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings} from '../adapters/workers';
+import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings,verifySubscription} from '../adapters/workers';
 import {NativeReceipt} from '../adapters/native';
 import {spawnWorker} from './child';
 import {processIdentity} from './process';
@@ -98,6 +98,7 @@ ${brief}`;
    receipt.beginTurn();
   }
   const baseline=accounting.tokens,cachedBaseline=accounting.cachedTokens;
+  if(wake.kind==='challenger-review')await verifySubscription('codex');
   fd=openSync(join(scratch,'native.jsonl'),'ax',0o600);nativeStartAttempted=true;child=spawnWorker(spec,workspace,fd);
   s.event(`owner-native:${id}`,'owner-native-start',{id,pid:child.pid,native:native ?? null,scratch,baseline},'Retain native ID, logs and stable wake claim');
   const start=Date.now();let done=false,halted=false;

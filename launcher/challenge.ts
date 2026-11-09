@@ -31,7 +31,7 @@ export async function strictMergeProtection(repo:string,branch:string,execute=co
  return false;
 }
 export function greenChecks(checks:{bucket:string}[]) {return checks.length>0 && checks.every(c=>c.bucket==='pass');}
-export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Date.now()) {
+export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Date.now(),clock=Date.now) {
  if(!c.usage_push || s.get('paused')!==false || c.owners.release?.harness!=='codex')return;
  await autonomyEffects(s,async()=>{
   const publications=(s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery')").all() as {data:string}[]).map(r=>JSON.parse(r.data));
@@ -66,17 +66,29 @@ export async function challengeAndMerge(s:Store,c:Config,execute=command,now=Dat
      if(verdict.verdict!=='PASS' || pr.reviewDecision==='CHANGES_REQUESTED')continue;
      const checks=JSON.parse(await execute(['gh','pr','checks',String(pr.number),'--repo',project.repo,'--required','--json','bucket']));
      if(!greenChecks(checks))continue;
+     let holdId:string|undefined;
      if(project.repo==='fulmar-hq/alido'){
-      if(!daytimeMerges(Date.now()))continue;
+      if(!daytimeMerges(clock()))continue;
       const hold=JSON.parse(JSON.parse(await execute(['gh','api',`repos/${project.repo}/actions/variables/QA_HOLD`])).value);
       if(hold.held!==false || typeof hold.id!=='string')continue;
+      holdId=hold.id;
       const promotions=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--base','main','--head','QA','--state','open','--json','number']));
       if(!Array.isArray(promotions) || promotions.length)continue;
      }
      if(!await strictMergeProtection(project.repo,target.branch,execute))throw Error('strict server-side merge protection unverified');
      const current=JSON.parse(await execute(['gh','pr','view',String(pr.number),'--repo',project.repo,'--json','headRefOid,baseRefOid,baseRefName,state,isDraft,reviewDecision']));
      if(current.headRefOid!==target.head || current.baseRefOid!==target.base || current.baseRefName!==target.branch || current.state!=='OPEN' || current.isDraft || current.reviewDecision==='CHANGES_REQUESTED' || s.get('paused')!==false)continue;
-     if(project.repo==='fulmar-hq/alido' && !daytimeMerges(Date.now()))continue;
+     // Revalidate mutable release authority inside the trusted mutation
+     // admission, after protection and PR reads. Bracket promotion inventory
+     // with the same OFF hold identity, then claim/merge without another read.
+     if(project.repo==='fulmar-hq/alido'){
+      const before=JSON.parse(JSON.parse(await execute(['gh','api',`repos/${project.repo}/actions/variables/QA_HOLD`])).value);
+      if(before.held!==false || before.id!==holdId)continue;
+      const promotions=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--base','main','--head','QA','--state','open','--json','number']));
+      if(!Array.isArray(promotions) || promotions.length)continue;
+      const after=JSON.parse(JSON.parse(await execute(['gh','api',`repos/${project.repo}/actions/variables/QA_HOLD`])).value);
+      if(after.held!==false || after.id!==holdId || !daytimeMerges(clock()))continue;
+     }
      if(!s.event(`continuous-merge:${id}`,'release-merge-claimed',{...target,actor:'release',native:w.native},undo,now))continue;
      await execute(['gh','pr','merge',String(pr.number),'--repo',project.repo,'--squash','--match-head-commit',target.head]);
      s.event(`continuous-merged:${id}`,'release-merged',target,undo,now);
