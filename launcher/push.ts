@@ -3,7 +3,7 @@ export function pushing(c:Config,now:number) {return !!c.usage_push && now<Date.
 // The temporary higher Codex thresholds end at the authorized reset. Other
 // providers retain the original gates even while the Codex push is active.
 export function usageThresholds(c:Config,now:number,provider?:string) {
- if(!pushing(c,now) || provider!=='codex')return {admit_below:.7,high_benefit_only_below:.9,stop_at:.9};
+ if(!pushing(c,now) || provider!=='codex')return {admit_below:Math.min(c.usage_gates.admit_below,.7),high_benefit_only_below:Math.min(c.usage_gates.high_benefit_only_below,.9),stop_at:Math.min(c.usage_gates.stop_at,.9)};
  return c.usage_gates;
 }
 export function buildEffort(c:Config,t:Ticket,now:number) {
@@ -17,7 +17,7 @@ export function pushPace(c:Config,raw:unknown,now:number) {
  if(m.nativeProvider!=='codex' || m.observedAt>now || now-m.observedAt>c.usage_gates.max_meter_age_minutes*60000)return null;
  const until=Date.parse(c.usage_push!.until);
  // Never mistake the short rolling window for the weekly allowance.
- const weekly=m.windows.find(w=>w.durationMinutes===10080 || w.name==='seven_day') ?? m.windows.find(w=>Math.abs(w.resetsAt-until)<60000);
+ const weekly=m.windows.find(w=>w.durationMinutes===10080 || (w.durationMinutes===undefined && ['seven_day','weekly'].includes(w.name ?? '')));
  if(!weekly || weekly.resetsAt<=now)return null;
  const hoursToReset=(Math.min(until,weekly.resetsAt)-now)/3600000;
  const remainingPercent=(1-weekly.used)*100,requiredPercentPerHour=remainingPercent/hoursToReset;

@@ -22,6 +22,7 @@ test('weekly pace uses fresh native evidence and never a short window',()=>{
  expect(pushPace(c,weekly(),now)!.requiredPercentPerHour).toBeCloseTo(86/48);
  for(const bad of [undefined,{...weekly(),nativeProvider:'claude'},{...weekly(),observedAt:now-900001},{...weekly(),observedAt:now+1},{...weekly(),windows:[{used:.14,resetsAt:now+3600000,durationMinutes:300}]}])expect(pushPace(c,bad,now)).toBeNull();
  expect(pushPace(c,weekly(),now+48*3600000)).toBeNull();
+ for(const name of ['five_hour','primary','seven_day'])expect(pushPace(c,{...weekly(),windows:[{used:.1,resetsAt:Date.parse(c.usage_push!.until),name,durationMinutes:300}]},now)).toBeNull();
 });
 test('temporary Codex thresholds end automatically and do not raise Claude gates',()=>{
  const c=pushConfig();expect(()=>usageGate({...meter(.96),nativeProvider:'codex'},false,now,c,'codex')).not.toThrow();
@@ -88,4 +89,14 @@ test('concurrent challengers reserve the shared slot pool atomically and retain 
  s.set(key,{...w,state:'done',cleanupVerified:true});expect(dispatchWake(s,wakes[10],()=>{},undefined,c)).toBe(true);
  expect(s.get<any>('owner-runtime:release').native).toBe('permanent-owner');
  expect(ownerRuntimeKey(wakes[0])).not.toBe(ownerRuntimeKey(wakes[1]));s.close();
+});
+
+test('stricter configured stops remain binding without push, for Claude and after expiry',()=>{
+ const c=pushConfig();c.usage_gates={admit_below:.4,high_benefit_only_below:.5,stop_at:.5,max_meter_age_minutes:15};
+ for(const provider of ['codex','claude'] as const){
+  const normal={...c,usage_push:undefined};expect(ConfigSchema.safeParse(normal).success).toBe(true);
+  expect(()=>usageGate(meter(.6),true,now,normal,provider)).toThrow('usage stop');
+  expect(usageThresholds(c,Date.parse(c.usage_push!.until),provider).stop_at).toBe(.5);
+ }
+ expect(()=>usageGate(meter(.6),true,now,c,'claude')).toThrow('usage stop');
 });
