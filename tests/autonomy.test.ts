@@ -188,3 +188,15 @@ test('publisher failure counts against capacity even after successful native exi
   reconcileCapacity(e.s,e.c,6,'normal',now+2);expect(e.s.get<any>('capacity-controller').failureRate).toBe(1);
  }finally{e.s.close();}
 });
+test('only useful published work rearms an exhausted intake round',()=>{
+ const e=setup();try {
+  supply(e,[],now);supply(e,[],now+1800001);
+  const round=e.s.get<any>('intake-round');
+  const docs=e.admit({...ticket(21),paths:['docs/fixture.md']},admission());e.finish(docs.id,true);
+  e.s.event('publish-doc','launcher-publish',{id:docs.id},'retain',now+1800002);
+  supply(e,[],now+3600002);expect(e.s.get<any>('intake-round').id).toBe(round.id);
+  const code=e.admit(ticket(22),admission());e.finish(code.id,true);
+  e.s.event('publish-code','launcher-publish',{id:code.id},'retain',now+3600003);
+  supply(e,[],now+3600004);expect(e.s.get<any>('intake-round').id).not.toBe(round.id);
+ }finally{e.s.close();}
+});

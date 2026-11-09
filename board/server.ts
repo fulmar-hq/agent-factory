@@ -181,7 +181,7 @@ export async function board(dir = root, port = 4318) {
           sessions: e.sessions().map(x=>({...x,budget:e.budget(x)})),
           releases: s.rows("releases"),
           owners,
-          slots: { used: e.active().length, max: slotLimit(s,c) },
+          slots: { used: e.active().length, max: slotLimit(s,c), controller: s.get("capacity-controller") },
           schedule: c.schedule,
         });
       }
