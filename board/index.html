@@ -1,62 +1,98 @@
 <!doctype html>
 <html lang="en">
-  <meta charset="utf-8" /><meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
-  /><title>Factory Desk</title
-  ><link rel="stylesheet" href="/style.css" />
-  <script src="/app.js" defer></script>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Factory</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
   <body>
+    <a class="skip" href="#main" id="skip">Skip to tasks</a>
     <header>
-      <div>
-        <p class="eyebrow">LOCAL · FACTORY DESK</p>
-        <h1 id="title">Today</h1>
-      </div>
-      <select id="lang" aria-label="Language">
+      <a class="brand" href="/" aria-label="Factory"
+        >Factory<span aria-hidden="true" class="brand-dot"></span
+      ></a>
+      <select id="lang" aria-label="Language / Langue">
         <option value="en">English</option>
         <option value="fr">Français</option>
       </select>
     </header>
-    <main>
-      <p id="connection" role="status">Loading local evidence…</p>
-      <section id="summary" class="grid" aria-live="polite"></section>
-      <section>
-        <h2 id="control-title">Controls</h2>
+    <main id="main">
+      <div class="overview">
+        <p class="eyebrow" id="today">Today</p>
+        <h1 id="status" aria-live="polite">Checking the factory…</h1>
+        <p id="meters" class="meters"></p>
+        <p id="connection" role="status" hidden></p>
+      </div>
+      <section aria-labelledby="questions-title">
+        <h2 id="questions-title">
+          Needs you <span id="questions-count" class="count"></span>
+        </h2>
+        <div id="questions" class="list"></div>
+      </section>
+      <section aria-labelledby="running-title">
+        <h2 id="running-title">
+          Running now <span id="running-count" class="count"></span>
+        </h2>
+        <div id="running" class="list"></div>
+      </section>
+      <section aria-labelledby="upNext-title">
+        <h2 id="upNext-title">
+          Up next <span id="upNext-count" class="count"></span>
+        </h2>
+        <div id="upNext" class="list"></div>
+        <p id="more" class="quiet" hidden></p>
+      </section>
+      <section aria-labelledby="waiting-title">
+        <h2 id="waiting-title">
+          Waiting <span id="waiting-count" class="count"></span>
+        </h2>
+        <div id="waiting" class="list"></div>
+      </section>
+      <section aria-labelledby="done-title">
+        <h2 id="done-title">
+          Done <span class="heading-note" id="done-note">Last 48 h</span
+          ><span id="done-count" class="count"></span>
+        </h2>
+        <div id="done" class="list"></div>
+      </section>
+      <section aria-labelledby="releases-title">
+        <h2 id="releases-title">
+          Releases
+          <span class="heading-note" id="releases-note"
+            >Tonight · Toronto time</span
+          >
+        </h2>
+        <div id="releases" class="list"></div>
+      </section>
+      <details id="controls" hidden>
+        <summary id="control-title">Local controls</summary>
         <form id="auth">
           <label for="token" id="token-label">Owner token</label
-          ><input type="password" id="token" autocomplete="off" /><button
-            id="save"
-            type="submit"
-          >
-            Use token
-          </button>
+          ><input
+            type="password"
+            id="token"
+            autocomplete="off"
+            required
+          /><button id="save" type="submit">Use token</button>
         </form>
         <p id="auth-result" role="status"></p>
-        <button id="pause">Pause</button>
-      </section>
-      <section>
-        <h2 id="questions-title">Questions</h2>
-        <div id="questions"></div>
-        <details><summary id="owner-questions-title">Questions for owners</summary><div id="owner-questions"></div></details>
-        <details><summary id="resolved-questions-title">Resolved without you</summary><div id="resolved-questions"></div></details>
-      </section>
-      <section>
-        <h2 id="tickets-title">Tickets</h2>
-        <div id="tickets"></div>
-      </section>
-      <section>
-        <h2 id="sessions-title">Sessions</h2>
-        <div id="sessions"></div>
-      </section>
-      <section>
-        <h2 id="releases-title">Releases</h2>
-        <div id="releases"></div>
-      </section>
-      <section>
-        <h2 id="owners-title">Owners</h2>
-        <div id="owners"></div>
-      </section>
-      <footer id="sources"></footer>
+        <button id="pause" type="button">Pause</button>
+      </details>
+      <footer>
+        <span id="updated"></span
+        ><span id="refresh-note">Updates every 15 seconds</span>
+      </footer>
     </main>
+    <dialog id="sheet" aria-labelledby="sheet-title">
+      <div class="sheet-top">
+        <p class="eyebrow" id="sheet-label">Task details</p>
+        <button id="close" class="secondary" type="button">Close</button>
+      </div>
+      <h2 id="sheet-title"></h2>
+      <div id="sheet-body"></div>
+    </dialog>
   </body>
 </html>

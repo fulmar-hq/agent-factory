@@ -7,6 +7,7 @@ export type Issue = {
   body: string;
   url: string;
   updatedAt: string;
+  closedAt?: string | null;
   state: string;
   labels: { name: string }[];
 };
@@ -90,7 +91,7 @@ export async function reconcile(
           "--limit",
           "1000",
           "--json",
-          "number,title,body,url,updatedAt,state,labels",
+          "number,title,body,url,updatedAt,closedAt,state,labels",
         ],undefined,120000),
       ) as Issue[];
       s.atomic(() => {

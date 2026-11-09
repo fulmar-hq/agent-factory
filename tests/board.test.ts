@@ -23,6 +23,12 @@ test("board binds loopback, shows local data, rejects helper and cross-origin wr
     expect(state.usage).toEqual({});
     expect(state.estimator.evaluation.status).toBe("not-better");
     expect(state.estimates).toEqual({});
+    const viewResponse = await fetch(base + "/api/board?lang=fr");
+    const view = await viewResponse.json();
+    expect(view.status).toBe("Mise en pause par vous");
+    expect(view.counts).toEqual({running:0,upNext:0,waiting:0,done48h:0,needsYou:0});
+    expect(viewResponse.headers.get("Cache-Control")).toBe("no-store");
+    expect((await fetch(base + "/api/board", {headers:{Host:"evil.invalid"}})).status).toBe(403);
     const post = (token: string, origin: string, path = "/api/pause") =>
       fetch(base + path, {
         method: "POST",
@@ -100,7 +106,7 @@ test("board uses configured native gate and retains weekly-only provenance", asy
     s.set("readings",{codex:{...reading,windows:[{...reading.windows[0],used:.9}]}});
     state=await (await fetch(base+"/api/state")).json();
     expect(state.usageAdmission.codex).toBe("blocked");
-    expect(await (await fetch(base+"/app.js")).text()).toContain('weeklyOnly: "weekly only"');
+    expect((await (await fetch(base+'/api/board')).json()).usage[0].percent).toBe(90);
   } finally { b.close(); s.close(); rmSync(dir,{recursive:true}); }
 });
 
@@ -115,6 +121,6 @@ test('board separates recipients and refuses stale answers after automatic resol
   const answer=(id:string)=>fetch(base+'/api/answer',{method:'POST',headers:{Origin:base,Authorization:'Bearer '+'a'.repeat(64),'Content-Type':'application/json'},body:JSON.stringify({id,answer:'Synthetic answer'})});
   expect((await answer('resolved')).status).toBe(409);expect((await answer('vincent')).status).toBe(200);expect((await answer('vincent')).status).toBe(409);
   state=await(await fetch(base+'/api/state')).json();expect(state.questions).toHaveLength(0);expect(state.resolvedQuestions).toHaveLength(1);
-  const html=await(await fetch(base)).text();expect(html).toContain('<details><summary id="resolved-questions-title">');
+  const html=await(await fetch(base)).text();expect(html).toContain('id="questions-title"');expect(html).not.toContain('id="resolved-questions-title"');
  }finally{b.close();s.close();rmSync(dir,{recursive:true});}
 });
