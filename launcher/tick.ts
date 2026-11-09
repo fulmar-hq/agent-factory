@@ -19,6 +19,8 @@ import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import { qualificationAlerts } from "./alerts";
+import { reconcileBrowsers } from "./browser";
+import { nativeBrowserPorts } from "../adapters/browser";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
   if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
@@ -95,6 +97,7 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
+    await autonomyEffects(s,()=>reconcileBrowsers(e,dir,nativeBrowserPorts(e,dir,id=>spawnSupervisor(id,dir)),Date.now()));
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
     expireDecisions(s,now);
     failures(e,now);
