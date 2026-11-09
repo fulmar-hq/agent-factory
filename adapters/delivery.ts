@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync } from "node:fs";
 import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -48,6 +48,10 @@ export function executableTest(test:string) {
   return test;
 }
 export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c",executableTest(test)];
+export function prepareTestScratch(checkout:string) {
+  mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
+  appendFileSync(join(checkout,".git/info/exclude"),"\n.factory-tmp/\n");
+}
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
 export async function prepareDelivery(workspace:string, source:string, archive:string, id:string) {
@@ -167,7 +171,9 @@ export async function testSnapshot(t:Ticket, checkout:string, tree:string, sourc
     await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);
     localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
   }
-  mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
+  // Tests retain scratch receipts (including Vitest's local token). They are
+  // declared non-source assets, just as in the prepared worker checkout.
+  prepareTestScratch(checkout);
   const spec=workerSpec(t,checkout);
   const overrides=spec.argv.flatMap((a,i)=>a==="-c"?[a,spec.argv[i+1]]:[]);
   const p=Bun.spawn(["codex","sandbox",...overrides,"-P","factory","-C",checkout,...testShell(t.test)],{cwd:checkout,env:spec.env,stdout:"pipe",stderr:"pipe",stdin:"ignore"});

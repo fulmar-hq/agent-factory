@@ -5,6 +5,20 @@ import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission } from "./fixtures";
 
+test("retained test scratch stays outside the source tree while source edits remain dirty",async()=>{
+ const {mkdtempSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {prepareTestScratch}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
+ const dir=mkdtempSync(join(tmpdir(),"factory-test-scratch-"));
+ const git=(...args:string[])=>command(["git","-C",dir,...args]);
+ await git("init");await git("config","user.name","Fictional");await git("config","user.email","fictional@example.invalid");
+ writeFileSync(join(dir,"fixture"),"source");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","fixture");
+ const tree=await git("rev-parse","HEAD^{tree}");prepareTestScratch(dir);
+ writeFileSync(join(dir,".factory-tmp/test-receipt"),"retained");
+ expect((await git("status","--porcelain")).trim()).toBe("");expect(await git("rev-parse","HEAD^{tree}")).toBe(tree);
+ writeFileSync(join(dir,"fixture"),"changed");expect((await git("status","--porcelain")).trim()).toBe("M fixture");
+ writeFileSync(join(dir,"unexpected"),"changed");expect(await git("status","--porcelain")).toContain("?? unexpected");
+});
+
 test("delivery pins fresh QA without changing the source checkout",async()=>{
  const {deliveryBase}=await import("../adapters/delivery");const calls:string[][]=[];
  const sha="a".repeat(40);
