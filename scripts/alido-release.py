@@ -95,9 +95,10 @@ def freeze(c):
     # Execute only exact protected-main blobs; canonical checkout dirt/age is irrelevant.
     from pathlib import Path
     directory = Path(c['scratch']) / 'protected-source'
+    captain_source = branch('main')
     for path in ('.github/workflows/release-hold.yml', 'infra/ci/release_hold.py',
                  'infra/ci/release_control.py', 'infra/ci/release_captain.py'):
-        remote = api('contents/' + path + '?ref=' + c['executor_source'])
+        remote = api('contents/' + path + '?ref=' + captain_source)
         content = base64.b64decode(remote['content'])
         if hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() != remote['sha']:
             raise ValueError('Protected captain blob differs')
@@ -107,14 +108,24 @@ def freeze(c):
             stream.write(content)
     validate(c)
     guard(c, c['hold_id'])
-    journal('freeze-intent', {'expectedHold': c['hold_id'], 'tree': c['tree'], 'source': c['executor_source']})
+    journal('freeze-intent', {'expectedHold': c['hold_id'], 'tree': c['tree'], 'source': captain_source})
     subprocess.run(['/usr/bin/python3', '-B', str(directory / 'infra/ci/release_captain.py'),
                     'hold', 'on', '--expect', c['hold_id'], '--reason', 'Factory frozen tree ' + c['tree']],
                    check=True, capture_output=True, text=True, timeout=120, cwd=directory)
     state = hold()
     if not state['held']:
         raise ValueError('Supported freeze not confirmed')
+    journal('freeze-readback', {'hold': state})
     return state
+
+
+def publish_authority(c, environment, fields):
+    payload = {k: c[k] for k in ('day', 'revision', 'tree', 'hold_id')}
+    payload.update(fields)
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).decode().rstrip('=')
+    api('statuses/' + c['revision'], 'POST', {'state': 'success', 'context': 'factory/' + environment,
+        'description': 'Frozen factory release authority',
+        'target_url': 'https://github.com/fulmar-hq/alido/actions#factory=' + encoded})
 
 
 def variable(name, value):
@@ -274,6 +285,9 @@ def run(c):
         pin = variable('ALIDO_QA_BATCH_SHA', c['revision'])
         validate(c)
         guard(c, frozen_hold_id, True)
+        publish_authority({**c, 'hold_id': frozen_hold_id}, 'qa', {'qaRun': run_id, 'qaAttempt': original['run_attempt'] + 1})
+        validate(c)
+        guard(c, frozen_hold_id, True)
         api('actions/runs/' + str(run_id) + '/rerun', 'POST')
         def started():
             current = api('actions/runs/' + str(run_id))
@@ -306,6 +320,9 @@ def run(c):
         validate(c)
         guard(c, c['hold_id'], True)
         variable('ALIDO_FACTORY_RELEASE', json.dumps(frozen, separators=(',', ':')))
+        validate(c)
+        guard(c, c['hold_id'], True)
+        publish_authority(c, 'production', {'artifact': a['artifact'], 'qaRun': a['qaRun'], 'qaAttempt': a['qaAttempt'], 'acceptedAt': a['at'], 'verdict': 'ACCEPT'})
         validate(c)
         guard(c, c['hold_id'], True)
         pull = api('pulls', 'POST', {'base': 'main', 'head': 'QA', 'title': 'Promote accepted QA tree', 'body': 'Factory frozen tree ' + c['tree'] + '; Quality receipt ' + a['evidence']})

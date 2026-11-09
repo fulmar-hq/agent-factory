@@ -25,4 +25,4 @@ for(const [stage,hour,minute] of jobs){
  }
  console.log(`${install?'installed':'prepared'} ${label}`);
 }
-writeFileSync(join(archive,'undo.txt'),'Undo: launchctl bootout gui/UID/com.agent-factory.release.{preflight,qa,production,reconcile}; archive the installed plists. Restore archived prior definitions only after reconciling effects. Never delete release receipts or reset claims.\n');
+writeFileSync(join(archive,'undo.txt'),jobs.map(([stage])=>`launchctl bootout gui/${process.getuid!()}/com.agent-factory.release.${stage}`).join('\n')+'\nArchive installed plists. Restore prior definitions only after reconciling effects. Retain release receipts and claims.\n');

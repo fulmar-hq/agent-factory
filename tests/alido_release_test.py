@@ -1,5 +1,6 @@
 """Offline behavior proof for trusted launcher orchestration; fictional inputs."""
 import datetime
+import base64
 import hashlib
 import importlib.util
 import json
@@ -56,6 +57,17 @@ class TrustedRelease(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'failed/skipped'):
                 f.workflow(c, 'ci.yml', c['revision'], ['Full test suite'])
             self.assertEqual(api.call_count, 2)
+
+    def test_authority_payload_has_only_release_identity_not_private_evidence(self):
+        c = {**context('promote'), 'acceptance': {'evidence': 'private-review-pointer', 'native': 'private-native-id'}}
+        with patch.object(f, 'api') as api:
+            f.publish_authority(c, 'production', {'artifact': 'registry@sha256:' + 'd' * 64, 'qaRun': 7, 'qaAttempt': 2, 'acceptedAt': int(epoch('21:19') * 1000), 'verdict': 'ACCEPT'})
+        body = api.call_args.args[2]
+        encoded = body['target_url'].split('#factory=')[1]
+        payload = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
+        self.assertEqual(payload['tree'], c['tree'])
+        self.assertNotIn('acceptance', payload)
+        self.assertNotIn('private-', json.dumps(body))
 
     def test_native_push_handle_excludes_newer_preflight_and_rejects_other_attempt(self):
         c = context()
