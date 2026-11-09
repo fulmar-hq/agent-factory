@@ -1,12 +1,13 @@
 import {join} from 'node:path';
-import {mkdirSync,openSync,closeSync,writeSync,readFileSync} from 'node:fs';
+import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync} from 'node:fs';
 import {Store} from '../tracking/store';
 import {configAt,root,type Ticket} from './config';
-import {workerSpec,materializeSettings,WorkerAccounting} from '../adapters/workers';
+import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings} from '../adapters/workers';
 import {NativeReceipt} from '../adapters/native';
 import {spawnWorker} from './child';
 import {processIdentity} from './process';
 import {type Wake,type OwnerRuntime} from './wake';
+import {recordAcceptance} from './release';
 // Permanent owners review events; ticket work is admitted separately. Their
 // command tools get read-only source plus this wake's scratch, never publisher
 // credentials. A wake cannot merge, deploy or write the launcher source.
@@ -18,6 +19,10 @@ export function ownerSpec(t:Ticket,workspace:string,scratch:string,native?:strin
  } else {
   if(native){const i=spec.argv.indexOf('--session-id');spec.argv.splice(i,2,'--resume',native);spec.nativeId=native;}
   if(spec.settings) {
+   // Build private sibling denials around this exact scratch, rather than denying its ancestor.
+   spec.settings=claudeSettings(scratch);
+   spec.settings.sandbox.filesystem.allowRead=[workspace,scratch];
+   spec.argv.splice(spec.argv.indexOf('--settings'),0,'--add-dir',scratch);
    spec.settings.permissions.deny.push(`Edit(/${workspace}/**)`);
    spec.settings.sandbox.filesystem.denyWrite.push(workspace);
    spec.settings.sandbox.filesystem.allowWrite=[scratch];
@@ -42,13 +47,18 @@ export async function runOwner(id:string,dir=root) {
   wake=claimed.w;runtime=claimed.r;
   const role=c.owners[wake.owner];if(!role)throw Error('owner not configured');
   const scratch=join(dir,'runs','owner-wakes',id.replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80)+'-'+crypto.randomUUID());mkdirSync(scratch,{recursive:true,mode:0o700});
+  if(wake.kind==='qa-deployed' && Date.now()>=(wake.payload as {deadline:number}).deadline)throw Error('Quality acceptance deadline expired');
+  if(wake.kind==='qa-deployed')writeFileSync(join(scratch,'qa-evidence.json'),JSON.stringify(wake.payload,null,2),{mode:0o600});
   const fullBrief=readFileSync(join(dir,'owners',`${wake.owner}.md`),'utf8');
   const brief=fullBrief.length>60000 ? fullBrief.slice(0,12000)+'\n[Historical middle retained in owner record]\n'+fullBrief.slice(-48000) : fullBrief;
   const t:Ticket={repo:'owner/review',number:1,title:'Review owner event',owner:wake.owner,creator:'launcher',source:wake.id,outcome:`You are Alido · ${wake.owner}. Review this event and report the required follow-up. This wake is read-only: do not implement changes, publish, merge, release, sign in or send messages. Ticket workers and the trusted launcher perform effects separately. Preserve work.\nOwner record:\n${brief}\nEvent:\n${JSON.stringify(wake)}`,test:'Report source-backed owner decisions',approved:true,benefit:'normal',estimateSeconds:1800,estimateTokens:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:role.harness,model:role.model,effort:role.effort,area:'owner',kind:'review'};
+  if(wake.kind==='qa-deployed'){
+   t.outcome=`You are independent Alido Quality. Accept or reject ONLY this hosted frozen QA revision/tree/artifact. Deadline is an absolute epoch milliseconds; finish before it. Read the trusted launcher-fetched native/hosted evidence in ${join(scratch,'qa-evidence.json')}. Inspect additional hosted/browser evidence only if the sandbox has a qualified supported path; do not assume those capabilities exist. Record exactly which feature checks are proven and which are missing. Do not use AWS SSO, change customer settings, send real-person messages or mutate release state. Missing hosted evidence means REJECT. Write ${join(scratch,'acceptance.json')} with exactly {day,revision,tree,artifact,verdict: ACCEPT or REJECT,evidence: nonempty source-backed findings}. Do not accept from passing CI alone. Your launcher validates the receipt after verified native completion.\nOwner record:\n${brief}\nQA deployed packet:\n${JSON.stringify(wake.payload)}`;
+  }
   if(wake.kind==='product-intake')t.outcome+=`\nWrite ${join(scratch,'intake.json')} as {"tickets":[{"repo":"enrolled/repo","title":"Short useful task","brief":{...}}]}. Brief uses the factory Ticket schema, explicit honest estimateSeconds/estimateTokens plus estimateBasis (at least 20 characters of evidence), one area, disjoint exact files, executable test, source-backed useful outcome. Review project AGENTS.md and contracts. Avoid duplicate work and protected files. At most one docs-only proposal in this round. Supply enough useful leaves to reach target; never inflate estimates or invent success. Do not call GitHub writes. The launcher validates and creates drafts then applies policy.`;
   if(wake.kind==='failure-diagnosis')t.outcome+=`\nDiagnose using retained evidence in the event and repository. Write ${join(scratch,'retry.json')} as {"session":"failed session id","diagnosis":"source-backed cause and correction, at least 20 characters","estimateBasis":"honest basis, at least 20 characters","test":"correct executable command","outcome":"corrected bounded outcome"}. Keep original paths, estimates, wallet and provider. The launcher permits one new-digest attempt only with verified custody and no PR. If unsafe, do not write a retry proposal; report a decision.`;
   // Intake and diagnosis start fresh; retained native sessions stay archived.
-  const fresh=['product-intake','failure-diagnosis'].includes(wake.kind);
+  const fresh=['product-intake','failure-diagnosis','qa-deployed'].includes(wake.kind);
   const ownerNative=fresh ? undefined : runtime.native;
   const spec=materializeSettings(ownerSpec(t,runtime.workspace,scratch,ownerNative),join(scratch,'settings.json'));
   let native=ownerNative ?? spec.nativeId;
@@ -68,6 +78,7 @@ export async function runOwner(id:string,dir=root) {
   onSignal=halt;process.on("SIGTERM",onSignal);process.on("SIGINT",onSignal);
   const sample=()=>{
    try{receipt?.poll(accounting);}catch{halt();}
+   if(wake?.kind==='qa-deployed' && Date.now()>=(wake.payload as {deadline:number}).deadline)halt();
    const seconds=(Date.now()-start)/1000,paused=seconds>=3600 || accounting.tokens-baseline>=16000000;
    s.set(`owner-budget:${id}`,{seconds,tokens:accounting.tokens-baseline,cachedTokens:accounting.cachedTokens-cachedBaseline,checkpoint:seconds>=3240 || accounting.tokens-baseline>=14400000,overshootTokens:Math.max(0,accounting.tokens-baseline-16000000),overshootSeconds:Math.max(0,seconds-3600),nextTurnBlocked:paused});
    if(paused || s.get('paused')!==false || receipt?.evidence(t.model!,t.effort!).conflict)halt();
@@ -82,6 +93,7 @@ export async function runOwner(id:string,dir=root) {
   const code=await child.exited;for(let i=0;i<64;i++){sample();if(!receipt || receipt.caughtUp || halted)break;}
   await child.stop();if(stop)await stop;
   const ok=!halted && code===0 && done && receipt?.evidence(t.model!,t.effort!).verified===true && child.cleanup.verified;
+  if(ok && wake.kind==='qa-deployed')recordAcceptance(s,id,native!,JSON.parse(readFileSync(join(scratch,'acceptance.json'),'utf8')));
   s.set(`owner-wake:${id}`,{...wake,state:ok?'done':'blocked',native,at:Date.now(),scratch});
   s.event(`owner-complete:${id}`,'owner-wake-complete',{id,ok,native,cleanup:child.cleanup},'Retain completed wake; use a distinct new event for further work');
  } catch(error){
