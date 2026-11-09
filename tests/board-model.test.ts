@@ -108,7 +108,7 @@ test("groups one task once, hides archives and old closures, and uses actual clo
     s.close();
   }
 });
-test("queue keeps reconciliation order, validates approval, omits claimed work and caps at ten", () => {
+test("queue keeps reconciliation order, validates approval, omits claimed work and caps at five", () => {
   const { s, e, ready, session, add } = fixture();
   try {
     ready(20);
@@ -118,8 +118,8 @@ test("queue keeps reconciliation order, validates approval, omits claimed work a
     add(90, "OPEN", ["state:ready"]); // a label alone cannot approve a task
     const m = boardModel(e, {}, now);
     expect(m.counts.upNext).toBe(13);
-    expect(m.upNext).toHaveLength(10);
-    expect(m.more).toBe(3);
+    expect(m.upNext).toHaveLength(5);
+    expect(m.more).toBe(8);
     expect(m.upNext[0].id).toBe("example/demo#20");
     expect(m.upNext[1].id).toBe("example/demo#30");
     expect(m.upNext.some((x) => x.id === "example/demo#2")).toBe(false);
@@ -340,4 +340,113 @@ test("failed or truncated GitHub reads cannot advertise a claimable queue", () =
   } finally {
     s.close();
   }
+});
+
+test("elapsed uses session start, activity uses log evidence, owner runs count", () => {
+  const {s,e,add,session} = fixture();
+  try {
+    add(1);const id=session(1,"running");
+    s.db.query("UPDATE sessions SET actual_seconds=2").run();
+    const m=boardModel(e,{},now,"en",{activity:{[id]:now-60000},ownerRuns:[{id:"quality/run-fictional",title:"Check calendar labels",owner:"quality",started:now-300000,lastActivity:now-20000,estimateSeconds:null}]});
+    expect(m.running[0].seconds).toBe(1380);
+    expect(m.running[0].lastActivity).toBe(now-60000);
+    expect(m.running[1].ownerRun).toBe(true);
+    expect(m.counts.running).toBe(2);
+    expect(m.hero.soft).toBe("2 tasks running");
+  } finally {s.close();}
+});
+
+test("completed timings and median come from real start and finish evidence", () => {
+  const {s,e,add,session}=fixture();
+  try {
+    for(const [n,duration,ago] of [[1,600,60],[2,2400,120],[3,1800,180]]) {
+      add(n,"CLOSED",[],new Date(now-ago*1000).toISOString());const id=session(n,"finished");
+      s.db.query("UPDATE sessions SET started=?,actual_seconds=1 WHERE id=?").run(now-(duration+ago)*1000,id);
+      s.event(`exit-${n}`,"worker-exit",{id,ok:true},"retain",now-ago*1000);
+    }
+    const m=boardModel(e,{},now);
+    expect(m.completed).toEqual({count:3,medianSeconds:1800,over:1});
+    expect(m.done[0].seconds).toBe(600);
+    expect(m.done[1].seconds).toBe(2400);
+    expect(m.done[0].at).toBe(now-60000);
+    expect(m.done[0].started).toBe(now-660000);
+  } finally{s.close();}
+});
+
+test("an old completed worker does not reappear because its issue closed today",()=>{
+  const {s,e,add,session}=fixture();
+  try {
+    add(1,"CLOSED",[],new Date(now-60000).toISOString());const id=session(1,"finished");
+    s.db.query("UPDATE sessions SET started=?").run(now-51*3600000);
+    s.event("old-exit","worker-exit",{id,ok:true},"retain",now-50*3600000);
+    expect(boardModel(e,{},now).done).toHaveLength(0);
+  }finally{s.close();}
+});
+
+test("closed intake keeps its expected duration without inventing an actual duration",()=>{
+  const {s,e,add}=fixture();
+  try{
+    const i=add(1,"CLOSED",[],new Date(now-60000).toISOString());
+    i.body='```factory\n'+JSON.stringify(ticket(1))+'\n```';
+    s.db.query("UPDATE tickets SET snapshot=? WHERE id=?").run(JSON.stringify(i),'example/demo#1');
+    const item=boardModel(e,{},now).done[0];
+    expect(item.estimateSeconds).toBe(ticket(1).estimateSeconds);
+    expect(item.seconds).toBeNull();
+    expect(boardModel(e,{},now).completed.medianSeconds).toBeNull();
+  }finally{s.close();}
+});
+
+test("legacy questions are condensed; browser questions keep their local deadline and safe default",()=>{
+  const {s,e}=fixture();
+  try{
+    const text='Use tabs_context_mcp on tabId=123 at https://example.test/?token=secret then inspect the very long output before 2026-11-07T23:00:00.000Z';
+    s.db.query("INSERT INTO questions(id,text,at) VALUES(?,?,?)").run('browser:fake',text,now);
+    s.set('browser-job:fake',{deadline:now+3600000,request:{goal:'Check service'}});
+    const q=boardModel(e,{},now).questions[0];
+    expect(q.title.split(/\s+/).length).toBeLessThanOrEqual(12);
+    expect(q.context.split(/(?<=[.!?])\s/)).toHaveLength(1);
+    expect(q.default).toBe('not done');
+    expect(q.defaultLine).toContain('7:00');
+    expect(JSON.stringify(q)).not.toMatch(/tabs_context|tabId|token=secret|2026-11-07T/);
+  }finally{s.close();}
+});
+
+test("valid structured questions retain choices; malformed data falls back safely",()=>{
+  const {s,e}=fixture();
+  try{
+    s.db.query("INSERT INTO questions(id,text,at) VALUES(?,?,?)").run('choice',JSON.stringify({title:'Keep AWS off tonight?',context:'The release needs AWS to run.',choices:[{label:'Keep off',value:'off'},{label:'On tonight',value:'on'}],default:'stays off',deadline:now+3600000}),now);
+    let q=boardModel(e,{},now).questions[0];
+    expect(q.title).toBe('Keep AWS off tonight?');expect(q.choices[1].value).toBe('on');
+    s.db.query("UPDATE questions SET text=?").run('{"title":23,"choices":"broken","default":123}');
+    q=boardModel(e,{},now).questions[0];expect(q.title).toBe('Review a work decision');
+    expect(q.choices.length).toBeGreaterThan(0);
+  }finally{s.close();}
+});
+
+test("full retained capacity never claims idle",()=>{
+  const {s,e,add,session}=fixture();
+  try{
+    for(let n=1;n<=e.c.capacity.start_parallel;n++){add(n);session(n,'paused');}
+    expect(boardModel(e,{},now).hero.mode).toBe('paused');
+  }finally{s.close();}
+});
+
+test("weekly readings never borrow a short Claude window; reset time is real",()=>{
+  const {s,e}=fixture();
+  try{
+    const meter={observedAt:now,source:'fictional',windows:[{used:.4,resetsAt:now+60000,durationMinutes:300}]};
+    expect(boardModel(e,{claude:meter},now).usage[1].percent).toBeNull();
+    meter.windows[0].durationMinutes=10080;
+    expect(boardModel(e,{claude:meter},now).usage[1].resetsAt).toBe(now+60000);
+  }finally{s.close();}
+});
+
+test("titles strip conventional commits and issue numbers",()=>{
+  expect(plainText('example/demo: fix(board): #123 — Repair the board (#125)')).toBe('Repair the board');
+});
+
+test("owner-run titles derive from the first sentence without setup instructions", async()=>{
+  const {ownerTitle}=await import('../board/runtime');
+  expect(ownerTitle('You are Alido · Product (board) in ~/Developer/example (pull first). Repair it.')).toBe('Product board work');
+  expect(ownerTitle('Repair the booking timezone. Preserve the work.')).toBe('Repair the booking timezone.');
 });

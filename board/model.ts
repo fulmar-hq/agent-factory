@@ -1,3 +1,6 @@
+import { questionFields } from "./questions";
+import { slotLimit } from "../launcher/capacity";
+import type { BoardEvidence } from "./runtime";
 import { issueTicket, type Issue } from "../adapters/github";
 import type { Engine, Session } from "../launcher/engine";
 import { boardQuestions } from "../launcher/questions";
@@ -8,7 +11,7 @@ import { monthAt } from "../wallet/ledger";
 export type Language = "en" | "fr";
 const copy = {
   en: {
-    unknown: "Unavailable",
+    unknown: "not available",
     noOwner: "Not assigned",
     task: "Task",
     paused: "Paused by you",
@@ -50,7 +53,7 @@ const copy = {
     noSession: "No saved session yet",
   },
   fr: {
-    unknown: "Indisponible",
+    unknown: "non disponible",
     noOwner: "Non attribué",
     task: "Tâche",
     paused: "Mise en pause par vous",
@@ -105,13 +108,21 @@ export function humanTime(seconds: number, lang: Language = "en") {
 export function plainText(value: string) {
   return value
     .replace(/```[\s\S]*?```/g, "")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\b\d{4}-\d{2}-\d{2}T[\d:.]+Z?\b/g, "")
     .replace(/\b[\w.-]+\/[\w.-]+#\d+\b/g, "")
     .replace(/\b[a-f0-9]{32,64}\b/gi, "")
     .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, "")
     .replace(/^\s*(?:\[[^\]]+\]|[\w.-]+\/[\w.-]+\s*[:—-])\s*/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/^\s*(?:feat|fix|chore|docs|refactor|test|style|perf|build|ci)(?:\([^)]*\))?!?:\s*/i, "")
+    .replace(/^#?\d+\s*[:.—-]\s*/, "")
+    .replace(/\s*\(#\d+\)\s*$/g, "")
+    .replace(/\b(?:tabs?_\w+(?:_mcp)?|[\w]+_mcp|tab(?:Id| id)\s*[:=]?\s*\d+)\b/gi, "")
+    .replace(/\bmcp__\w+\b/gi, "")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, " ").trim();
 }
+export const shortTitle = (value: string) => plainText(value).split(/\s+/).slice(0,12).join(" ").slice(0,100);
 const parse = <T>(value: string, fallback: T): T => {
   try {
     return JSON.parse(value) as T;
@@ -129,6 +140,8 @@ export function boardModel(
   readings: { codex?: Meter; claude?: Meter; billing?: Billing },
   now = Date.now(),
   lang: Language = "en",
+  evidence: BoardEvidence = {ownerRuns:[],activity:{}},
+  more = false,
 ) {
   const s = e.s,
     t = copy[lang],
@@ -175,9 +188,10 @@ export function boardModel(
   function task(id: string, i: Issue, x?: Session) {
     let brief = x ? parse<Partial<Ticket>>(x.brief, {}) : {};
     if (!x) {
-      try {
-        brief = issueTicket(id.slice(0, id.lastIndexOf("#")), i) ?? {};
-      } catch {}
+      // Display-only intake evidence: this never confers launch approval.
+      const block = i.body?.match(/```factory\s*\n([\s\S]*?)\n```/);
+      const raw = block ? parse<Partial<Ticket>>(block[1]!,{}) : {};
+      brief = {owner:typeof raw.owner === "string" ? raw.owner : undefined,outcome:typeof raw.outcome === "string" ? raw.outcome : undefined,estimateSeconds:typeof raw.estimateSeconds === "number" && Number.isFinite(raw.estimateSeconds) && raw.estimateSeconds>0 ? raw.estimateSeconds : undefined};
     }
     const published = events.find(
       (ev) =>
@@ -194,12 +208,17 @@ export function boardModel(
         plainText(brief.outcome || "") || plainText(i.title || "") || t.task,
       owner: ownerName(x?.owner || brief.owner),
       started: x?.started ?? null,
-      seconds: x?.actual_seconds ?? null,
+      seconds: x?.started ? Math.max(0, (now - x.started) / 1000) : null,
+      lastActivity: x ? evidence.activity[x.id] ?? null : null,
+      ownerRun: false,
+      waitGroup: "review",
+      out: "closed",
+
       tokens: x?.actual_tokens ?? null,
       estimateSeconds: brief.estimateSeconds ?? null,
       progress:
         brief.estimateSeconds && x
-          ? Math.min(1, x.actual_seconds / brief.estimateSeconds)
+          ? Math.min(1, Math.max(0, (now - (x.started ?? now)) / 1000) / brief.estimateSeconds)
           : null,
       issue: githubURL(i.url),
       pr,
@@ -207,7 +226,7 @@ export function boardModel(
       sessionStatus: x?.status ?? null,
       status: "",
       at: null as number | null,
-      technical: { issue: i, session: x ?? null },
+      technical: { tIssue: id, ...(x?.native_id ? {session:x.native_id} : {}) } as Record<string,string>,
     };
   }
   const running: ReturnType<typeof task>[] = [],
@@ -217,7 +236,7 @@ export function boardModel(
   for (const row of rows) {
     const i = snapshots.get(row.id)!,
       x = latest.get(row.id);
-    if (!i.title || x?.status === "archived") continue;
+    if (!i.title) continue;
     const labels = (i.labels ?? []).map((l) => l.name),
       item = task(row.id, i, x);
     if (i.state === "CLOSED") {
@@ -225,12 +244,16 @@ export function boardModel(
       const at = Date.parse(i.closedAt ?? "");
       if (Number.isFinite(at) && at <= now && now - at <= 48 * 3600000) {
         item.status = t.closed;
-        item.at = at;
-        done.push(item);
+        const finished = x ? events.find(ev => ev.kind === "worker-exit" && parse<{id?:string}>(ev.data,{}).id === x.id)?.at : null;
+        item.at = finished && finished >= (x?.started ?? 0) && finished <= now ? finished : at;
+        item.seconds = x?.started && finished ? Math.max(0,(finished-x.started)/1000) : null;
+        const released = labels.includes("state:production") || labels.includes("state:live");
+        item.out = released ? "live" : labels.includes("state:qa") ? "test" : "closed";
+        if (item.at <= now && now-item.at <= 48*3600000) done.push(item);
       }
       continue;
     }
-    if (i.state !== "OPEN") continue;
+    if (i.state !== "OPEN" || x?.status === "archived") continue;
     if (x && ["starting", "running"].includes(x.status)) {
       running.push(item);
       continue;
@@ -286,44 +309,39 @@ export function boardModel(
         else if (pr.review === "APPROVED") item.status = t.release;
       }
     }
+    item.waitGroup = item.status === t.checks ? "checks" : item.status === t.release ? "release" : [t.fixChecks,t.stopped,t.investigate].includes(item.status) ? "fix" : "review";
     if (item.status) waiting.push(item);
   }
   running.sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
   done.sort((a, b) => b.at! - a.at!);
-  const questions = boardQuestions(s).questions.map((q) => {
-    const x = q.id.startsWith("overrun:")
-      ? sessions.find((x) => x.id === q.id.slice(8))
-      : undefined;
+  const questions = boardQuestions(s).questions.map(q => {
+    const x = q.id.startsWith("overrun:") ? sessions.find(x=>x.id===q.id.slice(8)) : undefined;
     const i = x ? snapshots.get(x.ticket) : undefined;
-    const decision = q.id.startsWith("autonomy:")
-      ? s.get<{ deadline?: number; default?: string; state?: string }>(
-          `autonomy-decision:${q.id.slice(9)}`,
-        )
-      : null;
-    const fallback =
-      decision?.default === "not approved"
-        ? t.notApproved
-        : x
-          ? t.stoppedDefault
-          : t.notApproved;
-    return {
-      id: q.id,
-      title: x
-        ? t.extension(
-            plainText(
-              i?.title || parse<Partial<Ticket>>(x.brief, {}).title || "",
-            ) || t.task,
-          )
-        : plainText(q.text),
-      defaultLine: decision?.deadline
-        ? t.deadline(time(decision.deadline), fallback)
-        : x
-          ? t.noDeadline
-          : t.noDecisionDeadline,
-      task: x && i ? task(x.ticket, i, x) : null,
-      technical: q,
-    };
+    const decision = q.id.startsWith("autonomy:") ? s.get<{deadline?:number;default?:string}>(`autonomy-decision:${q.id.slice(9)}`) : null;
+    const browser = q.id.startsWith("browser:") ? s.get<{deadline:number;request?:{goal?:string};blocked?:{blocker?:string}}>(`browser-job:${q.id.slice(8)}`) : null;
+    const structured = questionFields(q.text);
+    const fallback = plainText(structured?.default ?? (browser ? (lang === "fr" ? "non fait" : "not done") : x ? t.stoppedDefault : t.notApproved));
+    const title = x ? (lang === "fr" ? "Continuer : " : "Continue: ") + shortTitle(i?.title || parse<Partial<Ticket>>(x.brief,{}).title || t.task).split(/\s+/).slice(0,10).join(" ") + "?"
+      : browser ? (lang === "fr" ? "Le site attend votre aide" : "The site needs your help")
+      : shortTitle(structured?.title || (q.text.split(/\s+/).length<=12 && !/[{}]|mcp|tab.?id|https?:/i.test(q.text) ? q.text : (lang === "fr" ? "Vérifier une décision de travail" : "Review a work decision"))) || (lang === "fr" ? "Votre décision est requise" : "Your decision is needed");
+    const context = structured?.context ? plainText(structured?.context).split(/(?<=[.!?])\s/)[0]! : x
+      ? (lang === "fr" ? "Le travail a atteint sa limite et reste arrêté sans votre accord." : "The work reached its limit and stays stopped without your approval.")
+      : browser ? (lang === "fr" ? "Une étape sur le site nécessite votre intervention avant de continuer." : "A step on the site needs your help before work can continue.")
+      : (lang === "fr" ? "Une décision est nécessaire pour continuer ce travail." : "A decision is needed before this work can continue.");
+    const choices = structured?.choices?.filter(c=>typeof c.label==="string" && typeof c.value==="string").map(c=>({label:shortTitle(c.label),value:c.value})) ?? (browser
+      ? [{label:lang === "fr" ? "Pas fait" : "Not done",value:"not done"},{label:lang === "fr" ? "C’est fait, revérifier" : "Done, check again",value:"done"}]
+      : [{label:lang === "fr" ? "Laisser arrêté" : "Keep stopped",value:"not approved"},{label:lang === "fr" ? "Demander une prolongation" : "Request an extension",value:"request bounded extension"}]);
+    const deadline = structured?.deadline ?? decision?.deadline ?? browser?.deadline ?? null;
+    return {id:q.id,title:shortTitle(title),context,choices,default:fallback,deadline,
+      defaultLine:deadline ? t.deadline(time(deadline),fallback) : x ? t.noDeadline : t.noDecisionDeadline,
+      technical:{details:plainText(structured?.title ? structured?.context || "" : q.text)},task:x && i ? task(x.ticket,i,x) : null};
   });
+  for (const owner of evidence.ownerRuns) {
+    const item = task(`owner:${owner.id}`, {title:owner.title} as Issue);
+    Object.assign(item,{title:shortTitle(owner.title) || t.task,owner:ownerName(owner.owner),started:owner.started,seconds:Math.max(0,(now-owner.started)/1000),estimateSeconds:owner.estimateSeconds,lastActivity:owner.lastActivity,ownerRun:true,purpose:lang === "fr" ? "Travail du responsable en cours." : "An owner is working on this now.",technical:{details:plainText(owner.id)}});
+    running.push(item);
+  }
+  running.sort((a,b)=>(a.started ?? 0)-(b.started ?? 0));
   const lastExit = events.find((ev) => ev.kind === "worker-exit")?.at;
   const lastStart = sessions.reduce((at, x) => Math.max(at, x.started ?? 0), 0);
   const idleSince = Math.max(lastExit ?? 0, lastStart);
@@ -354,18 +372,14 @@ export function boardModel(
     const weekly = meter?.windows.find(
       (w) => w.durationMinutes === 10080 || w.name === "seven_day",
     );
-    const window =
-      provider === "codex"
-        ? weekly
-        : (weekly ??
-          meter?.windows.reduce((a, b) => (a.used > b.used ? a : b)));
+    const window = weekly;
     const fresh =
       meter &&
       now >= meter.observedAt &&
       now - meter.observedAt <= e.c.usage_gates.max_meter_age_minutes * 60000 &&
       window &&
       window.resetsAt > now;
-    return { provider, percent: fresh ? Math.round(window.used * 100) : null };
+    return { provider, percent: fresh ? Math.round(window.used * 100) : null, resetsAt:fresh ? window.resetsAt : null };
   });
   const billing = readings.billing,
     freshBilling =
@@ -411,6 +425,9 @@ export function boardModel(
     return {
       id: `release:${r.stage}`,
       title: r.name,
+      at: deadlineAt(now,r.minute),
+      state: state === t.passed ? "passed" : state === t.failed ? "failed" : "scheduled",
+      label: state === t.skipped ? (lang === "fr" ? "Annulée : AWS est éteint" : "Skipped: AWS is off") : state,
       time: time(deadlineAt(now, r.minute)),
       status: state,
       technical: { day, effect, promotion },
@@ -422,8 +439,19 @@ export function boardModel(
       : minute < 1290
         ? { name: "Production", at: deadlineAt(now, 1290) }
         : { name: "QA", at: deadlineAt(now, 1200 + 1440) };
+  const durations = done.map(x=>x.seconds).filter((n): n is number=>n !== null).sort((a,b)=>a-b);
+  const mid = Math.floor(durations.length/2);
+  const medianSeconds = durations.length ? durations.length % 2 ? durations[mid]! : (durations[mid-1]!+durations[mid]!)/2 : null;
+  const freeCapacity = e.active().length < slotLimit(s,e.c);
+  const mode = s.get("paused") === true ? "paused" : questions.length ? "needs" : running.length ? "working" : freeCapacity ? "idle" : "paused";
+  const hero = {mode,title:mode === "paused" ? (lang === "fr" ? "En pause" : "Paused") : mode === "needs" ? (lang === "fr" ? "Besoin de vous" : "Needs you") : mode === "working" ? (lang === "fr" ? "En marche" : "Working") : (lang === "fr" ? "Inactif" : "Idle"),
+    soft:mode === "paused" ? (s.get("paused") === true ? (lang === "fr" ? "à votre demande" : "by you") : (lang === "fr" ? "en attente d’une place" : "waiting for a free slot")) : mode === "needs" ? `${questions.length} question${questions.length === 1 ? "" : "s"}` : mode === "working" ? t.running(running.length) : idleSeconds === null ? "" : (lang === "fr" ? "depuis " : "for ")+humanTime(idleSeconds,lang),
+    lede:lang === "fr" ? `${running.length} tâches continuent pendant que vous décidez.` : `The ${running.length} running tasks carry on while you decide.`};
   return {
     now,
+    hero,
+    completed:{count:done.length,medianSeconds,over:done.filter(x=>x.seconds !== null && x.estimateSeconds !== null && x.seconds>x.estimateSeconds).length},
+    nextLiveAt:deadlineAt(now,minute < 1290 ? 1290 : 1290+1440),
     lang,
     status,
     paused: s.get("paused") === true,
@@ -433,8 +461,8 @@ export function boardModel(
     nextRelease: { ...next, time: time(next.at), tomorrow: minute >= 1290 },
     questions,
     running,
-    upNext: upNext.slice(0, 10),
-    more: Math.max(0, upNext.length - 10),
+    upNext: more ? upNext : upNext.slice(0, 5),
+    more: Math.max(0, upNext.length - 5),
     waiting,
     done,
     releases,

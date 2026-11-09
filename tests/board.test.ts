@@ -121,6 +121,6 @@ test('board separates recipients and refuses stale answers after automatic resol
   const answer=(id:string)=>fetch(base+'/api/answer',{method:'POST',headers:{Origin:base,Authorization:'Bearer '+'a'.repeat(64),'Content-Type':'application/json'},body:JSON.stringify({id,answer:'Synthetic answer'})});
   expect((await answer('resolved')).status).toBe(409);expect((await answer('vincent')).status).toBe(200);expect((await answer('vincent')).status).toBe(409);
   state=await(await fetch(base+'/api/state')).json();expect(state.questions).toHaveLength(0);expect(state.resolvedQuestions).toHaveLength(1);
-  const html=await(await fetch(base)).text();expect(html).toContain('id="questions-title"');expect(html).not.toContain('id="resolved-questions-title"');
+  const html=await(await fetch(base)).text();expect(html).toContain('<main id="app">');expect(html).not.toContain('id="resolved-questions-title"');
  }finally{b.close();s.close();rmSync(dir,{recursive:true});}
 });

@@ -1,98 +1,31 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <title>Factory</title>
-    <link rel="stylesheet" href="/style.css" />
-    <script type="module" src="/app.js"></script>
-  </head>
-  <body>
-    <a class="skip" href="#main" id="skip">Skip to tasks</a>
-    <header>
-      <a class="brand" href="/" aria-label="Factory"
-        >Factory<span aria-hidden="true" class="brand-dot"></span
-      ></a>
-      <select id="lang" aria-label="Language / Langue">
-        <option value="en">English</option>
-        <option value="fr">Français</option>
-      </select>
-    </header>
-    <main id="main">
-      <div class="overview">
-        <p class="eyebrow" id="today">Today</p>
-        <h1 id="status" aria-live="polite">Checking the factory…</h1>
-        <p id="meters" class="meters"></p>
-        <p id="connection" role="status" hidden></p>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Factory Desk</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head><body><a class="skip" id="skip" href="#app">Skip to tasks</a>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">Factory Desk</div>
+    <div class="top-right">
+      <span class="updated" id="updated"></span>
+      <div class="seg" role="group" aria-label="Language" id="lang">
+        <button type="button" id="lang-en" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" id="lang-fr" data-lang="fr" aria-pressed="false">FR</button>
       </div>
-      <section aria-labelledby="questions-title">
-        <h2 id="questions-title">
-          Needs you <span id="questions-count" class="count"></span>
-        </h2>
-        <div id="questions" class="list"></div>
-      </section>
-      <section aria-labelledby="running-title">
-        <h2 id="running-title">
-          Running now <span id="running-count" class="count"></span>
-        </h2>
-        <div id="running" class="list"></div>
-      </section>
-      <section aria-labelledby="upNext-title">
-        <h2 id="upNext-title">
-          Up next <span id="upNext-count" class="count"></span>
-        </h2>
-        <div id="upNext" class="list"></div>
-        <p id="more" class="quiet" hidden></p>
-      </section>
-      <section aria-labelledby="waiting-title">
-        <h2 id="waiting-title">
-          Waiting <span id="waiting-count" class="count"></span>
-        </h2>
-        <div id="waiting" class="list"></div>
-      </section>
-      <section aria-labelledby="done-title">
-        <h2 id="done-title">
-          Done <span class="heading-note" id="done-note">Last 48 h</span
-          ><span id="done-count" class="count"></span>
-        </h2>
-        <div id="done" class="list"></div>
-      </section>
-      <section aria-labelledby="releases-title">
-        <h2 id="releases-title">
-          Releases
-          <span class="heading-note" id="releases-note"
-            >Tonight · Toronto time</span
-          >
-        </h2>
-        <div id="releases" class="list"></div>
-      </section>
-      <details id="controls" hidden>
-        <summary id="control-title">Local controls</summary>
-        <form id="auth">
-          <label for="token" id="token-label">Owner token</label
-          ><input
-            type="password"
-            id="token"
-            autocomplete="off"
-            required
-          /><button id="save" type="submit">Use token</button>
-        </form>
-        <p id="auth-result" role="status"></p>
-        <button id="pause" type="button">Pause</button>
-      </details>
-      <footer>
-        <span id="updated"></span
-        ><span id="refresh-note">Updates every 15 seconds</span>
-      </footer>
-    </main>
-    <dialog id="sheet" aria-labelledby="sheet-title">
-      <div class="sheet-top">
-        <p class="eyebrow" id="sheet-label">Task details</p>
-        <button id="close" class="secondary" type="button">Close</button>
-      </div>
-      <h2 id="sheet-title"></h2>
-      <div id="sheet-body"></div>
-    </dialog>
-  </body>
-</html>
+    </div>
+  </header>
+
+  <main id="app"><p class="quiet-line">Checking the factory…</p></main><p id="connection" class="notice" role="status" hidden></p>
+<details id="controls" hidden><summary id="control-title">Local controls</summary><form id="auth"><label for="token" id="token-label">Owner token</label><input type="password" id="token" autocomplete="off" required><button type="submit" class="btn" id="save">Use token</button></form><p id="auth-result" role="status"></p><button type="button" class="btn" id="pause">Pause</button></details>
+
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" inert>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-bar">
+    <button type="button" class="close" id="sheet-close">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="sheet-scroll" id="sheet-body"></div>
+</div>
+
+</body></html>
