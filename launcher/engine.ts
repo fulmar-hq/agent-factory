@@ -349,7 +349,7 @@ export class Engine {
           now,
         );
       }
-      if (ratio >= this.c.overrun.pause_at) {
+      if (ratio >= this.c.overrun.pause_at && !["finished", "archived"].includes(x.status)) {
         this.s.set(`stop:${id}`,{reason:"budget pause; next turn blocked",at:now,...budget});
         this.s.db
           .query(
@@ -357,7 +357,7 @@ export class Engine {
           )
           .run(id);
         this.s.db
-          .query("INSERT OR IGNORE INTO questions VALUES(?,?,NULL,?)")
+          .query("INSERT INTO questions(id,text,answer,at,addressed_to) VALUES(?,?,NULL,?,'vincent') ON CONFLICT(id) DO UPDATE SET answer=NULL,at=excluded.at,resolved_at=NULL,resolved_by=NULL WHERE questions.resolved_at IS NOT NULL")
           .run(
             `overrun:${id}`,
             "Work reached twice its time or token estimate. Close it or grant a bounded extension?",

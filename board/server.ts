@@ -1,3 +1,4 @@
+import { boardQuestions } from "../launcher/questions";
 import {slotLimit} from "../launcher/capacity";
 import { issueTicket } from "../adapters/github";
 import { estimate, history, score } from "../estimator/predict";
@@ -66,9 +67,9 @@ export async function board(dir = root, port = 4318) {
           ) {
             const result = s.db
               .query(
-                "UPDATE questions SET answer=? WHERE id=? AND answer IS NULL",
+                "UPDATE questions SET answer=?,resolved_at=?,resolved_by='owner answer' WHERE id=? AND answer IS NULL AND resolved_at IS NULL",
               )
-              .run(body.answer, body.id);
+              .run(body.answer, Date.now(), body.id);
             if (!result.changes)
               return json({ error: "unresolved question not found" }, 409);
             s.event(
@@ -176,7 +177,7 @@ export async function board(dir = root, port = 4318) {
               ];
             }),
           ),
-          questions: s.rows("questions"),
+          ...boardQuestions(s),
           tickets: s.rows("tickets"),
           sessions: e.sessions().map(x=>({...x,budget:e.budget(x)})),
           releases: s.rows("releases"),

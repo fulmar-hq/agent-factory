@@ -4,7 +4,11 @@ const words = {
     controls: "Controls",
     token: "Owner token",
     save: "Use token",
-    questions: "Questions",
+    questions: "Questions for Vincent",
+    ownerQuestions: "Questions for owners",
+    resolvedQuestions: "Resolved without you",
+    forVincent: "For Vincent",
+    forOwner: "For owner",
     tickets: "Tickets",
     sessions: "Sessions",
     overshoot: "Overshoot",
@@ -47,7 +51,11 @@ const words = {
     controls: "Commandes",
     token: "Jeton du propriétaire",
     save: "Utiliser le jeton",
-    questions: "Questions",
+    questions: "Questions pour Vincent",
+    ownerQuestions: "Questions pour les responsables",
+    resolvedQuestions: "Résolues sans vous",
+    forVincent: "Pour Vincent",
+    forOwner: "Pour le responsable",
     tickets: "Tickets",
     sessions: "Sessions",
     overshoot: "Dépassement",
@@ -134,6 +142,8 @@ function render() {
   $("save").textContent = t.save;
   for (const id of ["questions", "tickets", "sessions", "releases", "owners"])
     $(id + "-title").textContent = t[id];
+  $("owner-questions-title").textContent = t.ownerQuestions;
+  $("resolved-questions-title").textContent = t.resolvedQuestions;
   if (!data) return;
   $("connection").textContent =
     (data.paused ? t.paused : t.running) +
@@ -189,10 +199,14 @@ function render() {
   }
   for (const id of ["questions", "tickets", "sessions", "releases", "owners"])
     empty(id);
+  empty("owner-questions");
+  empty("resolved-questions");
+  for (const q of data.ownerQuestions) detail($("owner-questions"), t.forOwner + " · " + q.text.split("\n")[0], q.text);
+  for (const q of data.resolvedQuestions) detail($("resolved-questions"), q.text.split("\n")[0], q.resolved_by + "\n" + new Date(q.resolved_at).toLocaleString(lang));
   for (const q of data.questions) {
     const d = detail(
       $("questions"),
-      q.text.split("\n")[0],
+      t.forVincent + " · " + q.text.split("\n")[0],
       q.text + (q.answer ? "\n" + q.answer : ""),
     );
     if (!q.answer) {
