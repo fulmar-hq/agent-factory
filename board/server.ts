@@ -1,3 +1,5 @@
+import { refreshPulls } from "./pulls";
+import { claudeReading } from "../adapters/usage";
 import { boardEvidence } from "./runtime";
 import { boardQuestions } from "../launcher/questions";
 import { boardModel } from "./model";
@@ -38,6 +40,7 @@ export async function board(dir = root, port = 4318) {
       status,
       headers: { ...security, "Content-Type": "application/json" },
     });
+  let evidenceRefresh: Promise<void> | undefined;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
@@ -117,7 +120,25 @@ export async function board(dir = root, port = 4318) {
       if (url.pathname === "/api/board") {
         const readings = s.get<Awaited<ReturnType<typeof inputs>>>("readings") ?? await inputs(dir);
         const now = Date.now();
-        return json(boardModel(e, readings, now, url.searchParams.get("lang") === "fr" ? "fr" : "en", await boardEvidence(dir,now), url.searchParams.get("more") === "1"));
+        if(dir === root) {
+          evidenceRefresh ??= refreshPulls(s,c,now).finally(()=>{evidenceRefresh=undefined;});
+          await evidenceRefresh;
+        }
+        // Read the same native quota metadata used by the launcher gate, never token estimates.
+        const claude = dir === root ? await claudeReading(now) : undefined;
+        if(claude && (!readings.claude || claude.observedAt>readings.claude.observedAt))readings.claude=claude;
+        return json(boardModel(e, readings, now, url.searchParams.get("lang") === "fr" ? "fr" : "en", await boardEvidence(dir,now,c.ticket_budget_default?.estimate_minutes ? c.ticket_budget_default.estimate_minutes*60 : undefined), url.searchParams.get("more") === "1"));
+      }
+      if(url.pathname === '/api/owner-work') {
+        const run=url.searchParams.get('run'), evidence=await boardEvidence(dir);
+        const owner=evidence.ownerRuns.find(x=>x.id===run);
+        if(!owner)return json({error:'Live owner run not found'},404);
+        const path=join(dir,'work',owner.id);
+        for(const name of ['brief.md','brief.txt','prompt.txt','prompt.md']) {
+          const file=Bun.file(join(path,name));
+          if(await file.exists())return new Response((await file.text()).slice(0,12000),{headers:{...security,'Content-Type':'text/plain; charset=utf-8'}});
+        }
+        return json({error:'Work brief unavailable'},404);
       }
       if (url.pathname === "/api/state") {
         const r = s.get<Record<string, any>>("readings") ?? (await inputs(dir)),

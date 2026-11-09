@@ -447,8 +447,8 @@ test("titles strip conventional commits and issue numbers",()=>{
 
 test("owner-run titles derive from the first sentence without setup instructions", async()=>{
   const {ownerTitle}=await import('../board/runtime');
-  expect(ownerTitle('You are Alido · Product (board) in ~/Developer/example (pull first). Repair it.')).toBe('Product board work');
-  expect(ownerTitle('Repair the booking timezone. Preserve the work.')).toBe('Repair the booking timezone.');
+  expect(ownerTitle('You are Alido · Product (board) in ~/Developer/example (pull first). Repair it.')).toBe('Repair it');
+  expect(ownerTitle('Repair the booking timezone. Preserve the work.')).toBe('Repair the booking timezone');
 });
 
 test("idle duration includes the last owner-run result",()=>{
@@ -500,5 +500,41 @@ test("outcomes and release pills distinguish waiting, stopped, passed and skippe
     expect(boardModel(e,{},now).releases[0].tone).toBe('bad');
     s.set('executor:2026-11-07:qa',{state:'success'});
     expect(boardModel(e,{},now).releases[0].tone).toBe('ok');
+  }finally{s.close();}
+});
+
+test('open PR inventory deduplicates issues, excludes merged work and splits actual waits',async()=>{
+  const {recordPulls}=await import('../board/pulls');
+  const {s,e,add,session}=fixture();
+  try {
+    for(let n=1;n<=3;n++) {add(n,'OPEN',['state:review']); const id=session(n,'finished'); s.event('delivery'+n,'launcher-publish',{id,url:`https://github.com/example/demo/pull/${n+10}`},'retain',now);}
+    const base={headRefOid:'abc',reviews:[],statusCheckRollup:[]};
+    recordPulls(s,'example/demo',[
+      {...base,number:11,url:'https://github.com/example/demo/pull/11',title:'Fix booking',reviewDecision:'APPROVED',closingIssuesReferences:[{number:1,url:'https://github.com/example/demo/issues/1'}]},
+      {...base,number:12,url:'https://github.com/example/demo/pull/12',title:'Repair email',reviewDecision:'CHANGES_REQUESTED',closingIssuesReferences:[{number:2,url:'https://github.com/example/demo/issues/2'}]},
+      {...base,number:14,url:'https://github.com/example/demo/pull/14',title:'Check search',statusCheckRollup:[{status:'IN_PROGRESS'}]},
+      {...base,number:15,url:'https://github.com/example/demo/pull/15',title:'Review timezone'},
+    ],now);
+    const m=boardModel(e,{},now);
+    expect(m.waiting).toHaveLength(4);
+    expect(m.waiting.map(x=>x.waitGroup)).toEqual(['release','fix','checks','review']);
+    expect(m.waiting.some(x=>x.id==='example/demo#3')).toBe(false);
+    expect(new Set(m.waiting.map(x=>x.pr)).size).toBe(4);
+  }finally{s.close();}
+});
+
+test('owner run uses task text, real identity, explicit/configured/median estimates and work link',async()=>{
+  const {ownerIdentity,ownerSummary,ownerEstimate}=await import('../board/runtime');
+  const brief='You are Alido · Product (board) in ~/Developer/example (pull first).\n1. Apply the colour system to the board.\n2. Show all four meters without clipping.';
+  expect(ownerIdentity(brief,'launcher')).toBe('product');
+  expect(ownerSummary(brief).title).toBe('Apply the colour system to the board');
+  expect(ownerSummary(brief).purpose).toContain('Show all four meters');
+  expect(ownerEstimate(600,1800,[100,200])).toBe(600);
+  expect(ownerEstimate(undefined,1800,[100,200])).toBe(1800);
+  expect(ownerEstimate(undefined,undefined,[100,200,300,400])).toBe(250);
+  expect(ownerEstimate(undefined,undefined,[])).toBeNull();
+  const {s,e}=fixture();try {
+    const m=boardModel(e,{},now,'en',{activity:{},ownerRuns:[{id:'launcher/run-example',...ownerSummary(brief),owner:'product',started:now-600000,lastActivity:now-10000,estimateSeconds:1800}]});
+    expect(m.running[0].owner).toBe('Product');expect(m.running[0].purpose).toContain('colour system');expect(m.running[0].issue).toContain('/api/owner-work?');
   }finally{s.close();}
 });

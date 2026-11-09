@@ -9,7 +9,7 @@ const browser = await chromium.launch({headless:true, executablePath:process.env
 const url = process.env.BOARD_URL ?? "http://127.0.0.1:4318";
 const results = [];
 try {
-  for (const viewport of [{width:375,height:812},{width:1440,height:900},{width:820,height:1000}]) {
+  for (const viewport of [{width:375,height:812},{width:1440,height:900},{width:1280,height:800},{width:768,height:1024}]) {
     for (const colorScheme of ["light","dark"]) {
       const page = await browser.newPage({viewport,colorScheme,reducedMotion:"reduce",timezoneId:"America/Toronto"});
       const errors = [];
@@ -21,10 +21,12 @@ try {
       if (/\d{4}-\d\d-\d\dT\d\d:|\{\s*"|\[object Object\]|NaN|undefined/.test(text)) throw Error('Raw data in DOM');
       const overflow = await page.evaluate(()=>document.documentElement.scrollWidth > innerWidth);
       if(overflow) throw Error(`Horizontal overflow at ${viewport.width}`);
-      const order = await page.locator('.board > section').evaluateAll(els=>els.map(el=>el.id).join(','));
-      if(order !== (viewport.width >= 1100 ? 'col-next,col-running,col-waiting,col-done' : 'col-running,col-next,col-waiting,col-done')) throw Error(`Column DOM order: ${order}`);
+      const meters = await page.locator('.meter').evaluateAll(els=>els.every(el=>{const r=el.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && el.scrollWidth<=el.clientWidth+1;}));
+      if(!meters)throw Error(`Meters clipped at ${viewport.width}`);
+      const order = await page.locator('.board section.col').evaluateAll(els=>els.map(el=>el.id).join(','));
+      if(order !== 'col-running,col-next,col-waiting,col-done') throw Error(`Column DOM order: ${order}`);
       if(await page.locator('[style],style,script:not([src])').count()) throw Error('Inline CSS/script violates CSP');
-      if(await page.locator('.group:not(.open) .g-item:visible').count()) throw Error('Waiting group is not collapsed');
+      if(viewport.width < 1100 && await page.locator('.group:not(.open) .g-item:visible').count()) throw Error('Waiting group is not collapsed');
       if(await page.locator('#col-next .row:visible').count()>5) throw Error('Up next exceeds five');
       if(viewport.width>=1100) {
         const scrolling=await page.locator('.col-body').evaluateAll(els=>els.every(el=>getComputedStyle(el).overflowY==='auto'));
@@ -39,12 +41,19 @@ try {
         await row.click();
         await page.locator('.sheet.open').waitFor();
         if(await page.evaluate(()=>document.activeElement?.id) !== 'sheet-title')throw Error('Sheet heading not focused');
+        const rect=await page.locator('#sheet').boundingBox();
+        if(viewport.width>=720 && (rect.width>520.1 || Math.abs(rect.x+rect.width/2-viewport.width/2)>1 || Math.abs(rect.y+rect.height/2-viewport.height/2)>1))throw Error('Popup is not small and centred');
+        if(viewport.width<720 && Math.abs(rect.y+rect.height-viewport.height)>1)throw Error('Phone sheet is not bottom anchored');
         await page.keyboard.press('Shift+Tab');
         await page.keyboard.press('Tab');
         if(!await page.evaluate(()=>!!document.activeElement?.closest('#sheet')))throw Error('Focus escaped sheet');
         await page.screenshot({path:join(out,`sheet-${viewport.width}-${colorScheme}.png`)});
         await page.keyboard.press('Escape');
         if(await page.evaluate(()=>document.activeElement?.getAttribute('data-k'))!==key)throw Error('Focus not restored');
+        await row.click();await page.locator('#sheet-close').click();
+        if(await page.evaluate(()=>document.activeElement?.getAttribute('data-k'))!==key)throw Error('Close button did not restore focus');
+        await row.click();await page.locator('#scrim').click({position:{x:2,y:2}});
+        if(await page.evaluate(()=>document.activeElement?.getAttribute('data-k'))!==key)throw Error('Scrim did not restore focus');
       }
       const completed = page.locator('#col-done .row:visible').first();
       if(await completed.count()) {
@@ -108,6 +117,13 @@ try {
       if(await page.locator('#legend-sum').textContent()!=='Ce que signifient les couleurs')throw Error('French legend missing');
       if(await page.locator('.meter-sub .pill.warn').textContent()!=='Élevé')throw Error('French usage label missing');
       if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('Colour states French overflow');
+      fixture.running=[{...fixture.running[0],estimateSeconds:null,over:false,barTone:'rest',issue:'/api/owner-work?run=fictional'}];
+      await page.reload();await page.locator('#col-running .row').waitFor();
+      if(await page.locator('#col-running progress').count())throw Error('Unknown estimate has a target');
+      if(!await page.locator('#col-running .est').textContent().then(t=>t.includes('aucune estimation')))throw Error('Unknown estimate not explained');
+      await page.locator('#col-running .row').click();
+      if(!await page.locator('.facts').textContent().then(t=>t.includes('aucune estimation')))throw Error('Popup unknown estimate not explained');
+      await page.keyboard.press('Escape');
       if(errors.length)throw Error(errors.join('\n'));
       if(process.env.BOARD_MOCKUP) {
         const ref=await browser.newPage({viewport,colorScheme,reducedMotion:'reduce'});
