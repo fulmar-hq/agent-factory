@@ -1,3 +1,5 @@
+import { memoryPressure, reconcileCapacity } from "./capacity";
+import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
 import { Engine, type Admission } from "./engine";
 import {
@@ -8,7 +10,7 @@ import {
   type Qualification,
   type Ticket,
 } from "./config";
-import { branchFor, deliveryRepo, executableTest } from "../adapters/delivery";
+import { branchFor, isDeliveryRepo, executableTest } from "../adapters/delivery";
 import { Store } from "../tracking/store";
 import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
@@ -17,7 +19,7 @@ import { reconcile, command, validateIntake, setBuilding } from "../adapters/git
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import { qualificationAlerts } from "./alerts";
 export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
-  if(t.repo===deliveryRepo)executableTest(t.test);
+  if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
   const retryNoPr: string[] = [];
   for (const x of prior) {
@@ -92,7 +94,18 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
-    const ready = await reconcile(s, c, now);
+    reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
+    expireDecisions(s,now);
+    failures(e,now);
+    let ready = await reconcile(s, c, now);
+    const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
+      await applyOwnerResults(e,dir,r.billing,now);
+      ready=await reconcile(s,c,now);
+      const count=await autoApprove(e,ready,r.billing,now);
+      if(count)ready=await reconcile(s,c,now);
+      supply(e,ready,now);
+      return count;
+    }) ?? 0 : 0;
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
@@ -134,7 +147,7 @@ export async function tick(dir = root) {
       }
     }
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
-      paused: s.get("paused") === true, claimed, refusals };
+      paused: s.get("paused") === true, autoApproved, claimed, refusals };
     s.set("heartbeat", heartbeat);
     return heartbeat;
   } finally {

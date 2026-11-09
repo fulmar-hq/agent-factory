@@ -43,6 +43,12 @@ try {
     if(previous?.pid && processIdentity(previous.pid)===previous.identity && previous.native!==native)throw Error("existing owner is active");
     s.atomic(()=>{s.set(`owner-runtime:${owner}`,{workspace,native,pid,identity});s.event(randomUUID(),"owner-registration",{owner,workspace,native,pid,identity,receipt,previous},"Reconcile active native custody before restoring prior registration; retain sessions and logs");});
   }
+  else if (action === "clear-restart-hold") {
+    const [repo,provider,cause,receipt]=args;
+    if(!Object.values(e.c.projects).some(p=>p.repo===repo) || !["codex","claude"].includes(provider) || !["budget","sandbox","test","publisher","timeout","unknown"].includes(cause) || !receipt?.trim())throw Error("enrolled repo, provider, cause and repair receipt required");
+    const key=`restart-held:${repo}:${provider}:${cause}`;
+    s.atomic(()=>{const previous=s.get(key);s.set(key,null);s.event(randomUUID(),"restart-hold-cleared",{repo,provider,cause,receipt,previous},"Restore the prior hold after reconciling new attempts; preserve all failure evidence");});
+  }
   else if (action === "calibrate-tokens") {
     const [dates,receipt] = args;
     if (!receipt) throw Error("calibration receipt required");
@@ -116,7 +122,7 @@ try {
     });
   } else
     throw Error(
-      "supported: register-owner ROLE WORKSPACE NATIVE/new PID/0 RECEIPT, prepare-delivery SESSION RECEIPT, qualify-delivery RECEIPT, calibrate-tokens TORONTO-DAY RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
+      "supported: clear-restart-hold REPO PROVIDER CAUSE REPAIR-RECEIPT, register-owner ROLE WORKSPACE NATIVE/new PID/0 RECEIPT, prepare-delivery SESSION RECEIPT, qualify-delivery RECEIPT, calibrate-tokens TORONTO-DAY RECEIPT, continue-session SESSION RECEIPT, approve-intake REPO ISSUE OWNER-RECEIPT, archive SESSION CUSTODY-RECEIPT, pause, resume, qa-accepted REV DAY RECEIPT, release qa|production REV RECEIPT, clear-aws-stop RECEIPT",
     );
 } finally {
   s.close();

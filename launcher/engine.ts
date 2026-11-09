@@ -1,3 +1,4 @@
+import { slotLimit } from "./capacity";
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -64,7 +65,7 @@ export function usageGate(raw: unknown, high: boolean, now: number, c: Config, p
   if (used >= c.usage_gates.admit_below && !high) blocked("high benefit only");
 }
 // Claims are compared conservatively across case-insensitive workspaces, including old rows.
-function claimPath(path: string): string {
+export function claimPath(path: string): string {
   if (
     path.startsWith("/") ||
     /[^\x20-\x7e]/.test(path) ||
@@ -214,7 +215,7 @@ export class Engine {
       )
         blocked("worker unqualified");
       const active = this.active();
-      if (active.length >= this.c.capacity.start_parallel)
+      if (active.length >= slotLimit(this.s, this.c))
         blocked("slots full");
       if (
         t.heavy &&

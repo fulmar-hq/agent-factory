@@ -1,4 +1,4 @@
-import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase } from "../adapters/delivery";
+import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
@@ -53,7 +53,7 @@ export async function runWorker(id: string) {
     const workspace = join(root, "workspaces", id);
     mkdirSync(join(root, "workspaces"), { recursive: true, mode: 0o700 });
     const continuation = s.get<{attempt:string;native:string}>(`continuation:${id}`);
-    const delivery = t.provider === "codex" && t.repo === "fulmar-hq/alido";
+    const delivery = t.provider === "codex" && isDeliveryRepo(t.repo);
     if (delivery) executableTest(t.test);
     const base = !continuation && delivery ? await deliveryBase(source,t.repo) : "HEAD";
     if (!continuation) await command([

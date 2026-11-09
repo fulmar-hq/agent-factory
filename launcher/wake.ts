@@ -14,8 +14,9 @@ export function queueWake(s:Store,w:Wake,now=Date.now()) {
   s.set(`owner-wake:${w.id}`,{...w,state:'queued',at:now});return true;
  });
 }
+const wakePriority=(w:Wake)=>w.kind==='product-intake'?0:w.kind==='failure-diagnosis'?1:w.kind==='owner-decision'?2:3;
 export function pendingWakes(s:Store) {
- return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued') as Wake[];
+ return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
 }
 export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity) {
  const claimed=s.atomic(()=>{
