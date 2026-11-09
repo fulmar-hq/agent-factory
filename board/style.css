@@ -1,4 +1,7 @@
-/* Hairlines separate rows; colour communicates status alongside words. */
+
+/* Layout: one calm column on a phone, read top to bottom in ten seconds.
+   On a wide screen the status spans the top and the lists split into two quiet columns.
+   Hairlines separate rows; only the one thing that needs an answer gets a filled card. */
 :root {
   --bg: #F7F6F3;
   --surface: #FFFFFF;
@@ -316,6 +319,15 @@ ol, ul { list-style: none; }
 .took .track { width: 36px; height: 3px; flex: none; }
 .took .est.over, .facts dd.over { color: var(--warn-ink); }
 
+/* Mockup states */
+.mock { margin-top: 36px; border: 1px dashed var(--line); border-radius: 18px; padding: 18px 16px; }
+.mock h2 { font-size: var(--t-small); font-weight: 650; }
+.mock p { font-size: var(--t-micro); color: var(--muted); margin-top: 2px; }
+.mock-row { margin-top: 14px; }
+.mock-row .lbl { font-size: var(--t-micro); color: var(--muted); margin-bottom: 6px; }
+.mock .seg { display: flex; flex-wrap: wrap; border-radius: 16px; }
+.mock .seg button { flex: 1 1 auto; min-height: 44px; border-radius: 13px; }
+
 /* Detail: bottom sheet on a phone, side panel on a wide screen */
 .scrim { position: fixed; inset: 0; background: var(--scrim); opacity: 0; visibility: hidden; transition: opacity 0.25s ease, visibility 0s linear 0.25s; z-index: 40; }
 .scrim.open { opacity: 1; visibility: visible; transition-delay: 0s; }
@@ -368,15 +380,19 @@ ol, ul { list-style: none; }
   .tstep .pill { margin-left: 2px; }
   .t-arrow { display: block; width: 14px; height: 14px; }
 }
-@media (min-width: 960px) {
+@media (min-width: 720px) {
+  /* A small centred window on tablet and desktop; the bottom sheet stays for phones. */
   .sheet {
-    left: auto; top: 0; bottom: 0; width: 440px; max-height: none;
-    border-radius: 0; transform: translateX(104%);
-    padding-top: env(safe-area-inset-top, 0px);
+    left: 50%; right: auto; top: 50%; bottom: auto;
+    width: min(520px, calc(100% - 48px)); max-height: min(640px, calc(100% - 96px));
+    border-radius: 22px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+    transform: translate(-50%, -48%) scale(0.97); opacity: 0;
+    transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease, visibility 0s linear 0.22s;
   }
+  .sheet.open { transform: translate(-50%, -50%); opacity: 1; transition-delay: 0s; }
   .sheet-grab { display: none; }
-  .sheet-bar { padding-top: 12px; }
-  .sheet-scroll { padding-inline: 32px max(32px, env(safe-area-inset-right, 0px)); }
+  .sheet-bar { padding-top: 10px; }
+  .sheet-scroll { padding-inline: 28px; padding-bottom: 28px; }
 }
 @media (min-width: 1100px) {
   .wrap { max-width: 1360px; padding-block: 14px 40px; }
@@ -395,17 +411,18 @@ ol, ul { list-style: none; }
   #col-next { order: 1; } #col-running { order: 2; } #col-waiting { order: 3; } #col-done { order: 4; }
   .sec-head { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-inline: 8px; padding-inline: 0; flex: none; }
   .col-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
-  #col-done .rows.clip > li.extra { display: block; }
+  .rows.clip > li.extra { display: block; }
   .rows.clip ~ .note { display: block; }
-  #col-done .more.small-only { display: none; }
-
-
+  .more.small-only { display: none; }
+  .group:not(.open) .g-item:nth-child(-n+3) { display: block; }
+  .group:not(.open) .g-more { display: inline-flex; min-height: 44px; }
   .group-body { padding-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
+/* Runtime additions: external progress values for the strict CSP. */
 [hidden] { display: none !important; }
 .skip { position: absolute; left: 16px; top: -100px; color: var(--accent-ink); }
 .skip:focus { top: 8px; z-index: 60; background: var(--surface); padding: 12px; }
@@ -419,11 +436,8 @@ input { font: inherit; color: var(--fg); background: var(--surface); border: 1px
 .track progress::-webkit-progress-bar { background: transparent; }
 .track progress::-webkit-progress-value { background: var(--bar); border-radius: 4px; }
 .track progress::-moz-progress-bar { background: var(--bar); }
-@media (min-width: 720px) and (max-width: 1099px) { .half { display: contents; } .col-body { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; } }
 
 body.sheet-open { overflow: hidden; }
-@media (min-width: 720px) and (max-width: 1099px) { #col-running { grid-area: 1 / 1; } #col-next { grid-area: 2 / 1; } #col-waiting { grid-area: 1 / 2; } #col-done { grid-area: 2 / 2; } }
-
 .track progress.ok::-webkit-progress-value { background: var(--ok); border-radius: 4px; }
 .track progress.warn::-webkit-progress-value { background: var(--warn); border-radius: 4px; }
 .track progress.bad::-webkit-progress-value { background: var(--bad); border-radius: 4px; }
@@ -432,3 +446,7 @@ body.sheet-open { overflow: hidden; }
 .track progress.warn::-moz-progress-bar { background: var(--warn); border-radius: 4px; }
 .track progress.bad::-moz-progress-bar { background: var(--bad); border-radius: 4px; }
 .track progress.rest::-moz-progress-bar { background: var(--rest); border-radius: 4px; }
+
+/* Keep Safari's intrinsic grid sizing within the reference header band. */
+.band > .meters { min-width: 0; max-width: 100%; }
+.meter-label, .meter-value, .meter-sub { overflow-wrap: anywhere; }

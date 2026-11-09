@@ -1,3 +1,4 @@
+import { recordPulls, pullFields, type BoardPull } from "../board/pulls";
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
 import {existsSync} from 'node:fs';
@@ -73,11 +74,10 @@ export async function githubWakes(s:Store,c:Config,execute=command,now=Date.now(
  for(const project of Object.values(c.projects)) {
   const primed=s.get(`owner-github-primed:${project.repo}`)===true;
   const emit=(w:Wake)=>{if(primed)queueWake(s,w,now);else s.event(`owner-event:${w.id}`,'owner-wake-baseline',w,'Retain historical baseline; only new events cause owner turns',now);};
-  const prs=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json','number,headRefOid,reviews,reviewDecision,statusCheckRollup,url'])) as {number:number;headRefOid:string;url:string;reviewDecision?:string;reviews:{id:string;state:string;submittedAt:string}[];statusCheckRollup:{status?:string;conclusion?:string;detailsUrl?:string;targetUrl?:string;state?:string}[]}[];
+  const prs=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json',pullFields])) as BoardPull[];
   if(prs.length>=100)throw Error('owner PR reconciliation truncated');
+  recordPulls(s,project.repo,prs,now);
   for(const pr of prs) {
-   // Read-only board evidence shares this tick's existing GitHub readback.
-   s.set(`board-pr:${pr.url}`,{at:now,head:pr.headRefOid,review:pr.reviewDecision,pending:(pr.statusCheckRollup ?? []).some(c=>['QUEUED','IN_PROGRESS','PENDING','WAITING','REQUESTED'].includes(c.status ?? c.state ?? '')),failed:(pr.statusCheckRollup ?? []).some(c=>['FAILURE','ERROR','TIMED_OUT','CANCELLED','ACTION_REQUIRED'].includes(c.conclusion ?? c.state ?? ''))});
    // PR number differs from issue number: delivery events bind the actual PR URL.
    const delivery=(s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery')").all() as {data:string}[]).map(r=>JSON.parse(r.data)).find(r=>r.url===pr.url);
    const owner=(delivery ? (s.db.query('SELECT owner FROM sessions WHERE id=?').get(delivery.id) as {owner:string}|null)?.owner : undefined);

@@ -1,3 +1,4 @@
+import { pullState, type BoardPull, type PullSnapshot } from "./pulls";
 import { usageTone, spendTone, timingTone, type Tone } from "./tones";
 import { questionFields } from "./questions";
 import { slotLimit } from "../launcher/capacity";
@@ -186,6 +187,14 @@ export function boardModel(
           : null) ??
         owner.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))
       : t.noOwner;
+  const inventories = new Map(Object.values(e.c.projects).map(p=>[p.repo,s.get<PullSnapshot>(`board-pulls:${p.repo}`)]));
+  const openPulls = [...inventories.values()].flatMap(v=>v?.pulls ?? []);
+  const linked = new Map<string,BoardPull>();
+  for(const pr of openPulls)for(const issue of pr.closingIssuesReferences ?? []) {
+    const m=/^https:\/\/github\.com\/(.+)\/issues\/(\d+)$/.exec(issue.url);
+    if(m)linked.set(`${m[1]}#${m[2]}`,pr);
+  }
+  const represented=new Set<string>();
   function task(id: string, i: Issue, x?: Session) {
     let brief = x ? parse<Partial<Ticket>>(x.brief, {}) : {};
     if (!x) {
@@ -199,9 +208,9 @@ export function boardModel(
         ev.kind !== "worker-exit" &&
         parse<{ id?: string }>(ev.data, {}).id === x?.id,
     );
-    const pr = published
+    const pr = linked.get(id)?.url ?? (published
       ? githubURL(parse<{ url?: string }>(published.data, {}).url)
-      : null;
+      : null);
     return {
       id,
       title: plainText(i.title || brief.title || "") || t.task,
@@ -242,6 +251,7 @@ export function boardModel(
     const labels = (i.labels ?? []).map((l) => l.name),
       item = task(row.id, i, x);
     if (i.state === "CLOSED") {
+      if(item.pr && openPulls.some(pr=>pr.url===item.pr))continue;
       // Editing an old closed issue must never bring it back into Done.
       const at = Date.parse(i.closedAt ?? "");
       if (Number.isFinite(at) && at <= now && now - at <= 48 * 3600000) {
@@ -257,8 +267,26 @@ export function boardModel(
     }
     if (i.state !== "OPEN" || x?.status === "archived") continue;
     if (x && ["starting", "running"].includes(x.status)) {
+      if(item.pr && represented.has(item.pr))continue;
+      if(item.pr)represented.add(item.pr);
       running.push(item);
       continue;
+    }
+    // A successful complete open inventory also proves that a formerly published PR is no longer open.
+    const repo=row.id.slice(0,row.id.lastIndexOf('#')), inventory=inventories.get(repo);
+    if(item.pr && inventory && !inventory.pulls.some(pr=>pr.url===item.pr))continue;
+    if(item.pr && represented.has(item.pr))continue;
+    if(item.pr && inventory) {
+      represented.add(item.pr);
+      const cached=s.get<{at:number;pending:boolean;failed:boolean;review?:string;releaseHeld?:boolean}>(`board-pr:${item.pr}`);
+      const state=inventory.at<=now && now-inventory.at<=180000 ? (cached && cached.at<=now && now-cached.at<=180000 ? cached : pullState(openPulls.find(pr=>pr.url===item.pr)!)) : {review:undefined,pending:false,failed:false,releaseHeld:false};
+      if(state.failed || state.review==='CHANGES_REQUESTED')item.status=t.fixChecks;
+      else if(state.pending)item.status=t.checks;
+      else if(state.review==='APPROVED' || state.releaseHeld)item.status=t.release;
+      else item.status=t.review;
+      item.waitGroup=item.status===t.fixChecks ? 'fix' : item.status===t.checks ? 'checks' : item.status===t.release ? 'release' : 'review';
+      item.tone=item.waitGroup==='fix' ? 'warn' : 'info';
+      waiting.push(item);continue;
     }
     let approved: Ticket | null = null;
     try {
@@ -315,6 +343,19 @@ export function boardModel(
     item.tone = item.status === t.stopped ? "bad" : item.waitGroup === "fix" ? "warn" : "info";
     if (item.status) waiting.push(item);
   }
+  // Include work with an open PR even when no local worker or issue exists. One PR/issue component is one item.
+  for(const pr of openPulls) {
+    if(represented.has(pr.url))continue;
+    const refs=pr.closingIssuesReferences ?? [];
+    if(refs.some(ref=>waiting.some(item=>item.issue===ref.url) || running.some(item=>item.issue===ref.url)))continue;
+    const item=task(`pr:${pr.url}`,{title:pr.title || t.task,url:pr.url} as Issue);
+    item.pr=pr.url;item.issue=null;
+    const state=pullState(pr);
+    item.status=state.failed || state.review==='CHANGES_REQUESTED' ? t.fixChecks : state.pending ? t.checks : state.review==='APPROVED' || state.releaseHeld ? t.release : t.review;
+    item.waitGroup=item.status===t.fixChecks ? 'fix' : item.status===t.checks ? 'checks' : item.status===t.release ? 'release' : 'review';
+    item.tone=item.waitGroup==='fix' ? 'warn' : 'info';item.purpose=plainText(pr.title || t.task);
+    waiting.push(item);represented.add(pr.url);
+  }
   running.sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
   done.sort((a, b) => b.at! - a.at!);
   const questions = boardQuestions(s).questions.map(q => {
@@ -341,7 +382,7 @@ export function boardModel(
   });
   for (const owner of evidence.ownerRuns) {
     const item = task(`owner:${owner.id}`, {title:owner.title} as Issue);
-    Object.assign(item,{title:shortTitle(owner.title) || t.task,owner:ownerName(owner.owner),started:owner.started,seconds:Math.max(0,(now-owner.started)/1000),estimateSeconds:owner.estimateSeconds,lastActivity:owner.lastActivity,ownerRun:true,purpose:lang === "fr" ? "Travail du responsable en cours." : "An owner is working on this now.",technical:{details:plainText(owner.id)}});
+    Object.assign(item,{title:shortTitle(owner.title) || t.task,owner:ownerName(owner.owner),started:owner.started,seconds:Math.max(0,(now-owner.started)/1000),estimateSeconds:owner.estimateSeconds,lastActivity:owner.lastActivity,ownerRun:true,issue:owner.issue ?? `/api/owner-work?run=${encodeURIComponent(owner.id)}`,purpose:plainText(owner.purpose || owner.title),technical:{details:plainText(owner.id)}});
     running.push(item);
   }
   running.sort((a,b)=>(a.started ?? 0)-(b.started ?? 0));
@@ -356,7 +397,8 @@ export function boardModel(
     const source = s.get<{ error?: string; truncated?: boolean }>(
       `github:${p.repo}`,
     );
-    return !source || !!source.error || !!source.truncated;
+    const pulls=inventories.get(p.repo);
+    return !source || !!source.error || !!source.truncated || !!pulls?.error || !!(pulls && (pulls.at>now || now-pulls.at>180000));
   });
   let status = running.length
     ? `${t.working} — ${t.running(running.length)}, ${t.queue(upNext.length)}`
