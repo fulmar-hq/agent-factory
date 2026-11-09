@@ -28,7 +28,7 @@ function block(i:Issue):Record<string,unknown> {
 }
 export function ownerDecision(s:Store,c:Config,id:string,owner:string,question:string,payload:unknown,now:number) {
  if(s.event(`decision:${id}`,'autonomy-owner-decision',{id,owner,question,payload,tier:'owner',deadline:now+7200000,default:'not approved'},undo,now)) {
-  s.db.query('INSERT OR IGNORE INTO questions VALUES(?,?,NULL,?)').run(`autonomy:${id}`,question,now);
+  s.db.query("INSERT OR IGNORE INTO questions(id,text,answer,at,addressed_to) VALUES(?,?,NULL,?,'owner')").run(`autonomy:${id}`,question,now);
   s.set(`autonomy-decision:${id}`,{id,owner,question,payload,deadline:now+7200000,default:'not approved',state:'open'});
   queueWake(s,{id:`decision:${id}`,owner:c.owners[owner]?owner:c.autonomy!.intake_owner,kind:'owner-decision',payload:{id,question,evidence:payload,default:'not approved'}},now);
  }

@@ -103,3 +103,18 @@ test("board uses configured native gate and retains weekly-only provenance", asy
     expect(await (await fetch(base+"/app.js")).text()).toContain('weeklyOnly: "weekly only"');
   } finally { b.close(); s.close(); rmSync(dir,{recursive:true}); }
 });
+
+test('board separates recipients and refuses stale answers after automatic resolution',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-board-questions-'));
+ writeFileSync(join(dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(dir,'owner-token'),'a'.repeat(64));
+ const s=new Store(join(dir,'controller.sqlite'));
+ s.db.exec("INSERT INTO questions(id,text,at,addressed_to) VALUES('vincent','Budget question',1,'vincent'),('owner','Policy question',1,'owner'); INSERT INTO questions(id,text,at,resolved_at,resolved_by) VALUES('resolved','Old question',1,2,'auto: session finished')");
+ const b=await board(dir,0),base=`http://127.0.0.1:${b.server.port}`;
+ try{
+  let state=await(await fetch(base+'/api/state')).json();expect(state.questions.map((q:any)=>q.id)).toEqual(['vincent']);expect(state.ownerQuestions.map((q:any)=>q.id)).toEqual(['owner']);expect(state.resolvedQuestions[0].resolved_by).toBe('auto: session finished');
+  const answer=(id:string)=>fetch(base+'/api/answer',{method:'POST',headers:{Origin:base,Authorization:'Bearer '+'a'.repeat(64),'Content-Type':'application/json'},body:JSON.stringify({id,answer:'Synthetic answer'})});
+  expect((await answer('resolved')).status).toBe(409);expect((await answer('vincent')).status).toBe(200);expect((await answer('vincent')).status).toBe(409);
+  state=await(await fetch(base+'/api/state')).json();expect(state.questions).toHaveLength(0);expect(state.resolvedQuestions).toHaveLength(1);
+  const html=await(await fetch(base)).text();expect(html).toContain('<details><summary id="resolved-questions-title">');
+ }finally{b.close();s.close();rmSync(dir,{recursive:true});}
+});

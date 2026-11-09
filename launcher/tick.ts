@@ -1,3 +1,4 @@
+import { resolveQuestions } from "./questions";
 import { memoryPressure, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
@@ -97,6 +98,7 @@ export async function tick(dir = root) {
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
     expireDecisions(s,now);
     failures(e,now);
+    let autoResolved = resolveQuestions(e,now);
     let ready = await reconcile(s, c, now);
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
@@ -146,8 +148,9 @@ export async function tick(dir = root) {
           .run(String(error), `${t.repo}#${t.number}`);
       }
     }
+    autoResolved += resolveQuestions(e);
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
-      paused: s.get("paused") === true, autoApproved, claimed, refusals };
+      paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
     s.set("heartbeat", heartbeat);
     return heartbeat;
   } finally {
