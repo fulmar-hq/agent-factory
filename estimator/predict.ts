@@ -10,26 +10,51 @@ export type History = z.infer<typeof HistorySchema>;
 export type Features = Pick<History, "area" | "kind" | "provider">;
 const dimensions = ["seconds", "tokens", "elapsed"] as const;
 type Dimension = typeof dimensions[number];
+type Attempt = {id: string; ticket: string; status: string; brief: string; started: number | null; actual_seconds: number; actual_tokens: number};
+const ActualSchema = z.object({completed: positive, seconds: z.number().finite().nonnegative(), tokens: z.number().finite().nonnegative()});
+function chronological(a: History, b: History) {
+  return a.completed-b.completed || a.started-b.started || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
 export function history(s: Store): History[] {
   const rows = [...(s.get<unknown[]>("estimate-history") ?? [])];
-  for (const x of s.rows("sessions") as {ticket: string; status: string; brief: string; started: number | null; actual_seconds: number; actual_tokens: number}[]) {
-    if (!x.started) continue;
+  const attempts = new Map<string, Attempt[]>();
+  for (const x of s.rows("sessions") as Attempt[]) {
+    attempts.set(x.ticket, [...(attempts.get(x.ticket) ?? []), x]);
+  }
+  const archivedFinished = new Map<string, number>();
+  for (const event of s.rows("events") as {kind: string; data: string; at: number}[]) {
+    if (event.kind !== "session-archive") continue;
+    const data = JSON.parse(event.data) as {id?: string; previousStatus?: string};
+    if (data.id && data.previousStatus === "finished" && Number.isFinite(event.at)) {
+      archivedFinished.set(data.id, Math.min(archivedFinished.get(data.id) ?? Infinity, event.at));
+    }
+  }
+  for (const [ticket, sessions] of attempts) {
+    // Ticket-level legacy receipts carry no attempt identity. Match retained
+    // counters and successful custody; never resolve ambiguity by row order.
+    const parsed = ActualSchema.safeParse(s.get<unknown>(`actual:${ticket}`));
+    if (!parsed.success) continue;
+    const actual = parsed.data;
+    const candidates = sessions.filter(x => x.started !== null && Number.isFinite(x.started) && x.started > 0 && x.started < actual.completed &&
+      (x.status === "finished" || (x.status === "archived" && (archivedFinished.get(x.id) ?? -Infinity) >= actual.completed)) &&
+      x.actual_seconds === actual.seconds && x.actual_tokens === actual.tokens);
+    if (candidates.length !== 1) continue;
+    const x = candidates[0];
     const t = JSON.parse(x.brief);
     // Completion receipt is required: polling/elapsed time is not inferred as active work.
-    const actual = s.get<{completed: number; seconds: number; tokens: number}>(`actual:${x.ticket}`);
-    if (actual) rows.push({id:x.ticket, area:t.area ?? "unknown", kind:t.kind ?? "unknown", provider:t.provider,
+    rows.push({id:x.ticket, area:t.area ?? "unknown", kind:t.kind ?? "unknown", provider:t.provider,
       started:x.started, completed:actual.completed, seconds:actual.seconds > 0 ? actual.seconds : null, tokens:actual.tokens > 0 ? actual.tokens : null,
-      elapsed:(actual.completed-x.started)/1000});
+      elapsed:(actual.completed-x.started!)/1000});
   }
   const unique = new Map<string, History>();
   for (const row of rows) {
     const p = HistorySchema.safeParse(row);
     if (p.success && !p.data.imported && p.data.completed > p.data.started) unique.set(p.data.id,p.data);
   }
-  return [...unique.values()].sort((a,b) => a.completed-b.completed);
+  return [...unique.values()].sort(chronological);
 }
 function predict(rows: History[], target: Features, at: number, dimension: Dimension, recent: boolean): number | null {
-  const prior = rows.filter(r => !r.imported && r.completed < at && r[dimension] !== null && r.provider === target.provider);
+  const prior = rows.filter(r => !r.imported && r.completed < at && r[dimension] !== null && r.provider === target.provider).sort(chronological);
   const comparable = prior.filter(r => r.area === target.area && r.kind === target.kind);
   const pool = comparable.length >= 3 ? comparable : prior;
   const selected = recent ? pool.slice(-5) : pool;
@@ -38,7 +63,7 @@ function predict(rows: History[], target: Features, at: number, dimension: Dimen
 export function score(rows: History[]) {
   const errors = Object.fromEntries(dimensions.map(d => [d,{count:0, candidate:0, mean:0}])) as Record<Dimension,{count:number;candidate:number;mean:number}>;
   // Chronological held-out predictions: every training row completed before target launch.
-  for (const row of rows) for (const d of dimensions) {
+  for (const row of [...rows].sort(chronological)) for (const d of dimensions) {
     if (row.imported || row[d] === null || rows.filter(r => r.completed < row.started && r.provider === row.provider && r[d] !== null).length < 5) continue;
     const candidate = predict(rows,row,row.started,d,true), mean = predict(rows,row,row.started,d,false);
     if (candidate === null || mean === null) continue;
