@@ -14,6 +14,7 @@ import {
   materializeSettings,
 } from "../adapters/workers";
 import { command } from "../adapters/github";
+import { collectBrowserRequest } from "./browser";
 export function claimSupervisor(e: Engine, id: string) {
   // BEGIN IMMEDIATE waits for the launch reservation to commit before reading it.
   return e.s.atomic(() => {
@@ -83,7 +84,8 @@ export async function runWorker(id: string) {
     mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
     const baselineKey=`publish-base:${id}`;
     if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());
-    await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery ? {native:continuation?.native} : undefined);
+    await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery || continuation ? {native:continuation?.native} : undefined);
+    if(e.sessions().find(x=>x.id===id)?.status==="finished")collectBrowserRequest(e,id,workspace);
     if(delivery && e.sessions().find(x=>x.id===id)?.status==="finished") {
       const verifyClaim=()=>{
         const current=e.sessions().find(x=>x.id===id);
