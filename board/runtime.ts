@@ -13,7 +13,7 @@ export function ownerSummary(brief:string) {
   const lines = brief.split(/\n|(?<=[.!?])\s+(?=[A-Z])/).map(clean).filter(Boolean);
   const actions = lines.filter(line=>!/^You are |^(?:Vincent|Design reference|Headless|Last line|Pull first|Preserve|Do not|Never|Run |Tests?;|FIDELITY)/i.test(line));
   const first=explicit ? clean(explicit) : actions.find(line=>/^(?:Apply|Add|Build|Change|Check|Create|Derive|Details open|Fix|Implement|Make|Move|Open|Port|Remove|Repair|Replace|Show|Update|Use|Wire|Verify)\b/i.test(line)) ?? actions[0] ?? 'Review the current work';
-  const title=first.replace(/\s*\([^)]*\)/g,'').replace(/^Details open as /i,'Show details in ').replace(/[.!?]$/,'').split(/\s+/).slice(0,12).join(' ').slice(0,100);
+  const title=first.replace(/\s*\([^)]*\)/g,'').split(';')[0]!.replace(/^Details open as /i,'Show details in ').replace(/[.!?]$/,'').split(/\s+/).slice(0,12).join(' ').slice(0,100);
   const next=actions.find(line=>line!==first && line.length>25);
   return {title,purpose:[first,next].filter(Boolean).slice(0,2).map(line=>line!.replace(/[.!?]$/,'')+'.').join(' ').slice(0,500)};
 }

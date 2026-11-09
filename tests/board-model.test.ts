@@ -528,6 +528,7 @@ test('owner run uses task text, real identity, explicit/configured/median estima
   const brief='You are Alido · Product (board) in ~/Developer/example (pull first).\n1. Apply the colour system to the board.\n2. Show all four meters without clipping.';
   expect(ownerIdentity(brief,'launcher')).toBe('product');
   expect(ownerSummary(brief).title).toBe('Apply the colour system to the board');
+  expect(ownerSummary('You are Alido · Product.\nDetails open as a small centred pop-up window on tablet/desktop (rounded); phones keep the bottom sheet.').title).toBe('Show details in a small centred pop-up window on tablet/desktop');
   expect(ownerSummary(brief).purpose).toContain('Show all four meters');
   expect(ownerEstimate(600,1800,[100,200])).toBe(600);
   expect(ownerEstimate(undefined,1800,[100,200])).toBe(1800);
