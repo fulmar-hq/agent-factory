@@ -5,11 +5,11 @@ const c:ReleaseContext={day:'2026-11-09',revision,tree,holdId:'fixture-hold',dea
 const workflow=Buffer.from('# factory-release-contract: tree-deadline-v1\non:\n  workflow_dispatch:').toString('base64');
 test('missing protected workflow and expired context produce no remote effects',async()=>{
  const calls:string[][]=[];
- const execute=async(args:string[])=>{calls.push(args);return JSON.stringify(args.some(x=>x.includes('git/ref'))?{object:{sha:source}}:{content:Buffer.from('on:\n  workflow_dispatch:').toString('base64')});};
+ const execute=async(args:string[])=>{calls.push(args);return JSON.stringify(args.some(x=>x.includes('git/ref'))?{object:{sha:revision}}:args.some(x=>x.includes('git/commits'))?{tree:{sha:tree}}:{content:Buffer.from('on:\n  workflow_dispatch:').toString('base64')});};
  await expect(new AlidoReleasePort(execute,()=>1000).perform('qa',c)).rejects.toThrow('not delivered');
  expect(calls.every(x=>!x.includes('POST'))).toBe(true);
  await expect(new AlidoReleasePort(execute,()=>2000).perform('qa',c)).rejects.toThrow('expired');
- expect(calls).toHaveLength(2);
+ expect(calls).toHaveLength(3);
 });
 test('remote readback dispatch binds protected main source and context; absent outcome never replays',async()=>{
  const calls:string[][]=[];
@@ -25,7 +25,7 @@ test('remote readback dispatch binds protected main source and context; absent o
 });
 test('trusted launcher performs GH mutations locally while remote workflow remains read-only',async()=>{
  const calls:string[][]=[],localCalls:unknown[]=[];
- const execute=async(args:string[])=>{calls.push(args);return JSON.stringify(args[4]?.includes('git/ref')?{object:{sha:source}}:{content:workflow});};
+ const execute=async(args:string[])=>{calls.push(args);return JSON.stringify(args[4]?.includes('git/ref')?{object:{sha:revision}}:args[4]?.includes('git/commits')?{tree:{sha:tree}}:{content:workflow});};
  const local:LocalReleaseEffects={start:async(...args)=>{localCalls.push(args);return {local:true,key:'fixture'};},observe:async()=>({state:'pending',evidence:{}})};
  const port=new AlidoReleasePort(execute,()=>1000,local);
  expect(await port.perform('qa',c)).toMatchObject({local:true});expect(localCalls).toHaveLength(1);

@@ -46,8 +46,13 @@ export class AlidoReleasePort implements ReleasePort {
  }
  async perform(step:ReleaseStep,c:ReleaseContext) {
   this.validate(c);
-  const main=await this.api('git/ref/heads/main'),source=main?.object?.sha;
+  const ref=await this.api(`git/ref/heads/${step==='readback'?'main':'QA'}`),source=ref?.object?.sha;
   if(!sha(source))throw Error('Protected executor source missing');
+  if(step!=='readback'){
+   if(source!==c.revision)throw Error('Protected QA executor revision changed');
+   const commit=await this.api(`git/commits/${source}`);
+   if(commit?.tree?.sha!==c.tree)throw Error('Protected QA executor tree changed');
+  }
   const file=await this.api(`contents/.github/workflows/${WORKFLOW}?ref=${source}`);
   const body=typeof file?.content==='string'?Buffer.from(file.content,'base64').toString('utf8'):'';
   if(!body.includes(`# ${MARKER}`)||!body.includes('workflow_dispatch:'))throw Error('Protected tree/deadline release workflow not delivered; refuse effect');
