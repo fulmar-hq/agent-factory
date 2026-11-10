@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, cpSync, lstatSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync, cpSync, lstatSync } from "node:fs";
 import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -104,6 +104,46 @@ export function executableTest(test:string) {
   return test;
 }
 export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c",executableTest(test)];
+// Retained snapshots may predate the macOS-safe diagnostic test. Refuse the
+// known crashing suite rather than changing a frozen tree or skipping a test.
+export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
+  if(platform!=="darwin" || !/\b(?:unittest|pytest|test_calendar_build_diagnostic)\b/.test(test))return;
+  const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
+  const refuse=()=>{throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");};
+  if(!existsSync(path))return;
+  const fixture=lstatSync(path),root=realpathSync(checkout),target=realpathSync(path),inside=relative(root,target);
+  if(!fixture.isFile()||fixture.isSymbolicLink()||fixture.nlink!==1||fixture.size>1024*1024||inside.startsWith("..")||isAbsolute(inside))refuse();
+  if(!readFileSync(path,"utf8").includes("os.abort()"))return;
+  if(/test_calendar_build_diagnostic/.test(test))refuse();
+  for(const match of test.matchAll(/\bunittest\b([^;&|]*)/g)) {
+    if(/[(){}|`$]/.test(test.slice(0,match.index)) || /\b(?:if|then|else|elif|fi|case|esac|for|while|until|do|done|eval|source|pushd|popd)\b/.test(test.slice(0,match.index)) || /(?:^|[;&])\s*\.\s/.test(test.slice(0,match.index)))refuse();
+    let cwd=realpathSync(checkout);
+    for(const cd of test.slice(0,match.index).matchAll(/\bcd\s+([^\s;&|]+)/g)) {
+      const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value)||value.startsWith("-"))refuse();try{cwd=realpathSync(resolve(cwd,value));}catch{refuse();}
+    }
+    const args=match[1]!.trim().split(/\s+/).filter(Boolean).map(s=>s.replace(/^['"]|['"]$/g,""));
+    let discovery=false,start=cwd,pattern="test*.py";const names:string[]=[];
+    for(let i=0;i<args.length;i++) {
+      const arg=args[i]!;if(arg==="discover"){discovery=true;continue;}
+      if(["-v","-q","-f","-b","-c","--verbose","--quiet","--failfast","--buffer","--catch","--locals"].includes(arg))continue;
+      if(arg==="-k"){if(!args[++i])refuse();continue;}
+      if(["-s","--start-directory","-p","--pattern","-t","--top-level-directory"].includes(arg)) {
+        const value=args[++i];if(!value || !/^[A-Za-z0-9_./*?\[\]-]+$/.test(value))refuse();
+        if(arg==="-s"||arg==="--start-directory")start=resolve(cwd,value!);else if(arg==="-p"||arg==="--pattern")pattern=value!;continue;
+      }
+      if(!/^[A-Za-z0-9_./]+$/.test(arg))refuse();names.push(arg);
+    }
+    if(!discovery&&names.length)continue;
+    if(discovery){if(names.length>3)refuse();if(names[0])start=resolve(cwd,names[0]);if(names[1])pattern=names[1];}
+    try{start=realpathSync(start);}catch{refuse();}
+    const tail=relative(start,target);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
+  }
+  // Other test runners are unresolved collection unless explicitly scoped to files.
+  for(const match of test.matchAll(/\bpytest\b([^;&|]*)/g)) {
+    const paths=match[1]!.trim().split(/\s+/).filter(s=>s&&!s.startsWith("-"));
+    if(!paths.length||paths.some(p=>!p.endsWith(".py")||!/^[A-Za-z0-9_./]+$/.test(p)))refuse();
+  }
+}
 export function prepareTestScratch(checkout:string) {
   mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
   appendFileSync(join(checkout,".git/info/exclude"),"\n.factory-tmp/\n");
@@ -234,6 +274,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
 // checks clean status and the tree again after this process exits.
 export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
   executableTest(t.test);
+  assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
     await copyDependencies(join(source,"node_modules"),join(checkout,"node_modules"));

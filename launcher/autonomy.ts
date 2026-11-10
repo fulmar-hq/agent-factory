@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {claimableReady} from './queue';
 import {enforceIntakeMode} from './intake-policy';
 import {join} from 'node:path';
 import {readFileSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
@@ -68,7 +69,7 @@ export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObs
  const p=e.c.autonomy;
  if(!p || e.s.get('paused')!==false){if(e.s.get('supply-idle'))e.s.set('supply-idle',null);return;}
  const sessions=e.sessions(),refused=new Set(observation?.refusals.map(r=>r.ticket));
- const unclaimed=ready.filter(t=>!refused.has(`${t.repo}#${t.number}`) && !sessions.some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
+ const unclaimed=claimableReady(e,ready).filter(t=>!refused.has(`${t.repo}#${t.number}`));
  const idle=observation ? observeSupplyIdle(e,unclaimed.length,now,observation,alertPath) : null;
  const idleDue=!!idle && !idle.wake && now-idle.since>=p.idle_wake_minutes*60000;
  const target=slotLimit(e.s,e.c)+readyBuffer(e.c,now);
@@ -97,8 +98,8 @@ export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObs
    if(now-round.at>=1800000)ownerDecision(e.s,e.c,`intake-custody:${round.wake}`,p.intake_owner,'Intake cleanup evidence unresolved; no duplicate started',{round,wake},now);
    return;
   }
-  const delivered=e.s.db.query("SELECT data FROM events WHERE kind='launcher-publish' AND at>?").all(round.at) as {data:string}[];
-  const useful=delivered.some(r=>{const x=sessions.find(x=>x.id===JSON.parse(r.data).id);if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));});
+  const delivered=e.s.db.query("SELECT data FROM events WHERE (kind='launcher-publish' OR (kind='github-state' AND json_extract(data,'$.state')='review')) AND at>?").all(round.at) as {data:string}[];
+  const useful=delivered.some(r=>{const data=JSON.parse(r.data);const x=sessions.find(x=>x.id===(data.session ?? data.id));if(!x)return false;const t=JSON.parse(x.brief) as Ticket;return t.paths.some(p=>!p.startsWith('docs/') && !/\.(md|txt)$/i.test(p));});
   if(useful){round={...round,closed:true};e.s.set('intake-backoff',0);}
   else if(round.attempt>=2){
    if(round.retryAt===undefined){
