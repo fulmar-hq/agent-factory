@@ -540,3 +540,13 @@ test('owner run uses task text, real identity, explicit/configured/median estima
     expect(m.running[0].owner).toBe('Product');expect(m.running[0].purpose).toContain('colour system');expect(m.running[0].issue).toContain('/api/owner-work?');
   }finally{s.close();}
 });
+
+test('degraded ticks remain visible and shared PR evidence uses its actual ten-minute polling lifetime',()=>{
+ const {s,e}=fixture();try{
+  s.set('heartbeat',{at:now,status:'degraded',ready:null});
+  expect(boardModel(e,{},now).notice).toContain('needs attention');
+  s.set('heartbeat',{at:now,status:'ok'});s.set('github:example/demo',{observedAt:now,error:null,truncated:false});
+  s.set('board-pulls:example/demo',{at:now-599999,pulls:[]});expect(boardModel(e,{},now).notice).toBeNull();
+  s.set('board-pulls:example/demo',{at:now-600001,pulls:[]});expect(boardModel(e,{},now).notice).toContain('GitHub');
+ }finally{s.close();}
+});
