@@ -6,7 +6,7 @@ import {type Engine,usageGate} from './engine';
 import {healthBridge} from './factory-health-runtime';
 import {mailPath} from './alerts';
 import {builderSlots} from './capacity';
-export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts'];
+export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts'];
 export const renewalDigest=(value:unknown)=>createHash('sha256').update(typeof value==='string'?value:(JSON.stringify(value)??"undefined")).digest('hex');
 export function renewalFingerprint(checkout:string,version:string){return {version,hashes:Object.fromEntries(renewalSources.map(path=>[path,renewalDigest(readFileSync(join(checkout,path),'utf8'))]))};}
 export function renewalDue(q:Record<string,unknown>,fingerprint:unknown,prior:unknown,now:number){
@@ -39,7 +39,7 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
  });
 }
 
-const renewalFailureMessage='Factory qualification renewal failed. New work may stop when the current proof expires; the retained failure needs review.';
+const renewalFailureMessage='Factory qualification renewal failed. New work may be blocked; the saved failure needs review.';
 export function renewalFailureAlert(s:import('../tracking/store').Store,id:string,path=mailPath()){
  const key=`codex-renewal-failure-alert:${id}`;if(s.get(key))return false;
  try{const bridge=healthBridge(path);try{bridge.send(`codex-renewal-failure:${id}`,'Vincent',renewalFailureMessage);}finally{bridge.close();}s.set(key,{queuedAt:Date.now()});s.event(key,'codex-renewal-failure-alert',{id},'Retain the stable bridge ID; retry notification only, never native probes');return true;}

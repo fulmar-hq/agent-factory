@@ -4,7 +4,9 @@ import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {z} from 'zod';
-import {configAt,QualificationSchema} from './config';
+import {configAt,QualificationSchema,BillingSchema} from './config';
+import {originalSessionExpiry} from './release-readiness';
+import {command} from '../adapters/github';
 import {diskReading} from './disk';
 import {processIdentity} from './process';
 import {NativeReceipt} from '../adapters/native';
@@ -13,16 +15,17 @@ import {transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSche
 const failed=(at:number,reason:string)=>({state:'unavailable' as const,observedAt:at,reason});
 const ok=<T>(at:number,receipt:string,value:T)=>({state:'ok' as const,observedAt:at,receipt,value});
 function tail(path:string){const fd=openSync(path,'r');try{const stat=fstatSync(fd),n=Math.min(stat.size,65536),bytes=Buffer.alloc(n);readSync(fd,bytes,0,n,stat.size-n);return bytes.toString().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});}finally{closeSync(fd);}}
-export async function collectFactoryHealth(dir:string,now:number,previousInactive:number|null=null,identity=processIdentity):Promise<{snapshot:FactoryHealthSnapshot;inactive:number|null}>{
+export async function collectFactoryHealth(dir:string,now:number,previousInactive:number|null=null,identity=processIdentity,execute=command):Promise<{snapshot:FactoryHealthSnapshot;inactive:number|null}>{
  const snapshot:FactoryHealthSnapshot={version:1,capturedAt:now};
  const disk=diskReading(undefined,now);snapshot.disk='error' in disk?failed(now,disk.error):ok(now,'statfs Data volume', {usedFraction:disk.usedFraction});
  try{const entries=tail(join(dir,'tick.log')).filter(x=>Number.isSafeInteger(x.at)&&x.at<=now&&['ok','error'].includes(x.status));const latest=entries.at(-1),last=entries.findLast(x=>x.status==='ok');snapshot.tick=latest&&last?ok(now,'bounded tick.log readback',{lastSuccessAt:last.at,lastAttemptAt:latest.at,result:latest.status==='ok'?'success':'failure'}):failed(now,'successful tick log evidence unavailable');}catch(error){snapshot.tick=failed(now,String(error));}
- let inactive:number|null=null;
+ let inactive:number|null=null;let funds:{stop:boolean;committed:number;ceiling:number;hold:number;actualStop:number}|undefined;
  try {
   const c=await configAt(join(dir,'config.yaml'));
   const db=new Database(join(dir,'controller.sqlite'),{readonly:true,strict:true});
   try{db.exec('PRAGMA busy_timeout=1000; BEGIN');
    const get=<T>(key:string):T|undefined=>{const row=db.query('SELECT value FROM kv WHERE key=?').get(key) as {value:string}|null;return row?JSON.parse(row.value):undefined;};
+   const committed=(db.query("SELECT COALESCE(SUM(cents),0) AS cents FROM debits WHERE source='aws' AND month=?").get(new Date(now).toISOString().slice(0,7)) as {cents:number}).cents;funds={stop:get('aws-stop-latched')===true,committed,ceiling:c.wallet.aws.ceiling_usd_month*100,hold:c.wallet.aws.hold_at_projected*100,actualStop:c.wallet.aws.stop_at_actual*100};
    const paused=get<boolean>('paused');if(typeof paused!=='boolean')throw Error('controller pause state unavailable');
    const pause=db.query("SELECT id,at,data FROM events WHERE kind IN ('pause','resume') ORDER BY at DESC,rowid DESC LIMIT 1").get() as {id:string;at:number;data:string}|null;
    // Existing legacy pause events have no actor provenance. Never call them Vincent's.
@@ -40,14 +43,19 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     if(observed!==recorded||!evidence.verified){workUnknown=true;continue;}
     running.push({sessionId:x.id,nativeSessionId:x.native_id,provider:x.provider,purpose:'work' as const,qualificationId:null,qualificationExpiresAt:null,wakeId:null,pid:x.pid,startedAt:x.started,observedAt:now,recordedIdentity:recorded,observedIdentity:observed,receipt:evidence.path!,state:'running' as const});
    }
-   const h=get<{at:number;status:string;ready?:number;refusals?:{reason:string}[]}>('heartbeat');
+   const latest=get<{at:number;status:string;ready?:number;refusals?:{reason:string}[]}>('heartbeat');
+   const h=latest?.status==='ok'?latest:get<typeof latest>('last-successful-heartbeat');
    if(!h||h.status!=='ok'||now-h.at>300000||h.at>now||!Number.isSafeInteger(h.ready)||workUnknown)snapshot.work=failed(now,'complete current work custody unavailable');
    else {
     const ready=h.ready!,building=sessions.filter(x=>['starting','running'].includes(x.status)).length;
-    inactive=running.length?null:previousInactive??now;
+    const progress=db.query("SELECT id,at,kind FROM events WHERE (kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') OR (kind='worker-cleanup' AND json_extract(data,'$.verified')=1)) AND at<=? ORDER BY at DESC,rowid DESC LIMIT 1").get(now) as {id:string;at:number;kind:string}|null;
+    const claim=db.query("SELECT id,at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') AND at<=? AND at>? ORDER BY at DESC,rowid DESC LIMIT 1").get(now,now-20*60000) as {id:string;at:number}|null;
+    const claims=claim?[{id:claim.id,heldSince:claim.at,receipt:`controller event ${claim.id}`}]:[];
+    const floor=previousInactive??(claim?progress?.at??claim.at:now);
+    inactive=running.length?null:Math.max(floor,progress?.at??floor);
     const reason=h.refusals?.[0]?.reason??'';
     const refusal=/qualif/.test(reason)?'qualification':/usage/.test(reason)?'usage':/slot|capacity/.test(reason)?'capacity':/wallet|billing/.test(reason)?'billing':/approval|intake/.test(reason)?'approval':'unknown';
-    snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims:[],running,inactiveSince:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
+    snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims,running,inactiveSince:claims.length?null:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
    }
    const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
    for(const role of Object.values(c.owners))required.set(`${role.harness}:${role.effort}`,role.model);
@@ -70,11 +78,11 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    db.exec('COMMIT');
   }finally{db.close();}
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
- // Only non-secret, independently captured readiness receipts may supply these
- // sources. This watcher never opens AWS credentials or calls AWS to invent them.
- try{const p=z.object({observedAt:z.number().int().nonnegative(),receipt:z.string().min(1),aws:z.object({verified:z.literal(true),credentialId:z.string().min(1),expiresAt:z.number().int().positive()}).optional(),holds:z.object({blocking:z.boolean()}).optional(),billing:z.object({verified:z.literal(true),month:z.string(),allowed:z.boolean()}).optional()}).strict().parse(JSON.parse(readFileSync(join(dir,'health-prerequisites.json'),'utf8')));
-  if(p.aws)snapshot.aws=ok(p.observedAt,p.receipt,p.aws);if(p.holds)snapshot.holds=ok(p.observedAt,p.receipt,p.holds);if(p.billing)snapshot.billing=ok(p.observedAt,p.receipt,p.billing);
- }catch{/* Missing receipts remain actionable unknowns in the evaluator. */}
+ // Existing non-secret sign-in provenance and cached budget import; never SSO
+ // tokens, credential contents, AWS requests or a manufactured ready decision.
+ try{const p=originalSessionExpiry(JSON.parse(readFileSync(join(dir,'release-auth-session.json'),'utf8')),now,0);snapshot.aws=ok(now,p.receipt,{verified:true,credentialId:createHash('sha256').update(p.receipt).digest('hex'),expiresAt:p.expiresAt});}catch(error){snapshot.aws=failed(now,String(error));}
+ try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));if(!funds)throw Error('effective wallet state unavailable');snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:!funds.stop&&b.postedCents+b.unpostedCents<funds.actualStop&&b.projectedCents+funds.committed<funds.hold&&b.projectedCents+funds.committed+100<funds.ceiling});}catch(error){snapshot.billing=failed(now,String(error));}
+ try{const [variable,issue]=await Promise.all([execute(['gh','api','--method','GET','repos/fulmar-hq/alido/actions/variables/QA_HOLD'],undefined,8000),execute(['gh','api','--method','GET','repos/fulmar-hq/alido/issues/1192'],undefined,8000)]),v=JSON.parse(JSON.parse(variable).value),i=JSON.parse(issue);if(v.version!==1||typeof v.held!=='boolean'||typeof v.id!=='string'||!v.id||!Array.isArray(i.labels)||i.labels.length>=100)throw Error('supported release hold readback unavailable');let blocking=v.held||i.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));if(v.legacy_issue!==null&&v.legacy_issue!==1192){if(!Number.isSafeInteger(v.legacy_issue)||v.legacy_issue<1)throw Error('legacy hold identity unavailable');const legacy=JSON.parse(await execute(['gh','api','--method','GET',`repos/fulmar-hq/alido/issues/${v.legacy_issue}`],undefined,8000));if(!Array.isArray(legacy.labels)||legacy.labels.length>=100)throw Error('legacy hold labels unavailable');blocking ||= legacy.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));}snapshot.holds=ok(now,'fresh supported GitHub hold and release-board labels',{blocking});}catch(error){snapshot.holds=failed(now,String(error));}
  return {snapshot,inactive};
 }
 
@@ -91,12 +99,12 @@ export function healthBridge(path:string){
   return row?.wake_state==='woken'&&row.wake_id?`alido-mail:${id}:${row.wake_id}`:null;
  }};
 }
-export async function watchFactoryHealth(dir:string,mail:string,at?:number){
+export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports:{execute?:typeof command;identity?:typeof processIdentity}={}){
  const clock=at===undefined?Date.now:()=>at;let now=clock();
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});const db=new Database(join(dir,'health','state.sqlite'),{create:true,strict:true});
  db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER);');
  try{db.exec('BEGIN IMMEDIATE');const row=db.query('SELECT json,inactive FROM state WHERE id=1').get() as {json:string;inactive:number|null}|null;
-  const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null);
+  const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null,ports.identity??processIdentity,ports.execute??command);
   const evaluated=clock();if(evaluated<now)throw Error("health collection clock regressed");now=evaluated;collected.snapshot.capturedAt=now;
   let {state,evaluation}=transitionFactoryHealth(old,collected.snapshot,()=>now);
   const save=()=>db.query('INSERT INTO state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json,inactive=excluded.inactive').run(JSON.stringify(state),collected.inactive);

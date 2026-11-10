@@ -169,6 +169,7 @@ export async function tick(dir = root) {
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
     s.set("heartbeat", heartbeat);
+    s.set("last-successful-heartbeat",heartbeat);
     return heartbeat;
   } finally {
     s.close();

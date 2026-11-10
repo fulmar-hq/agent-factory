@@ -45,8 +45,11 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number, obser
     const rows=processRows(runtime.execFileSync), owned=new Set<number>();
     if(child.pid && child.exitCode===null && child.signalCode===null)owned.add(child.pid);
     for(const row of rows)if(known.get(row.pid)?.identity===row.identity)owned.add(row.pid);
+    const groups=new Set<number>(),current=new Map(rows.map(row=>[row.pid,row]));
+    for(const row of known.values()){const leader=known.get(row.group);if(leader&&(!current.has(leader.pid)||current.get(leader.pid)!.identity===leader.identity))groups.add(row.group);}
+    for(const row of rows)if(owned.has(row.pid)&&owned.has(row.group))groups.add(row.group);
     let changed=true;
-    while(changed) {changed=false;for(const row of rows)if(owned.has(row.parent)&&!owned.has(row.pid)){owned.add(row.pid);changed=true;}}
+    while(changed) {changed=false;for(const row of rows)if((owned.has(row.parent)||groups.has(row.group))&&!owned.has(row.pid)){owned.add(row.pid);groups.add(row.group);changed=true;}}
     for(const row of rows)if(owned.has(row.pid))known.set(row.pid,row);
     return rows;
   };
