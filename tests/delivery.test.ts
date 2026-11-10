@@ -107,11 +107,13 @@ test("calibration freezes effective estimate; continuation preserves all origina
 
 test("publisher fails closed without native isolation and checks claim before importing",async()=>{
  const {publish}=await import("../adapters/delivery");
+ const {mkdtempSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const fixture=mkdtempSync(join(tmpdir(),"publisher-admission-")),source=join(fixture,"source"),runs=join(fixture,"runs"),seeds=join(runs,"source-seeds");
  let calls=0;
  const exec=async()=>{calls++;return "";};
  const t={...ticket(),repo:"fulmar-hq/alido"};
- await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:false,verifyClaim:()=>{},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("isolation unproven");
- await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:true,verifyClaim:()=>{throw Error("claim refused");},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("claim refused");
+ await expect(publish(t,"a".repeat(64),source,join(runs,"isolation"),"b".repeat(40),{isolationVerified:false,verifyClaim:()=>{},testTree:async()=>({passed:true,tree:""})},exec,source,seeds)).rejects.toThrow("isolation unproven");
+ await expect(publish(t,"a".repeat(64),source,join(runs,"claim"),"b".repeat(40),{isolationVerified:true,verifyClaim:()=>{throw Error("claim refused");},testTree:async()=>({passed:true,tree:""})},exec,source,seeds)).rejects.toThrow("claim refused");
  expect(calls).toBe(0);
 });
 
@@ -216,13 +218,13 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
  expect((await command(["git","-C",source,"rev-parse","HEAD^{tree}"])).trim()).toBe(result.tree);
  calls.length=0;
  for(const mode of ["failed","mismatch","dirty"]){
-  await expect(publish(t,"a".repeat(64),source,join(dir,mode),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(checkout,tree)=>{
+  await expect(publish(t,"a".repeat(64),source,join(dir,"runs",mode),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(checkout,tree)=>{
    if(mode==="dirty")writeFileSync(join(checkout,"fixture"),"unreviewed");
    return {tree:mode==="mismatch" ? "0".repeat(40) : tree,passed:mode!=="failed"};
   }},execute,source)).rejects.toThrow("exact tested tree");
  }
  expect(calls.some(a=>a.includes("push"))).toBe(false);expect(calls.some(a=>a.includes("commit-tree"))).toBe(false);
- await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
+ await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"runs","paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
 });
 
 
