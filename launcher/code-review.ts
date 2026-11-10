@@ -79,10 +79,14 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
   for(const p of [...pulls].sort((a,b)=>a.number-b.number)) {
    if(claimed)return;
    if(project.repo==='fulmar-hq/alido'&&protectedPRs.has(p.number))continue;
+   try {
    if(!['main','QA'].includes(p.baseRefName??''))continue;
    const key=`code-review:${project.repo}:${p.number}:${p.headRefOid}`,prior=s.get<{historical?:boolean;retainedResult?:string}>(key);
    if(prior?.historical&&!prior.retainedResult){s.event(`historical-review-invalidated:${key}`,'historical-review-invalidated',{key,prior},'Retain prior import evidence; only actual bound native results can suppress a review');s.set(key,null);}
-   if(!reviewChecksGreen(p,project.repo)||s.get(key))continue;
+   const retained=s.get<{historical?:boolean;state?:string}>(key);
+   if(retained?.historical)continue;
+   if(retained&&retained.state!=='preparation-pending'){await port.review({number:p.number,head:p.headRefOid,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'UNKNOWN',verify:false},repositories[project.repo],{repo:project.repo,baseRef:p.baseRefName!,depth:'standard',authorNatives:[]},()=>{pass.claims++;claimed=true;});continue;}
+   if(!reviewChecksGreen(p,project.repo))continue;
    const files=await port.files(project.repo,p.number);
    if(!files.length)continue;
    // Closed legacy report-only PRs are reconciled separately. Never review the
@@ -91,6 +95,7 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
    const authorNatives=(s.db.query("SELECT sessions.native_id FROM sessions JOIN events ON json_extract(events.data,'$.id')=sessions.id WHERE events.kind IN ('launcher-publish','worker-delivery') AND json_extract(events.data,'$.url')=?").all(p.url) as {native_id:string|null}[]).flatMap(x=>x.native_id?[x.native_id]:[]);
    const depth=reviewDepth(files),target:ReviewTarget={repo:project.repo,baseRef:p.baseRefName!,depth,authorNatives};
    await port.review({number:p.number,head:p.headRefOid,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'UNKNOWN',verify:true},repositories[project.repo],target,()=>{pass.claims++;claimed=true;});
+   }catch(error){const reason=String(error);s.event(`code-review-refused:${createHash('sha256').update(JSON.stringify({repo:project.repo,pr:p.number,head:p.headRefOid,reason})).digest('hex')}`,'code-review-refused',{repo:project.repo,pr:p.number,head:p.headRefOid,reason},'Retain refusal; another supported product PR may use the unused claim allowance');if(/rate limit|GitHubUnavailable|GitHub backoff|timed out|timeout|network|connection|HTTP 50[234]/i.test(reason))return;}
   }
  }
 }

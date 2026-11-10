@@ -26,7 +26,7 @@ test('automatic review reuses exact-head receipts and protects the frozen carrie
  const e=setup(),dir=mkdtempSync(join(tmpdir(),'code-review-'));let runs=0;
  try {
   writeFileSync(join(dir,'release-batch.json'),JSON.stringify({pr:2901,sources:[{number:1}]}));
-  const port:CodeReviewPort={pulls:async()=>[p(1),p(2),p(3),p(2901)],files:async()=>[{filename:'src/booking.ts'}],review:async(pr,checkout,target,claimed)=>{runs++;expect(pr.number).toBe(2);expect(target.depth).toBe('deep');expect(checkout).toBe('/fake/source');claimed();e.s.set(`code-review:${target.repo}:${pr.number}:${pr.head}`,{state:'done'});return undefined;}};
+  const port:CodeReviewPort={pulls:async()=>[p(1),p(2),p(3),p(2901)],files:async()=>[{filename:'src/booking.ts'}],review:async(pr,checkout,target,claimed)=>{if(e.s.get(`code-review:${target.repo}:${pr.number}:${pr.head}`))return undefined;runs++;expect(pr.number).toBe(2);expect(target.depth).toBe('deep');expect(checkout).toBe('/fake/source');claimed();e.s.set(`code-review:${target.repo}:${pr.number}:${pr.head}`,{state:'done'});return undefined;}};
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake/source'},port,now);expect(runs).toBe(1);
   port.pulls=async()=>[p(1),p(2),p(2901)];
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake/source'},port,now);expect(runs).toBe(1);
@@ -132,5 +132,24 @@ test('factory preparation failure consumes the same new-review allowance as the 
   expect(pass.claims).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='factory-challenge-started'").all()).toHaveLength(0);
   const product:CodeReviewPort={pulls:async()=>{productCalls++;return [p()];},files:async()=>[{filename:'src/widget.ts'}],review:async()=>{productCalls++;return undefined;}};
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},product,now,pass);expect(preparations).toBe(1);expect(productCalls).toBe(0);
+ }finally{e.s.close();}
+});
+
+test('one unsupported PR cannot starve a later product review or consume its claim',async()=>{
+ const e=setup(),dir=mkdtempSync(join(tmpdir(),'unsupported-review-'));let actual=0;
+ try {
+  const port:CodeReviewPort={pulls:async()=>[p(1),p(2),p(3)],files:async()=>[{filename:'src/widget.ts'}],review:async(pr,source,t,claim)=>{if(pr.number===1)throw Error('review PR identity changed before claim');actual++;claim();return undefined;}};
+  const pass={claims:0};await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now,pass);expect(actual).toBe(1);expect(pass.claims).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='code-review-refused'").all()).toHaveLength(1);
+ }finally{e.s.close();}
+});
+
+test('preparation retries still require current green checks, risk depth and source-author independence',async()=>{
+ const e=setup(),dir=mkdtempSync(join(tmpdir(),'retry-review-gates-'));let runs=0,files=0;const pr=p();
+ try {
+  e.s.set(`code-review:fulmar-hq/alido:1:${pr.headRefOid}`,{state:'preparation-pending',retryAt:0});
+  e.s.db.query("INSERT INTO sessions(id,ticket,owner,provider,status,brief,native_id) VALUES(?,?,?,?,?,?,?)").run('source-worker','fulmar-hq/alido#8','builder','codex','finished','{}','source-native');e.s.event('source-publication','launcher-publish',{id:'source-worker',url:pr.url},'fixture');
+  const port:CodeReviewPort={pulls:async()=>[pr],files:async()=>{files++;return [{filename:'src/booking.ts'}];},review:async(pull,source,target,claim)=>{runs++;expect(pull.verify).toBe(true);expect(target.depth).toBe('deep');expect(target.authorNatives).toEqual(['source-native']);claim();return undefined;}};
+  pr.statusCheckRollup=[];await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);expect(runs).toBe(0);expect(files).toBe(0);
+  pr.statusCheckRollup=p().statusCheckRollup;await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);expect(runs).toBe(1);
  }finally{e.s.close();}
 });
