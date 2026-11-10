@@ -59,7 +59,7 @@ const supervisorSchema = z.object({
   stopAt: time.nullable(),
   timeBudget: z.object({ estimateSeconds: z.literal(25), pauseSeconds: z.literal(50) }).strict().nullable(),
   tokenBudget: z.object({ estimateTokens: z.literal(100), pauseTokens: z.literal(200) }).strict().nullable(),
-  samples: z.array(z.object({ at: time, alive: z.literal(true), usage }).strict()).min(1),
+  samples: z.array(z.object({ at: time, alive: z.literal(true), usage, prefixBytes:integer.positive().optional(),prefixSha256:hash.optional() }).strict().refine(s=>(s.prefixBytes===undefined)===(s.prefixSha256===undefined),'paired observed prefix witness required')).min(1),
   // Full trusted ps captures, not a caller's `cleanup: true` assertion.
   before: snapshot, afterTerm: snapshot.nullable(), final: snapshot,
   signals: z.array(z.object({ pid: time, identity: text, at: time, signal: z.enum(["SIGTERM", "SIGKILL"]), result:z.literal("sent") }).strict()),
@@ -223,7 +223,7 @@ raise SystemExit(0 if passed else 1)
 
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
-  const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
+  const rolloutBytes=load(r.rollout),stream = lines(load(r.stream), true), rollout = lines(rolloutBytes);
   const s = supervisorSchema.parse(json(load(r.supervisor)));
   requireThat(!stream.some(nativeFailure)&&!rollout.some(nativeFailure), "explicit native failure receipt");
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
@@ -298,10 +298,17 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
   const total = counters.at(-1)!.usage;
   requireThat(total.total_tokens > 0, "positive native accounting required");
-  let sampleAt = r.startedAt;
+  let sampleAt = r.startedAt,observedBytes=0;
   for (const sample of s.samples) {
     requireThat(sample.at >= sampleAt && sample.at < (s.stopAt ?? r.endedAt), "invalid live sample interval"); sampleAt = sample.at;
-    const counter = counters.findLast(c => c.at <= sample.at);
+    let counter=counters.findLast(c=>c.at<=sample.at);
+    if(sample.prefixBytes!==undefined){
+      requireThat(sample.prefixBytes>=observedBytes&&sample.prefixBytes<=rolloutBytes.length,'observed native prefix regressed or exceeded receipt');observedBytes=sample.prefixBytes;
+      const prefix=rolloutBytes.subarray(0,sample.prefixBytes);requireThat(prefix.at(-1)===10&&sha256(prefix)===sample.prefixSha256,'observed native prefix hash/line boundary differs');
+      const visible=lines(prefix).filter(row=>row.type==='event_msg'&&row.payload?.type==='token_count'&&row.payload.info!==null&&row.payload.info!==undefined).at(-1);
+      counter=visible?{at:at(visible,r),usage:tokenUsage(visible.payload!.info!.total_token_usage)}:undefined;
+      requireThat(counter&&counter.at<=sample.at,'observed prefix has no available accounting');
+    }
     requireThat(counter && sameUsage(counter.usage, tokenUsage(sample.usage)), "live accounting differs from native receipt");
   }
   requireThat(s.samples.some(x => x.usage.total_tokens > 0 && x.at <= s.before.at && s.before.at - x.at <= STOP_POLL_GRACE_MS), "no correlated positive accounting while alive");
