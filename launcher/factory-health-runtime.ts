@@ -1,3 +1,4 @@
+import {publisherBoundary,publisherQualificationVerified} from './publisher-evidence';
 import {Database} from 'bun:sqlite';
 import {openSync,closeSync,fstatSync,readSync,readFileSync,existsSync,mkdirSync,writeFileSync,renameSync} from 'node:fs';
 import {join} from 'node:path';
@@ -83,7 +84,9 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
      try{const observed=identity(binding.pid),receipt=new NativeReceipt('codex',binding.nativeId,binding.workspace,homedir(),binding.startedAt),accounting=new WorkerAccounting();for(let i=0;i<64;i++){receipt.poll(accounting);if(receipt.caughtUp)break;}if(observed===binding.identity&&receipt.evidence(model,effort!).verified){const at=Date.now();renewal={qualificationId,expiresAt:q.data.expiresAt,wakeId:binding.wake,sessionId:binding.attempt,nativeSessionId:binding.nativeId,receipt:binding.nativePath,process:{sessionId:binding.attempt,nativeSessionId:binding.nativeId,provider:key,purpose:'qualification-renewal',qualificationId,qualificationExpiresAt:q.data.expiresAt,wakeId:binding.wake,pid:binding.pid,startedAt:binding.startedAt,observedAt:at,recordedIdentity:binding.identity,observedIdentity:observed,receipt:binding.nativePath,state:'running'}};}}catch{/* Unknown custody never suppresses a qualification warning. */}
     }
     return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&qualificationEvidenceVerified(key.split(':')[0]!,q.data,qualificationBytes,dir),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
-   snapshot.qualifications=ok(Date.now(),'protected qualification file and exact live renewal readback',{required:[...required.keys()],records});
+   const publisher=get<{version:number;expiresAt:number;evidence:string}>('delivery-qualified');
+   records.push({provider:'publisher:v2',qualificationId:createHash('sha256').update(JSON.stringify(publisher)).digest('hex'),verified:publisherQualificationVerified(dir,publisher,qualificationBytes,publisherBoundary(join(import.meta.dir,'..'),dir)),expiresAt:publisher?.expiresAt??0,receipt:publisher?.evidence??'missing publisher evidence',renewal:null});
+   snapshot.qualifications=ok(Date.now(),'protected qualification file, publisher adoption and exact live renewal readback',{required:[...required.keys(),'publisher:v2'],records});
    }catch(error){snapshot.qualifications=failed(now,String(error));}
    try{
    const effects=db.query("SELECT key,value FROM kv WHERE key LIKE 'executor:%' LIMIT 10001").all() as {key:string;value:string}[];

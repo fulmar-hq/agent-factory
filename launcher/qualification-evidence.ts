@@ -18,8 +18,8 @@ export function qualificationEvidenceVerified(provider:string,q:Qualification,qu
   const report=q.evidence.split('#')[0]!;if(basename(report)!=='report.md'||!realpathSync(report).startsWith(realpathSync(join(privateDir,'runs'))+'/'))return false;regular(report);const dir=dirname(report);
   if(provider!=='codex')return false;
   try{
-   const prepared=z.object({next:z.string()}).parse(JSON.parse(regular(join(dir,'prepared.json'))));
-   if(prepared.next!==hash(qualificationBytes))return false;
+   const prepared=z.object({next:z.string(),bindings:z.record(z.string(),z.string()).optional()}).parse(JSON.parse(regular(join(dir,'prepared.json'))));
+   if(prepared.bindings?prepared.bindings[`${provider}:${q.effort}`]!==hash(JSON.stringify(q)):prepared.next!==hash(qualificationBytes))return false;
    const raw:unknown=JSON.parse(regular(join(dir,'manifest.json'))),manifest=z.object({expiresAt:z.number(),model:z.string()}).parse(raw);
    if(manifest.expiresAt!==q.expiresAt||manifest.model!==q.model)return false;
    const proof=collectCodexRenewalEvidence(raw);return proof.status==='verified'&&proof.verifiedRuns.length===6&&proof.verifiedRuns.filter(r=>r.effort===q.effort).length===3;
