@@ -214,6 +214,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(meta.length === 1 && rollout[0] === meta[0] && meta[0].payload?.id === r.nativeId && meta[0].payload?.cwd === r.workspace, "rollout native custody mismatch");
   const counters: { at: number; usage: Usage }[] = [];
   let contexts = 0, completed = 0, previousAt = r.startedAt;
+  const starts:number[]=[];
   const aborts:number[]=[];let completedAt:number|null=null;
   const outputTimes=new Map<string,number>();
   const calls = new Map<string, { name: string; arguments: string }>();
@@ -233,6 +234,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(!prev || Object.keys(u).every(k => u[k as keyof Usage] >= prev[k as keyof Usage]), "native accounting regression");
       counters.push({ at: timestamp, usage: u });
     }
+    if(row.type === "event_msg" && p?.type === "task_started")starts.push(timestamp);
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) {completed++;completedAt=timestamp;}
     if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
@@ -274,6 +276,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
+    requireThat(contexts===1&&starts.every(at=>completedAt!==null&&at<completedAt), "security capture contains an additional unfinished turn");
+    let active=false;for(const event of stream){if(event.type==="turn.started")active=true;if(event.type==="turn.completed")active=false;}requireThat(!active,"security stream ends in an unfinished turn");
     requireThat(s.signals.every(signal=>signal.at>=r.endedAt&&signal.at<=s.final.at&&owned.some(o=>o.pid===signal.pid&&o.identity===signal.identity)), "security completion contradicted by controller stop signal");
     requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
     requireThat(!stream.some(x=>x.item&&!["agent_message","reasoning","command_execution"].includes(x.item.type)), "unsupported native security stream item");
