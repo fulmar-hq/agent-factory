@@ -22,9 +22,10 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS no_debit_delete BEFORE DELETE ON debits BEGIN SELECT RAISE(ABORT,'debit ledger is append-only'); END;
       CREATE TABLE IF NOT EXISTS tickets(id TEXT PRIMARY KEY,snapshot TEXT NOT NULL,observed INTEGER NOT NULL,decision TEXT);
       CREATE TABLE IF NOT EXISTS releases(id TEXT PRIMARY KEY,day TEXT NOT NULL,stage TEXT NOT NULL,revision TEXT NOT NULL,receipt TEXT NOT NULL,at INTEGER NOT NULL,UNIQUE(day,stage));
-      CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY,text TEXT NOT NULL,answer TEXT,at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY,text TEXT NOT NULL,answer TEXT,at INTEGER NOT NULL,resolved_at INTEGER,resolved_by TEXT,addressed_to TEXT NOT NULL DEFAULT 'vincent');
     `);
     this.migrateAttempts();
+    this.migrateQuestions();
   }
   // Keep the v1 rows as a private migration archive. Rebuild only the session
   // index: original IDs, child claims, debits and events remain unchanged.
@@ -50,6 +51,17 @@ export class Store {
         this.event("session-attempts:v2", "session-attempt-migration", {}, "Retain sessions_v1_archive and all claims/debits/events; reconcile attempts before reverting source");
       });
     } finally { this.db.exec("PRAGMA foreign_keys=ON"); }
+  }
+  private migrateQuestions() {
+    this.atomic(() => {
+      const columns = this.db.query("PRAGMA table_info(questions)").all() as {name:string}[];
+      if (columns.some(c => c.name === "addressed_to")) return;
+      for (const [name, type] of [["resolved_at", "INTEGER"], ["resolved_by", "TEXT"], ["addressed_to", "TEXT NOT NULL DEFAULT 'vincent'"]]) {
+        if (!columns.some(c => c.name === name)) this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
+      }
+      this.db.exec("UPDATE questions SET addressed_to='owner' WHERE id LIKE 'autonomy:%'");
+      this.event("question-resolution:v1", "question-resolution-migration", {}, "Retain additive columns and question rows; undo behavior with signed revert");
+    });
   }
   get<T>(key: string): T | null {
     const row = this.db.query("SELECT value FROM kv WHERE key=?").get(key) as {

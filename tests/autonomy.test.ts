@@ -3,14 +3,14 @@ import {mkdtempSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {ConfigSchema,type Ticket} from '../launcher/config';
 import {slotLimit,reconcileCapacity} from '../launcher/capacity';
 import {supply,autoApprove,prospective,failures,classifyFailure,applyOwnerResults,autonomyEffects,expireDecisions} from '../launcher/autonomy';
 import {intakeLabel,type Issue} from '../adapters/github';
 import {config,ticket,admission,now} from './fixtures';
 function setup() {
- const c=ConfigSchema.parse({...config(),autonomy:{intake_owner:'builder',ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['launcher/config.ts','.github']},restart:{max_retries:1,causes_per_hour:3}}});
+ const c=ConfigSchema.parse({...config(),autonomy:{intake_mode:'build',intake_owner:'builder',ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['launcher/config.ts','.github']},restart:{max_retries:1,causes_per_hour:3}}});
  const e=new Engine(new Store(':memory:'),c);e.pause(false,'owner');return e;
 }
 function issue(n=1,extra:Record<string,unknown>={}):Issue {

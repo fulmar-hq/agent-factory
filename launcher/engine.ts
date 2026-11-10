@@ -1,4 +1,6 @@
-import { slotLimit } from "./capacity";
+import { builderSlots, type SlotProcessEvidence } from "./capacity";
+import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
+import {dirname} from 'node:path';
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -86,6 +88,8 @@ export class Engine {
   constructor(
     public s: Store,
     public c: Config,
+    public slotEvidence?: SlotProcessEvidence,
+    public diskProbe:()=>DiskReading=()=>diskReading(s.db.filename===":memory:" ? undefined : dirname(s.db.filename)),
   ) {}
   sessions(): Session[] {
     return this.s.rows("sessions") as Session[];
@@ -95,6 +99,7 @@ export class Engine {
       (s) => !["finished", "archived"].includes(s.status),
     );
   }
+  slots() { return builderSlots(this.s, this.c, this.slotEvidence); }
   // One durable allowance across providers, ticks and restarts. Only a fresh
   // native observation made after that admission can rearm it.
   refreshUsage(provider: "codex" | "claude", meter: Meter | undefined, now: number) {
@@ -178,6 +183,7 @@ export class Engine {
     const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) };
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
+      requireDiskCapacity(this.diskProbe);
       const prior = this.retryPrior(t);
       const autoRetry=this.s.get<{session:string}>(`automatic-retry:${ticketId(t)}`);
       const failure=autoRetry && this.s.get<{repo:string;provider:string;cause:string}>(`failure-class:${autoRetry.session}`);
@@ -218,7 +224,7 @@ export class Engine {
       )
         blocked("worker unqualified");
       const active = this.active();
-      if (active.length >= slotLimit(this.s, this.c))
+      if (!this.slots().free)
         blocked("slots full");
       if (
         t.heavy &&
@@ -285,6 +291,7 @@ export class Engine {
   claimStart(id: string, now = Date.now()) {
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) return false;
+      requireDiskCapacity(this.diskProbe);
       const changed =
         this.s.db
           .query(
@@ -303,7 +310,7 @@ export class Engine {
     });
   }
   register(id: string, pid: number, native: string | null) {
-    this.s.set(`supervisor:${id}`, processIdentity(pid));
+    this.s.set(`supervisor:${id}`, (this.slotEvidence?.identity ?? processIdentity)(pid));
     this.s.db
       .query(
         "UPDATE sessions SET status='running',pid=?,native_id=COALESCE(?,native_id) WHERE id=? AND status IN ('starting','running')",
@@ -349,7 +356,7 @@ export class Engine {
           now,
         );
       }
-      if (ratio >= this.c.overrun.pause_at) {
+      if (ratio >= this.c.overrun.pause_at && !["finished", "archived"].includes(x.status)) {
         this.s.set(`stop:${id}`,{reason:"budget pause; next turn blocked",at:now,...budget});
         this.s.db
           .query(
@@ -357,7 +364,7 @@ export class Engine {
           )
           .run(id);
         this.s.db
-          .query("INSERT OR IGNORE INTO questions VALUES(?,?,NULL,?)")
+          .query("INSERT INTO questions(id,text,answer,at,addressed_to) VALUES(?,?,NULL,?,'vincent') ON CONFLICT(id) DO UPDATE SET answer=NULL,at=excluded.at,resolved_at=NULL,resolved_by=NULL WHERE questions.resolved_at IS NOT NULL")
           .run(
             `overrun:${id}`,
             "Work reached twice its time or token estimate. Close it or grant a bounded extension?",
@@ -395,24 +402,48 @@ export class Engine {
   continueSession(id: string, receipt: string, spawn: () => void) {
     return this.s.atomic(() => {
       const x = this.sessions().find(x => x.id === id);
-      if (!x || x.status !== "paused" || x.pid !== null || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
+      if (!x || x.status !== "paused" || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
       if (!receipt?.trim() || this.s.get("paused") !== false) blocked("receipt and unpaused factory required");
+      requireDiskCapacity(this.diskProbe);
       const cleanup = this.s.db.query("SELECT data FROM events WHERE id=?").get(`cleanup:${id}`) as {data:string}|null;
       if (!cleanup || (this.s.get<{verified:boolean}>(`cleanup-evidence:${id}`) ?? JSON.parse(cleanup.data)).verified !== true) blocked("verified cleanup required");
       const t = JSON.parse(x.brief) as Ticket;
-      const tokens = this.s.get<number>("token-calibration:codex");
+      const waiting = this.s.get<{receipt:string;tokens:number}>(`continuation-slot-wait:${id}`);
+      const tokens = waiting?.receipt===receipt ? waiting.tokens : this.s.get<number>("token-calibration:codex");
       if (!tokens || tokens <= t.estimateTokens || x.actual_tokens >= 2*tokens || x.actual_seconds >= 2*t.estimateSeconds) blocked("bounded calibrated extension required");
+      const slots=this.slots();
+      if(!slots.dormant.has(id))blocked("stopped paused Codex custody required");
+      if(!slots.free) {
+        this.s.set(`continuation-slot-wait:${id}`,{receipt,tokens});
+        this.s.event(`continuation-slot-wait:${id}:${tokens}:${createHash('sha256').update(receipt).digest('hex')}`,"session-continuation-wait",{id,receipt,tokens},"Retain approved extension and custody; retry normal slot admission on a later tick");
+        return;
+      }
       const attempt = randomUUID();
+      this.s.set(`continuation-slot-wait:${id}`,null);
       this.s.set(`token-extension:${id}`, tokens);
       const previousStop=this.s.get(`stop:${id}`);
       this.s.set(`stop:${id}`,null);
       this.s.set(`active-clock:${id}`,{at:Date.now(),seconds:x.actual_seconds});
       this.s.set(`continuation:${id}`, {attempt, native:x.native_id, receipt});
-      this.s.db.query("UPDATE sessions SET status='starting' WHERE id=?").run(id);
+      this.s.db.query("UPDATE sessions SET status='starting',pid=NULL WHERE id=?").run(id);
       this.s.event(attempt, "session-continuation", {id, receipt, tokens, previous:x, previousStop}, "Stop session; preserve original baseline, accounting, native ID, claims and debits");
       spawn();
       return attempt;
     });
+  }
+  // The scheduled browser/continuation reconciliation supplies the normal
+  // supervisor spawn. A queued extension never replaces its frozen approval.
+  resumeContinuations(spawn:(id:string)=>void) {
+    for(const row of this.s.db.query("SELECT key FROM kv WHERE key LIKE 'continuation-slot-wait:%' AND value!='null'").all() as {key:string}[]) {
+      const id=row.key.slice('continuation-slot-wait:'.length);
+      try {
+        this.s.atomic(()=>{
+          const waiting=this.s.get<{receipt:string}>(row.key);
+          if(waiting)this.continueSession(id,waiting.receipt,()=>spawn(id));
+        });
+      }
+      catch(error) {this.s.event(`continuation-slot-refused:${id}:${String(error)}`,"session-continuation-refused",{id,error:String(error)},"Retain waiting approval; reconcile custody and normal continuation gates");}
+    }
   }
   archive(id: string, receipt: string, actor: string) {
     if (actor !== "owner") blocked("owner only");
