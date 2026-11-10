@@ -36,7 +36,8 @@ export function builderSlots(s:Store,c:Config,evidence:SlotProcessEvidence=proce
   }catch{return true;}
   dormant.add(x.id);return false;
  });
- const max=slotLimit(s,c),used=occupied.length;
+ const renewal=s.get<{state:string}>("codex-renewal-slot");
+ const max=slotLimit(s,c),used=occupied.length+(renewal&&renewal.state!=="released"?1:0);
  return {used,max,free:Math.max(0,max-used),occupied,dormant};
 }
 export type Capacity = {slots:number; at:number; healthySince:number|null; pressure:'normal'|'warning'|'critical'|'unknown'; busy:number; failureRate:number; reason:string};

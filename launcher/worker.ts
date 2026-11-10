@@ -1,6 +1,6 @@
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
-import { spawnWorker } from "./child";
+import { spawnWorker, type WorkerObservation } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
@@ -29,7 +29,7 @@ export function claimSupervisor(e: Engine, id: string) {
 }
 export function requireWorkerQualification(e: Engine, t: Ticket, raw: unknown, now = Date.now()) {
   const q = qualificationFor(raw, e.c, t, now);
-  if (!t.model || !t.effort || !q || e.s.get("paused") !== false) throw Error("qualification expired or paused");
+  if (!t.model || !t.effort || !q || e.s.get("paused") !== false || (t.provider==="codex" && e.s.get("codex-renewal-uncertain")===true)) throw Error("qualification expired or paused");
   return q;
 }
 export async function runWorker(id: string) {
@@ -105,7 +105,7 @@ export async function runWorker(id: string) {
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.
-export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {native?:string}) {
+export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {native?:string}, observation?:WorkerObservation & {sample?:(native:NativeReceipt|undefined,at:number)=>void}) {
   const continuation = e.s.get<{attempt:string;native:string}>(`continuation:${id}`);
   const attempt = continuation?.attempt ?? id;
   const original = e.sessions().find(x => x.id === id)!;
@@ -132,7 +132,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
     const spec = materializeSettings(workerSpec(t, workspace,"print",root,delivery), settingsPath);
     if (spec.settings) e.s.event(`native-settings:${attempt}`, "native-settings", {id, path:settingsPath, settings:spec.settings}, "Retain the per-run settings with native receipts; requalify policy changes");
     fd = openSync(logPath, "ax", 0o600);
-    child = spawnWorker(spec, workspace, fd);
+    child = spawnWorker(spec, workspace, fd,observation);
     e.s.event(`native-process:${attempt}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
     e.register(id, process.pid, spec.nativeId ?? null);
     let stop = false,
@@ -159,6 +159,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
           e.s.set(`native-evidence:${id}`,evidence);
           if(evidence.conflict) {e.s.set(`stop:${id}`,{reason:"native model/effort conflict"});halt!();}
         }
+        observation?.sample?.(native,Date.now());
       } catch(error) {e.s.set(`stop:${id}`,{reason:String(error)});halt!();}
       e.account(id,original.actual_seconds+(Date.now()-start)/1000,totalTokens);
     };
@@ -204,6 +205,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
         }
         if (event.tokens !== undefined) totalTokens = event.tokens;
         if (event.done) completed = true;
+        observation?.sample?.(native,Date.now());
         e.account(id, original.actual_seconds+(Date.now() - start) / 1000, totalTokens);
         if (e.sessions().find((x) => x.id === id)?.status === "paused") halt();
       }

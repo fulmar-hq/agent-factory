@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import type { WorkerSpec } from "../adapters/workers";
-type ProcessRow = {pid:number; parent:number; group:number; state:string; identity:string};
-function processRows():ProcessRow[] {
+export type ProcessRow = {pid:number; parent:number; group:number; state:string; identity:string};
+export function processRows():ProcessRow[] {
   let text:string;
   try {
     text=execFileSync("/bin/ps",["-axo","pid=,ppid=,pgid=,stat=,lstart="],{encoding:"utf8",env:{...process.env,LC_ALL:"C"}});
@@ -16,16 +16,22 @@ function processRows():ProcessRow[] {
 }
 // Native tools may start their own groups. Retain observed descendants by process
 // start identity, including orphans, and signal only groups led by owned processes.
-export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
+export type WorkerObservation = {
+ signal?:(pid:number,identity:string,signal:NodeJS.Signals,at:number)=>void;
+ snapshot?:(stage:"afterTerm"|"final",rows:ProcessRow[],at:number)=>void;
+ exited?:(code:number|null,signal:NodeJS.Signals|null,at:number)=>void;
+};
+export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number, observation?:WorkerObservation) {
   const child = spawn(spec.argv[0], spec.argv.slice(1), {
     cwd, env: spec.env, detached: true, stdio: ["ignore", "pipe", stderr],
   });
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", resolve);
+    child.once("exit", (code,signal)=>{try{observation?.exited?.(code,signal,Date.now());}catch(error){trackingError=error;}resolve(code);});
   });
   const known=new Map<number,ProcessRow>();
   let trackingError:unknown;
+  const observe=(fn:()=>void)=>{try{fn();}catch(error){trackingError=error;}};
   const collect=()=>{
     const rows=processRows(), owned=new Set<number>();
     if(child.pid && child.exitCode===null && child.signalCode===null)owned.add(child.pid);
@@ -44,7 +50,7 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
     if (!cleanup.deniedSignals.includes(key)) cleanup.deniedSignals.push(key);
   };
   const signal = (group:number,value: NodeJS.Signals) => {
-    try { process.kill(-group, value); return true; }
+    try { process.kill(-group, value); const leader=known.get(group);if(leader)observe(()=>observation?.signal?.(leader.pid,leader.identity,value,Date.now()));return true; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
       // A group signal can race native sandbox teardown. Keep trying individual
@@ -76,7 +82,7 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
           // Also target pinned individuals if a group signal was only partial,
           // or a descendant joined a group whose leader we do not own.
           for(const row of live) {
-            try {process.kill(row.pid,value);}catch(error){
+            try {process.kill(row.pid,value);observe(()=>observation?.signal?.(row.pid,row.identity,value,Date.now()));}catch(error){
               if((error as NodeJS.ErrnoException).code==="EPERM")denied(row.pid,value);
               else if((error as NodeJS.ErrnoException).code!=="ESRCH")throw error;
             }
@@ -90,6 +96,7 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
           await new Promise(resolve => setTimeout(resolve, 50));
           if(!terminate("SIGTERM"))break;
         }
+        observe(()=>observation?.snapshot?.("afterTerm",processRows(),Date.now()));
         terminate("SIGKILL");
         const killed = Date.now()+1000;
         while(owned().length && Date.now()<killed) {
@@ -99,6 +106,8 @@ export function spawnWorker(spec: WorkerSpec, cwd: string, stderr: number) {
         const survivors = owned();
         const groupSurvivors = processRows().filter(row=>groups.has(row.group) && !row.state.startsWith("Z"));
         if(survivors.length || groupSurvivors.length)throw Error("owned worker descendants survived cleanup");
+        if(trackingError)throw trackingError;
+        observe(()=>observation?.snapshot?.("final",processRows(),Date.now()));
         if(trackingError)throw trackingError;
         cleanup.verified=true;
       } finally {clearInterval(tracker);}
