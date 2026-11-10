@@ -121,13 +121,14 @@ export async function reconcile(
           issues.push(closed);
         }
       }
+      const repositoryReady:Ticket[]=[];
       s.atomic(() => {
         for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
           try {
             const t = issueTicket(project.repo, i);
-            if (t) ready.push(t);
+            if (t) repositoryReady.push(t);
           } catch (e) {
             decision = String(e);
           }
@@ -151,8 +152,10 @@ export async function reconcile(
           error: null,
         });
       });
+      ready.push(...repositoryReady);
     } catch (e) {
-      s.set(`github:${project.repo}`, { error: String(e), observedAt: now, retryAt:e instanceof GitHubUnavailable?e.retryAt:now+60000 });
+      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now, retryAt:e instanceof GitHubUnavailable?e.retryAt:now+60000 });}
+      catch{console.error(`GitHub failure receipt unavailable for ${project.repo}; candidates remain refused.`);}
     }
   }
   return ready;
