@@ -1,5 +1,6 @@
 import {nightlyUiChecklist,nightlyUiInstructions} from "./nightly-ui";
-import {readReleaseBatch} from "./release-batch";
+import {ReleaseBatchSchema,batchDigest} from "./release-batch";
+import {z} from "zod";
 import {intakeInstructions} from './intake-policy';
 import {join} from 'node:path';
 import {mkdirSync,openSync,closeSync,writeSync,readFileSync,writeFileSync} from 'node:fs';
@@ -36,6 +37,15 @@ export function ownerSpec(t:Ticket,workspace:string,scratch:string,native?:strin
  spec.env.TMPDIR=scratch;
  return spec;
 }
+// Packet construction is read-only and uses the exact retained successful QA
+// context. A same-day mutable batch file cannot replace its frozen source set.
+export function qualityEvidencePacket(s:Store,raw:unknown) {
+ const sha=z.string().regex(/^[a-f0-9]{40}$/);
+ const context=z.object({day:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),revision:sha,tree:sha,holdId:z.string().min(1),artifact:z.string().min(1),batch:ReleaseBatchSchema}).passthrough().parse(raw);
+ const qa=s.get<{state:string;context:{day:string;revision:string;tree:string;holdId:string;batch?:unknown};evidence?:{artifact?:string}}>(`executor:${context.day}:qa`);
+ if(qa?.state!=='success' || qa.context.day!==context.day || qa.context.revision!==context.revision || qa.context.tree!==context.tree || qa.context.holdId!==context.holdId || qa.evidence?.artifact!==context.artifact || context.batch.day!==context.day || context.batch.tree!==context.tree || batchDigest(ReleaseBatchSchema.parse(qa.context.batch))!==batchDigest(context.batch))throw Error('Retained frozen QA batch identity changed or missing');
+ return {...context,nightlyUi:{instructions:nightlyUiInstructions,checks:nightlyUiChecklist(s,context.batch)}};
+}
 export async function runOwner(id:string,dir=root) {
  const s=new Store(join(dir,'controller.sqlite')),c=await configAt(join(dir,'config.yaml'));
  let fd:number|undefined,child:ReturnType<typeof spawnWorker>|undefined,timer:ReturnType<typeof setInterval>|undefined;
@@ -56,10 +66,11 @@ export async function runOwner(id:string,dir=root) {
   const scratch=join(dir,'runs','owner-wakes',id.replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80)+'-'+crypto.randomUUID());mkdirSync(scratch,{recursive:true,mode:0o700});
   if(wake.kind==='qa-deployed' && Date.now()>=(wake.payload as {deadline:number}).deadline)throw Error('Quality acceptance deadline expired');
   if(wake.kind==='qa-deployed'){
+   const packet=qualityEvidencePacket(s,wake.payload);
    const context=wake.payload as HostedContext;
    let hosted:unknown;
    try{hosted=await collectHostedAcceptance(context);}catch(error){hosted={passed:false,failure:String(error)};}
-   writeFileSync(join(scratch,'qa-evidence.json'),JSON.stringify({...context,hosted,nightlyUi:{instructions:nightlyUiInstructions,checks:nightlyUiChecklist(s,readReleaseBatch(dir,(wake.payload as {day:string}).day))}},null,2),{mode:0o600});
+   writeFileSync(join(scratch,'qa-evidence.json'),JSON.stringify({...packet,hosted},null,2),{mode:0o600});
    const fresh=await admitAcceptance(c,dir,s,(wake.payload as {day:string}).day,context.deadline!);
    if(JSON.stringify(fresh)!==JSON.stringify(acceptance))throw Error('acceptance ticket changed during hosted probe');
    s.set(`owner-acceptance-profile:${id}`,{...acceptance,hosted,scratch,at:Date.now()});

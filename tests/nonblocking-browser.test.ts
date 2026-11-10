@@ -35,3 +35,22 @@ test('remote rooted DNS and non-loopback mapped IPs retain their real-site brows
 });
 test('loopback forms cannot occupy the signed-in queue',()=>{for(const host of ['localhost','ui.localhost','127.0.0.1','127.2.3.4','[::1]','0.0.0.0','2130706433'])expect(isLocalPreview(`http://${host}:3103/`)).toBe(true);expect(isLocalPreview(request.url)).toBe(false);});
 test('nightly checklist binds pending requests to published sources in frozen batch',()=>{const s=new Store(':memory:');for(const [id,pr] of [['a',12],['b',13]] as const){s.set(`nightly-ui:${id}`,{parent:id,repo:'fulmar-hq/alido',issue:pr,request,state:'pending'});s.event(id,'launcher-publish',{id,repo:'fulmar-hq/alido',url:`https://github.com/fulmar-hq/alido/pull/${pr}`},'retain');}const checks=nightlyUiChecklist(s,{sources:[{number:12}]} as any);expect(checks.map(x=>x.issue)).toEqual([12]);expect(checks[0].publication.url).toBe('https://github.com/fulmar-hq/alido/pull/12');s.close();});
+
+test('Quality packet keeps its retained batch when the current same-day file changes or disappears',async()=>{
+ const {qualityEvidencePacket}=await import('../launcher/owner');
+ const {unlinkSync}=await import('node:fs');
+ const s=new Store(':memory:'),dir=mkdtempSync(join(tmpdir(),'frozen-nightly-packet-'));
+ const batch={version:1 as const,day:'2026-11-10',base:'d'.repeat(40),revision:'a'.repeat(40),tree:'b'.repeat(40),pr:7,ref:'feat/fictional-batch',holdId:'original-hold',sources:[{number:12,head:'e'.repeat(40),ref:'feat/source',title:'Fictional source'}],overlaps:[],review:'Fictional independent review'};
+ // Successful QA may have a new merge revision with exactly the frozen tree.
+ const context={day:batch.day,revision:'c'.repeat(40),tree:batch.tree,holdId:'qa-hold',artifact:'fictional@sha256:'+'f'.repeat(64),batch};
+ s.set(`executor:${batch.day}:qa`,{state:'success',context,evidence:{artifact:context.artifact}});
+ for(const [id,pr] of [['a',12],['b',13]] as const){s.set(`nightly-ui:${id}`,{parent:id,repo:'fulmar-hq/alido',issue:pr,request,state:'pending'});s.event(id,'launcher-publish',{id,repo:'fulmar-hq/alido',url:`https://github.com/fulmar-hq/alido/pull/${pr}`},'retain');}
+ const current=join(dir,'release-batch.json');writeFileSync(current,JSON.stringify(batch));
+ try{
+  writeFileSync(current,JSON.stringify({...batch,sources:[{...batch.sources[0],number:13}]}));
+  expect(qualityEvidencePacket(s,context).nightlyUi.checks.map(x=>x.issue)).toEqual([12]);
+  unlinkSync(current);
+  expect(qualityEvidencePacket(s,context).nightlyUi.checks.map(x=>x.issue)).toEqual([12]);
+  for(const changed of [{...context,batch:undefined},{...context,batch:{...batch,day:'2026-11-11'}},{...context,batch:{...batch,tree:'f'.repeat(40)}},{...context,batch:{...batch,sources:[{...batch.sources[0],number:13}]}},{...context,revision:'e'.repeat(40)},{...context,artifact:'different-artifact'}])expect(()=>qualityEvidencePacket(s,changed)).toThrow();
+ }finally{s.close();}
+});
