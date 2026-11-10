@@ -16,8 +16,17 @@ export function queueWake(s:Store,w:Wake,now=Date.now()) {
  });
 }
 const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-verified'?-2:w.kind==='release-diagnosis'?-1:w.kind==='product-intake'?0:w.kind==='failure-diagnosis'?1:w.kind==='owner-decision'?2:3;
+type RetainedWake = Wake & {state:string;at?:unknown};
+// Unknown legacy ages follow dated events in their class; never invent urgency
+// or refresh retained time. Epoch milliseconds must be nonnegative safe integers.
+const queuedAt=(w:RetainedWake)=>typeof w.at==='number' && Number.isSafeInteger(w.at) && w.at>=0 && w.at<=8640000000000000?w.at:Infinity;
 export function pendingWakes(s:Store) {
- return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
+ return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value) as RetainedWake).filter(r=>r.state==='queued').sort((a,b)=>{
+  const priority=wakePriority(a)-wakePriority(b);if(priority)return priority;
+  const aTime=queuedAt(a),bTime=queuedAt(b);
+  if(aTime!==bTime)return aTime<bTime?-1:1;
+  return a.id<b.id?-1:a.id>b.id?1:0;
+ }) as Wake[];
 }
 export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity) {
  const claimed=s.atomic(()=>{
