@@ -340,3 +340,13 @@ test('a live bound root after its claimed graceful exit cannot qualify',()=>{
 
 
 for(const bad of ['split key','split number','missing await token'] as const)test('native code grammar rejects '+bad,()=>{const f=gracefulFixture(),r=f.m.runs[1];f.mutate(r.rollout,rows=>{const p=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload;if(bad==='split key')p.input=p.input.replace('session_id:','session_ id:');if(bad==='split number')p.input=p.input.replace('yield_time_ms:1000','yield_time_ms:1 000');if(bad==='missing await token')p.input=p.input.replace('await tools.','awaittools.');},true);expect(f.collect().status).toBe('refused');});
+
+function delayedCounterFixture(){
+ const f=fixture(),r=f.m.runs[0],rows=Buffer.from(f.read(r.rollout.path)).toString().trim().split('\n').map(line=>JSON.parse(line)),index=rows.findIndex(x=>x.payload?.type==='token_count'),prefix=bytes(jsonl(rows.slice(0,index+1))),u=rows[index].payload.info.total_token_usage;
+ f.mutate(r.supervisor,s=>{for(const sample of s.samples){sample.prefixBytes=prefix.length;sample.prefixSha256=digest(prefix);}});
+ f.mutate(r.rollout,x=>{x.splice(index+1,0,{timestamp:new Date(r.startedAt+400).toISOString(),type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{...u,input_tokens:u.input_tokens+5,total_tokens:u.total_tokens+5}}}});},true);
+ const stream=Buffer.from(f.read(r.stream.path)).toString().split('\n').filter(Boolean).map(line=>{if(!line.startsWith('{'))return line;const x=JSON.parse(line);if(x.type==='turn.completed'){x.usage.input_tokens+=5;x.usage.total_tokens+=5;}return JSON.stringify(x);}).join('\n')+'\n',raw=bytes(stream);f.files.set(r.stream.path,raw);r.stream.sha256=digest(raw);
+ return {f,r};
+}
+test('live usage binds the actual observed prefix before a delayed earlier-timestamp counter was flushed',()=>{const {f,r}=delayedCounterFixture();expect(f.collect().status).toBe('verified');f.mutate(r.supervisor,s=>{for(const x of s.samples){delete x.prefixBytes;delete x.prefixSha256;}});expect(f.collect().status).toBe('refused');});
+for(const bad of ['hash','length','partial line','different latest counter','unpaired witness'] as const)test('observed accounting prefix refuses '+bad,()=>{const {f,r}=delayedCounterFixture();f.mutate(r.supervisor,s=>{const x=s.samples[0];if(bad==='hash')x.prefixSha256='0'.repeat(64);if(bad==='length')x.prefixBytes=99999999;if(bad==='partial line')x.prefixBytes--;if(bad==='different latest counter'){const raw=f.read(r.rollout.path);x.prefixBytes=raw.length;x.prefixSha256=digest(raw);}if(bad==='unpaired witness')delete x.prefixSha256;});expect(f.collect().status).toBe('refused');});
