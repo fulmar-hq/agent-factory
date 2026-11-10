@@ -9,7 +9,7 @@ import { ConfigSchema } from '../launcher/config';
 import { boardModel } from '../board/model';
 import { supply } from '../launcher/autonomy';
 import { observeSupplyIdle } from '../launcher/supply-idle';
-import { queueBrowser, resumeBrowser, saveBrowser, browserJobs, reconcileBrowsers, type BrowserPorts } from '../launcher/browser';
+import { queueBrowser as queueDetachedBrowser, resumeBrowser, saveBrowser, browserJobs, reconcileBrowsers, type BrowserPorts } from '../launcher/browser';
 import { launchReady } from '../launcher/tick';
 import { intakeLabel, issueTicket, type Issue } from '../adapters/github';
 import { config, ticket, admission, meter, now } from './fixtures';
@@ -27,6 +27,14 @@ function dormant(e:Engine,n:number,status='paused',heavy=false) {
  e.s.event(`cleanup:${x.id}`,'worker-cleanup',{verified:true},'Retain fictional cleanup');
  return e.sessions().find(s=>s.id===x.id)!;
 }
+// Pre-upgrade fixture: legacy waiting parents must still reconcile safely.
+function queueBrowser(...args:Parameters<typeof queueDetachedBrowser>) {
+ const j=queueDetachedBrowser(...args);delete j.detached;
+ args[0].s.set(`browser-job:${j.id}`,j);
+ args[0].s.db.query("UPDATE sessions SET status='waiting-browser' WHERE id=?").run(j.parent);
+ args[0].s.set(`browser-parent:${j.parent}`,{child:j.id,state:"RW",deadline:j.deadline,default:"not done"});return j;
+}
+
 const request={result:'BROWSER_NEEDED',url:'https://console.example.test/status',goal:'Read fictional status',noCliApi:'No CLI for this fictional status',expectedEvidence:'Status text'};
 function browserParent(e:Engine,n:number,heavy=false) {
  const x=dormant(e,n,'finished',heavy);
