@@ -1,3 +1,4 @@
+import {githubPages} from '../adapters/github-pages';
 import { recordPulls, pullFields, type BoardPull } from "../board/pulls";
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
@@ -74,8 +75,7 @@ export async function githubWakes(s:Store,c:Config,execute=command,now=Date.now(
  for(const project of Object.values(c.projects)) {
   const primed=s.get(`owner-github-primed:${project.repo}`)===true;
   const emit=(w:Wake)=>{if(primed)queueWake(s,w,now);else s.event(`owner-event:${w.id}`,'owner-wake-baseline',w,'Retain historical baseline; only new events cause owner turns',now);};
-  const prs=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json',pullFields])) as BoardPull[];
-  if(prs.length>=100)throw Error('owner PR reconciliation truncated');
+  const prs=await githubPages(project.repo,'pullRequests',execute) as BoardPull[];
   recordPulls(s,project.repo,prs,now);
   for(const pr of prs) {
    // PR number differs from issue number: delivery events bind the actual PR URL.

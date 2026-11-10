@@ -22,7 +22,8 @@ import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwn
 import { qualificationAlerts } from "./alerts";
 import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
-export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
+import { qualificationFor } from "./usage-push-policy";
+export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifications?: unknown }, spawn: (id: string) => void, execute = command, clock = Date.now) {
   if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
   const retryNoPr: string[] = [];
@@ -34,7 +35,9 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id
   await validateIntake(t, execute);
   // No await between fresh validation and the atomic reservation/spawn attempt.
   const session = e.s.atomic(() => {
-    const session = e.admit(t, { ...a, retryNoPr, now: clock() });
+    const now = clock();
+    const qualification = Object.hasOwn(a, "qualifications") ? qualificationFor(a.qualifications, e.c, t, now) : a.qualification;
+    const session = e.admit(t, { ...a, qualification, retryNoPr, now });
     if (!e.claimStart(session.id)) throw Error("start refused");
     spawn(session.id);
     return session;
@@ -137,7 +140,7 @@ export async function tick(dir = root) {
           now: Date.now(),
           meter: r[t.provider],
           billing: r.billing,
-          qualification: qualifications[t.provider],
+          qualifications,
           recoverUsage: true,
         }, (id) => spawnSupervisor(id, dir));
         s.db

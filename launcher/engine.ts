@@ -1,4 +1,4 @@
-import { slotLimit } from "./capacity";
+import { builderSlots, type SlotProcessEvidence } from "./capacity";
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -86,6 +86,7 @@ export class Engine {
   constructor(
     public s: Store,
     public c: Config,
+    public slotEvidence?: SlotProcessEvidence,
   ) {}
   sessions(): Session[] {
     return this.s.rows("sessions") as Session[];
@@ -95,6 +96,7 @@ export class Engine {
       (s) => !["finished", "archived"].includes(s.status),
     );
   }
+  slots() { return builderSlots(this.s, this.c, this.slotEvidence); }
   // One durable allowance across providers, ticks and restarts. Only a fresh
   // native observation made after that admission can rearm it.
   refreshUsage(provider: "codex" | "claude", meter: Meter | undefined, now: number) {
@@ -218,7 +220,7 @@ export class Engine {
       )
         blocked("worker unqualified");
       const active = this.active();
-      if (active.length >= slotLimit(this.s, this.c))
+      if (!this.slots().free)
         blocked("slots full");
       if (
         t.heavy &&
@@ -303,7 +305,7 @@ export class Engine {
     });
   }
   register(id: string, pid: number, native: string | null) {
-    this.s.set(`supervisor:${id}`, processIdentity(pid));
+    this.s.set(`supervisor:${id}`, (this.slotEvidence?.identity ?? processIdentity)(pid));
     this.s.db
       .query(
         "UPDATE sessions SET status='running',pid=?,native_id=COALESCE(?,native_id) WHERE id=? AND status IN ('starting','running')",
@@ -395,24 +397,47 @@ export class Engine {
   continueSession(id: string, receipt: string, spawn: () => void) {
     return this.s.atomic(() => {
       const x = this.sessions().find(x => x.id === id);
-      if (!x || x.status !== "paused" || x.pid !== null || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
+      if (!x || x.status !== "paused" || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
       if (!receipt?.trim() || this.s.get("paused") !== false) blocked("receipt and unpaused factory required");
       const cleanup = this.s.db.query("SELECT data FROM events WHERE id=?").get(`cleanup:${id}`) as {data:string}|null;
       if (!cleanup || (this.s.get<{verified:boolean}>(`cleanup-evidence:${id}`) ?? JSON.parse(cleanup.data)).verified !== true) blocked("verified cleanup required");
       const t = JSON.parse(x.brief) as Ticket;
-      const tokens = this.s.get<number>("token-calibration:codex");
+      const waiting = this.s.get<{receipt:string;tokens:number}>(`continuation-slot-wait:${id}`);
+      const tokens = waiting?.receipt===receipt ? waiting.tokens : this.s.get<number>("token-calibration:codex");
       if (!tokens || tokens <= t.estimateTokens || x.actual_tokens >= 2*tokens || x.actual_seconds >= 2*t.estimateSeconds) blocked("bounded calibrated extension required");
+      const slots=this.slots();
+      if(!slots.dormant.has(id))blocked("stopped paused Codex custody required");
+      if(!slots.free) {
+        this.s.set(`continuation-slot-wait:${id}`,{receipt,tokens});
+        this.s.event(`continuation-slot-wait:${id}:${tokens}:${createHash('sha256').update(receipt).digest('hex')}`,"session-continuation-wait",{id,receipt,tokens},"Retain approved extension and custody; retry normal slot admission on a later tick");
+        return;
+      }
       const attempt = randomUUID();
+      this.s.set(`continuation-slot-wait:${id}`,null);
       this.s.set(`token-extension:${id}`, tokens);
       const previousStop=this.s.get(`stop:${id}`);
       this.s.set(`stop:${id}`,null);
       this.s.set(`active-clock:${id}`,{at:Date.now(),seconds:x.actual_seconds});
       this.s.set(`continuation:${id}`, {attempt, native:x.native_id, receipt});
-      this.s.db.query("UPDATE sessions SET status='starting' WHERE id=?").run(id);
+      this.s.db.query("UPDATE sessions SET status='starting',pid=NULL WHERE id=?").run(id);
       this.s.event(attempt, "session-continuation", {id, receipt, tokens, previous:x, previousStop}, "Stop session; preserve original baseline, accounting, native ID, claims and debits");
       spawn();
       return attempt;
     });
+  }
+  // The scheduled browser/continuation reconciliation supplies the normal
+  // supervisor spawn. A queued extension never replaces its frozen approval.
+  resumeContinuations(spawn:(id:string)=>void) {
+    for(const row of this.s.db.query("SELECT key FROM kv WHERE key LIKE 'continuation-slot-wait:%' AND value!='null'").all() as {key:string}[]) {
+      const id=row.key.slice('continuation-slot-wait:'.length);
+      try {
+        this.s.atomic(()=>{
+          const waiting=this.s.get<{receipt:string}>(row.key);
+          if(waiting)this.continueSession(id,waiting.receipt,()=>spawn(id));
+        });
+      }
+      catch(error) {this.s.event(`continuation-slot-refused:${id}:${String(error)}`,"session-continuation-refused",{id,error:String(error)},"Retain waiting approval; reconcile custody and normal continuation gates");}
+    }
   }
   archive(id: string, receipt: string, actor: string) {
     if (actor !== "owner") blocked("owner only");

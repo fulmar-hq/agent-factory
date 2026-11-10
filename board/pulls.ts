@@ -1,3 +1,4 @@
+import {githubPages} from '../adapters/github-pages';
 import { command } from "../adapters/github";
 import type { Config } from "../launcher/config";
 import type { Store } from "../tracking/store";
@@ -18,7 +19,6 @@ export function pullState(pr: BoardPull) {
 }
 export function recordPulls(s:Store,repo:string,pulls:BoardPull[],now:number) {
   if(!Array.isArray(pulls) || pulls.some(pr=>!pr || !Number.isInteger(pr.number) || !pr.url?.startsWith(`https://github.com/${repo}/pull/`)))throw Error('invalid board PR evidence');
-  if(pulls.length>=100)throw Error('board PR reconciliation truncated');
   s.atomic(()=>{
     s.set(`board-pulls:${repo}`,{at:now,pulls} satisfies PullSnapshot);
     for(const pr of pulls)s.set(`board-pr:${pr.url}`,{at:now,head:pr.headRefOid,...pullState(pr)});
@@ -30,7 +30,7 @@ export async function refreshPulls(s:Store,c:Config,now=Date.now(),execute=comma
     const key=`board-pulls:${project.repo}`, prior=s.get<PullSnapshot>(key);
     if(prior && prior.at<=now && now-prior.at<60000)return;
     try {
-      const pulls=JSON.parse(await execute(['gh','pr','list','--repo',project.repo,'--state','open','--limit','100','--json',pullFields])) as BoardPull[];
+      const pulls=await githubPages(project.repo,'pullRequests',execute) as BoardPull[];
       recordPulls(s,project.repo,pulls,now);
     } catch {
       if(prior)s.set(key,{...prior,error:true});

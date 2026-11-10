@@ -1,3 +1,4 @@
+import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
@@ -262,7 +263,7 @@ test("each GitHub reconciliation refreshes closures and includes closedAt", asyn
     };
     await reconcile(s, e.c, now, async (args) => {
       expect(args.join(",")).toContain("closedAt");
-      return JSON.stringify([closed]);
+      return githubPage('issues',[closed]);
     });
     const m = boardModel(e, {}, now);
     expect(m.upNext).toHaveLength(0);
@@ -288,7 +289,7 @@ test("waiting uses the tick’s read-only PR evidence and never invents passing 
       url = "https://github.com/example/demo/pull/2";
     s.event("published", "launcher-publish", { id, url }, "retain", now);
     const execute = async () =>
-      JSON.stringify([
+      githubPage('pullRequests',[
         {
           number: 2,
           url,
