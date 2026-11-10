@@ -109,6 +109,7 @@ export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS
       if(!/^[A-Za-z0-9_./]+$/.test(arg))refuse();names.push(arg);
     }
     if(!discovery&&names.length)continue;
+    try{start=realpathSync(start);}catch{refuse();}
     const tail=relative(start,target);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
   }
   // Other test runners are unresolved collection unless explicitly scoped to files.
