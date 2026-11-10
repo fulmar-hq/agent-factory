@@ -26,6 +26,7 @@ export function nativeChallenge(c:Challenge,home:string):boolean {
 // challenger supplies evidence. No product release, policy or provider effects.
 export async function maintainFactory(s:Store,port:MaintenancePort) {
  const result:{pr:number;state:string;reason?:string;head?:string}[]=[];
+ const interrupted=()=>{const lease=s.get<{id:string}>('launcher-maintenance-lease');return !!lease&&s.get<{id:string}>('factory-maintenance-stop')?.id===lease.id;};
  const record=(p:number,state:string,reason?:string,head?:string)=>{const r={pr:p,state,reason,head};result.push(r);s.event(`factory-maintenance:${p}:${state}:${head??''}:${crypto.randomUUID()}`,'factory-maintenance',r,'Retain PRs and branches; undo installed source with a signed revert');};
  // First adopt previously merged source, including a merge whose install was
  // interrupted. Installation never resets, cleans or stashes local changes.
@@ -40,6 +41,7 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
  if(pending){try{const approval=s.get<{state:string;tree:string}>(`factory-merge-outcome:${pending.head}`);if(approval?.state!=='verified'||approval.tree!==pending.tree||!await port.signed(pending.head,pending.tree))throw Error('pending install has no verified exact-tree approval');await port.install(pending.head);s.set('factory-install-pending',null);}catch(error){record(0,'install-blocked',String(error));return result;}}
  for(const initial of (await port.pulls()).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.number-b.number)) {
   try {
+   if(interrupted())return result;
    if(initial.draft){record(initial.number,'draft');continue;}
    const p=await port.pull(initial.number);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
    if(p.mergeState==='BEHIND'&&p.verify&&port.update){
@@ -49,10 +51,11 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
     s.set(key,{pr:p.number,head:p.head,at:Date.now()});await port.update(p);record(p.number,'branch-update-requested',undefined,p.head);return result;
    }
    if(p.mergeState!=='CLEAN'||!p.verify){record(p.number,'checks-or-base-blocked',p.mergeState,p.head);continue;}
-   const c=await port.challenge(p);if(!acceptedChallenge(c,p)||!port.verifyChallenge(c)){record(p.number,'challenge-needed',undefined,p.head);continue;}
+   const c=await port.challenge(p);if(interrupted())return result;if(!acceptedChallenge(c,p)||!port.verifyChallenge(c)){record(p.number,'challenge-needed',undefined,p.head);continue;}
    if(!await port.signed(p.head,p.tree))throw Error('head signature/tree unverified');
    const fresh=await port.pull(p.number);
    if(fresh.head!==p.head||fresh.tree!==p.tree||fresh.state!=='OPEN'||!fresh.verify||fresh.mergeState!=='CLEAN')throw Error('head/check/base changed before merge');
+   if(interrupted())return result;
    const intent={pr:p.number,head:p.head,tree:p.tree};s.set('factory-merge-intent',intent);
    s.event(`factory-merge-intent:${p.number}:${p.head}`,'factory-merge-intent',intent,'Reconcile this exact PR after an uncertain response; never re-merge or substitute remote main');
    const merged=await port.merge(p.number,p.head);await approve(intent,merged);
