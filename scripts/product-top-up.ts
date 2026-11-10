@@ -25,6 +25,7 @@ export async function productTopUp(){
  if(policy.refill?.rule!=='product tasks only from the real backlog; never review or acceptance tickets')throw Error('reviewed product-only refill policy must be installed');
  const c=await configAt(join(root,'config.yaml')),s=new Store(join(root,'controller.sqlite')),now=Date.now();
  try{
+ if(!('refill' in c)||!c.refill)throw Error('installed source does not enable product-only refill');
  if(c.autonomy?.intake_mode!=='build')throw Error('product top-up requires build intake policy');
  if(s.get('paused')!==false)throw Error('factory paused');
  const provider=c.owners[c.autonomy.intake_owner]?.harness;
