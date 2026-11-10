@@ -1,5 +1,5 @@
+import { githubPages } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
-import { z } from "zod";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
 export type Issue = {
@@ -8,18 +8,10 @@ export type Issue = {
   body: string;
   url: string;
   updatedAt: string;
+  closedAt?: string | null;
   state: string;
   labels: { name: string }[];
 };
-const IssueSnapshotSchema = z.object({
-  number: z.number().int().positive().safe(),
-  title: z.string(),
-  body: z.string(),
-  url: z.string(),
-  updatedAt: z.string(),
-  state: z.enum(["OPEN", "CLOSED"]),
-  labels: z.array(z.object({ name: z.string() })),
-});
 export async function command(args: string[], cwd?: string, timeoutMs=30000) {
   const p = Bun.spawn(args, {
     cwd,
@@ -88,31 +80,10 @@ export async function reconcile(
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
-      const issues: unknown = JSON.parse(
-        await execute([
-          "gh",
-          "issue",
-          "list",
-          "--repo",
-          project.repo,
-          "--state",
-          "all",
-          "--limit",
-          "1000",
-          "--json",
-          "number,title,body,url,updatedAt,state,labels",
-        ],undefined,120000),
-      );
-      if (!Array.isArray(issues)) throw Error("GitHub issue snapshot must be an array");
-      const repositoryReady: Ticket[] = [];
+      const issues = await githubPages(project.repo,'issues',execute) as Issue[];
+      const repositoryReady:Ticket[]=[];
       s.atomic(() => {
-        const identities = new Set<number>();
-        for (const row of issues) {
-          // Source corruption must roll back the repository, not become an intake refusal.
-          IssueSnapshotSchema.parse(row);
-          const i = row as Issue;
-          if (identities.has(i.number)) throw Error("duplicate GitHub issue identity");
-          identities.add(i.number);
+        for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
           try {
@@ -137,14 +108,14 @@ export async function reconcile(
         s.set(`github:${project.repo}`, {
           observedAt: now,
           count: issues.length,
-          truncated: issues.length === 1000,
+          truncated: false,
           error: null,
         });
       });
-      // Refuse admissions if the bounded backfill might be incomplete.
-      if (issues.length < 1000) ready.push(...repositoryReady);
+      ready.push(...repositoryReady);
     } catch (e) {
-      s.set(`github:${project.repo}`, { error: String(e), observedAt: now });
+      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now });}
+      catch{console.error(`GitHub failure receipt unavailable for ${project.repo}; candidates remain refused.`);}
     }
   }
   return ready;

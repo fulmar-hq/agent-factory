@@ -13,7 +13,7 @@ function issue(repo = failingRepo, number = 1): Issue {
     body: `\`\`\`factory\n${JSON.stringify(ticket(number))}\n\`\`\``,
     url: `https://github.com/${repo}/issues/${number}`,
     updatedAt: "2026-11-07T23:00:00Z",
-    state: "OPEN",
+    state: "OPEN",closedAt:null,
     labels: ["state:ready", "kind:fix", "area:demo"].map(name => ({ name })),
   };
   i.labels.push({ name: intakeLabel(repo, i) });
@@ -31,14 +31,13 @@ function projects(healthyFirst = false) {
 
 // Every readback is synthetic; no subprocess or GitHub access is used.
 function readback(failing: unknown) {
-  return async (args: string[]) => {
-    expect(args.slice(0, 3)).toEqual(["gh", "issue", "list"]);
-    expect(args.slice(args.indexOf("--limit"), args.indexOf("--limit") + 2))
-      .toEqual(["--limit", "1000"]);
-    const repo = args[args.indexOf("--repo") + 1];
-    expect([failingRepo, healthyRepo]).toContain(repo);
-    return JSON.stringify(repo === failingRepo ? failing : [issue(healthyRepo)]);
-  };
+ return async(args:string[])=>{
+  expect(args.slice(0,3)).toEqual(['gh','api','graphql']);const repo=args.find(a=>a.startsWith('owner='))!.slice(6)+'/'+args.find(a=>a.startsWith('name='))!.slice(5);expect([failingRepo,healthyRepo]).toContain(repo);
+  const rows=repo===failingRepo?failing:[issue(healthyRepo)];if(!Array.isArray(rows))return JSON.stringify(rows);
+  const start=Number(args.find(a=>a.startsWith('endCursor='))?.slice(10)??0),next=start+100,more=next<rows.length;
+  const nodes=rows.slice(start,next).map(row=>row&&typeof row==='object'?{...row,labels:Array.isArray(row.labels)?{nodes:row.labels,pageInfo:{hasNextPage:false,endCursor:null}}:row.labels}:row);
+  return JSON.stringify({data:{repository:{issues:{totalCount:rows.length,nodes,pageInfo:{hasNextPage:more,endCursor:more?String(next):null}}}}});
+ };
 }
 
 async function assertRepositoryFailure(
@@ -144,16 +143,21 @@ test("exact digest and admission gates remain per-issue refusals", async () => {
   }
 });
 
-test("1000-row snapshot commits but refuses all admissions from that repository", async () => {
+test("complete 1000-row cursor chain commits without restoring the removed admission cap", async () => {
   const s = new Store(":memory:");
   try {
     const rows = Array.from({ length: 1000 }, (_, n) => issue(failingRepo, n + 1));
     const ready = await reconcile(s, projects(), now, readback(rows));
-    expect(ready.map(t => t.repo)).toEqual([healthyRepo]);
+    expect(ready).toHaveLength(1001);
     expect(s.rows("tickets")).toHaveLength(1001);
     expect(s.get(`github:${failingRepo}`))
-      .toEqual({ observedAt: now, count: 1000, truncated: true, error: null });
+      .toEqual({ observedAt: now, count: 1000, truncated: false, error: null });
   } finally {
     s.close();
   }
+});
+
+
+test('a failed diagnostic write cannot abort healthy independent repositories',async()=>{
+ const s=new Store(':memory:');try{s.db.exec("CREATE TRIGGER failed_diagnostic BEFORE INSERT ON kv WHEN NEW.key='github:example/demo' BEGIN SELECT RAISE(ABORT,'fictional unavailable diagnostic'); END;");const ready=await reconcile(s,projects(),now,readback(null));expect(ready.map(t=>t.repo)).toEqual([healthyRepo]);expect(s.rows('tickets')).toHaveLength(1);}finally{s.close();}
 });
