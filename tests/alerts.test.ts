@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { qualificationAlerts } from "../launcher/alerts";
+import { qualificationAlerts,watchdogAlert } from "../launcher/alerts";
 import { Store } from "../tracking/store";
 import { qualification } from "./fixtures";
 
@@ -33,4 +33,19 @@ test("expiry alerts use one retained bridge line per provider/expiry, including 
     qualificationAlerts(s,{claude:{...q,expiresAt:now-1}},now,path);
     expect(db.query("SELECT * FROM messages").all()).toHaveLength(3);
   } finally {s.close();db.close();rmSync(dir,{recursive:true});}
+});
+
+
+test("watchdog bridges one message per incident and silently closes",()=>{
+ const dir=mkdtempSync(join(tmpdir(),"factory-stall-alert-")),path=join(dir,"mail.sqlite"),db=new Database(path),s=new Store(":memory:");
+ db.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY,send_id TEXT,created_at INTEGER,sender TEXT,sender_app TEXT,sender_ref TEXT,recipient TEXT,recipient_app TEXT,kind TEXT,reply TEXT,summary TEXT,body TEXT,thread_id TEXT,depth INTEGER,hash TEXT,state TEXT,wake_state TEXT)`);
+ try{
+  s.set('watchdog-stall',{id:'fixture-stall',state:'open',summary:'Synthetic stall evidence'});
+  watchdogAlert(s,1,path);watchdogAlert(s,2,path);
+  expect(db.query('SELECT * FROM messages').all()).toHaveLength(1);
+  s.set('alert:fixture-stall',null);watchdogAlert(s,3,path);
+  expect(db.query('SELECT * FROM messages').all()).toHaveLength(1);
+  s.set('watchdog-stall',{id:'fixture-stall',state:'resolved',summary:'Synthetic stall evidence'});watchdogAlert(s,4,path);
+  expect(db.query('SELECT * FROM messages').all()).toHaveLength(1);
+ }finally{s.close();db.close();rmSync(dir,{recursive:true});}
 });

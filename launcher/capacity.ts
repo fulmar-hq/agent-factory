@@ -1,6 +1,45 @@
 import type {Config} from './config';
 import type {Store} from '../tracking/store';
 import {command} from '../adapters/github';
+import {processIdentity} from './process';
+import type {Session} from './engine';
+export type SlotProcessEvidence = {
+ identity: typeof processIdentity;
+ absent: (pid:number)=>boolean;
+};
+const processEvidence:SlotProcessEvidence = {
+ identity:processIdentity,
+ absent(pid) {
+  try {process.kill(pid,0);return false;}
+  catch(error) {return (error as NodeJS.ErrnoException).code==='ESRCH';}
+ },
+};
+// Custody is independent of local builder occupancy. Call inside the same
+// immediate transaction as admission/start; never cache this observation.
+export function builderSlots(s:Store,c:Config,evidence:SlotProcessEvidence=processEvidence) {
+ const dormant=new Set<string>();
+ const occupied=(s.rows('sessions') as Session[]).filter(x=>{
+  if(['finished','archived'].includes(x.status))return false;
+  if(!['paused','waiting-browser','waiting-person','waiting-question','question'].includes(x.status))return true;
+  try {
+   const cleanup=s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`);
+   const legacy=!cleanup ? s.db.query('SELECT data FROM events WHERE id=?').get(`cleanup:${x.id}`) as {data:string}|null : null;
+   if((cleanup ?? (legacy ? JSON.parse(legacy.data) as {verified?:boolean} : null))?.verified!==true)return true;
+   if(x.pid!==null) {
+    if(!Number.isInteger(x.pid) || x.pid<=0)return true;
+    const current=evidence.identity(x.pid),recorded=s.get<string>(`supervisor:${x.id}`);
+    // A null identity alone is not positive death evidence (e.g. denied ps).
+    if(current===null) {
+     if(evidence.absent(x.pid)!==true)return true;
+    }else if(!current.trim() || typeof recorded!=='string' || !recorded.trim() || current===recorded)return true;
+   }
+  }catch{return true;}
+  dormant.add(x.id);return false;
+ });
+ const challenge=s.get<{state:string}>("factory-challenge-slot");
+ const max=slotLimit(s,c),used=occupied.length+(challenge&&challenge.state!=="released"?1:0);
+ return {used,max,free:Math.max(0,max-used),occupied,dormant};
+}
 export type Capacity = {slots:number; at:number; healthySince:number|null; pressure:'normal'|'warning'|'critical'|'unknown'; busy:number; failureRate:number; reason:string};
 export function slotLimit(s:Store,c:Config) {
  const p=c.capacity.controller;
