@@ -243,7 +243,9 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
     if (row.type === "response_item" && p?.type === "function_call_output") {
-      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); try{requireThat(!nativeFailure(JSON.parse(p.output)), "structured native tool failure");}catch(error){if(!(error instanceof SyntaxError))throw error;}
+      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); const payload=p.output.split(/^(?:Final output:|Output:)\s*$/m).at(-1)!.trim();
+      if(payload.startsWith('{')||payload.startsWith('['))requireThat(!nativeFailure(JSON.parse(payload)), "structured native tool failure");
+      else for(const line of payload.split('\n'))if(line.trimStart().startsWith('{')||line.trimStart().startsWith('['))requireThat(!nativeFailure(JSON.parse(line)), "framed structured native tool failure");
       requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
     }
   }
