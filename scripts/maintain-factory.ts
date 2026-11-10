@@ -11,17 +11,23 @@ import {maintainFactory,FactoryMergeRejected,nativeChallenge,factoryRepository,t
 const repo=resolve(import.meta.dir,'..');
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
 const git=(...args:string[])=>command(['git','-C',repo,...args]);
-async function pull(number:number):Promise<FactoryPull>{
+async function pull(number:number,s?:Store,fresh=true):Promise<FactoryPull>{
+ const key=`factory-pr-poll:${number}`,prior=s?.get<{at:number;pull:FactoryPull}>(key);
+ if(!fresh&&prior&&Date.now()-prior.at<600000&&(prior.pull.mergeState!=='CLEAN'||!prior.pull.verify))return prior.pull;
  const p=await api(`pulls/${number}`);
  if(p.base?.ref!=='main'||p.base.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('factory main PR required');
- const [commit,checks]=await Promise.all([api(`git/commits/${p.head.sha}`),api(`commits/${p.head.sha}/check-runs?per_page=100&filter=latest`)]);
+ const immutableKey=`factory-commit-tree:${p.head.sha}`;
+ let tree=s?.get<string>(immutableKey);
+ if(!tree){tree=(await api(`git/commits/${p.head.sha}`)).tree.sha as string;s?.set(immutableKey,tree);}
+ const checks=await api(`commits/${p.head.sha}/check-runs?per_page=100&filter=latest`);
  if(!Array.isArray(checks.check_runs)||checks.total_count!==checks.check_runs.length||checks.check_runs.length>=100)throw Error('required check inventory truncated');
  const verify=checks.check_runs.filter((r:{name:string;app?:{id:number}})=>r.name==='Verify'&&r.app?.id===15368).sort((a:{id:number},b:{id:number})=>b.id-a.id)[0];
- return {number:p.number,head:p.head.sha,tree:commit.tree.sha,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
+ const result={number:p.number,head:p.head.sha,tree:tree!,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
+ s?.set(key,{at:Date.now(),pull:result});return result;
 }
 export function maintenancePort(s:Store,runChallenge=runFactoryChallenge):MaintenancePort{let newChallenge=false;return {
  pulls:async()=>{const list=await api('pulls?state=open&sort=created&direction=asc&per_page=100');if(!Array.isArray(list)||list.length>=100)throw Error('factory PR inventory truncated');return list.filter(p=>p.base?.ref==='main'&&p.base?.repo?.full_name===factoryRepository&&p.head?.repo?.full_name===factoryRepository).map(p=>({number:p.number,head:p.head.sha,createdAt:p.created_at,draft:p.draft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
- pull,
+ pull:(number,fresh=true)=>pull(number,s,fresh),
  update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
  challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}if(!newChallenge&&!s.get(`factory-challenge:${p.number}:${p.head}`))return runChallenge(s,p,root,repo,()=>{newChallenge=true;});},
  verifyChallenge:c=>nativeChallenge(c,homedir()),

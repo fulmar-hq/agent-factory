@@ -10,7 +10,7 @@ export type FactoryPull={number:number;head:string;tree:string;createdAt:string;
 export type Challenge={pr:number;head:string;ok:boolean;native:{id:string;path:string;verified:boolean;models:string[];efforts:string[]};cleanup:{verified:boolean};review:{head:string;verdict:string;findings:unknown[]};workspace:string;startedAt:number};
 export interface MaintenancePort {
  pulls():Promise<FactoryPull[]>;
- pull(number:number):Promise<FactoryPull>;
+ pull(number:number,fresh?:boolean):Promise<FactoryPull>;
  update?(pull:FactoryPull):Promise<void>;
  challenge(pull:FactoryPull):Promise<Challenge|undefined>;
  verifyChallenge(challenge:Challenge):boolean;
@@ -46,7 +46,7 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
   try {
    if(interrupted())return result;
    if(initial.draft){record(initial.number,'draft');continue;}
-   const p=await port.pull(initial.number);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
+   const p=await port.pull(initial.number,false);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
    if(p.mergeState==='BEHIND'&&p.verify&&port.update){
     const key=`factory-branch-update:${p.number}:${p.head}`;
     if(s.get(key)){record(p.number,'branch-update-pending',undefined,p.head);continue;}

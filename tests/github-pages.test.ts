@@ -6,11 +6,16 @@ import {Store} from '../tracking/store';
 import {githubPage,config,ticket,now} from './fixtures';
 const issue=(number:number)=>({number,title:'Fictional work',body:'',url:`https://github.com/example/demo/issues/${number}`,updatedAt:'2026-11-10',state:'OPEN',labels:[] as {name:string}[]});
 const pr=(number:number)=>({number,title:'Fictional PR',url:`https://github.com/example/demo/pull/${number}`,headRefOid:'a'.repeat(40),reviews:[],statusCheckRollup:[]});
-test('more than 1000 historical issues do not suppress approved ready work',async()=>{
- const rows=Array.from({length:1001},(_,n)=>({...issue(n+1),state:'CLOSED'}));
- const ready={...issue(1002),body:'```factory\n'+JSON.stringify(ticket(1002))+'\n```',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:ready'}]};ready.labels.push({name:intakeLabel('example/demo',ready)});rows.push(ready);
- const s=new Store(':memory:');let n=0;
- try{const result=await reconcile(s,config(),now,async args=>{expect(args).toContain('graphql');if(n)expect(args).toContain(`endCursor=page-${n}`);const batch=rows.slice(n*100,++n*100);return githubPage('issues',batch,{total:rows.length,next:n*100<rows.length,cursor:`page-${n}`});});expect(result.map(t=>t.number)).toEqual([1002]);expect(s.get<any>('github:example/demo')).toMatchObject({count:1002,truncated:false});}finally{s.close();}
+const rest=(i:ReturnType<typeof issue>)=>({...i,state:i.state.toLowerCase(),html_url:i.url,updated_at:i.updatedAt,closed_at:null});
+test('scheduler reads only complete open REST inventory while retaining closed history',async()=>{
+ const ready={...issue(1002),body:'```factory\n'+JSON.stringify(ticket(1002))+'\n```',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:ready'}]};ready.labels.push({name:intakeLabel('example/demo',ready)});
+ const s=new Store(':memory:');let calls=0;
+ try{
+  const old=issue(1);s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run('example/demo#1',JSON.stringify(old),now-1);
+  const result=await reconcile(s,config(),now,async args=>{calls++;expect(args).toContain('--paginate');expect(args.at(-1)).toContain('state=open');return JSON.stringify([[rest(ready)]]);},'open');
+  expect(calls).toBe(1);expect(result.map(t=>t.number)).toEqual([1002]);expect(s.get<any>('github:example/demo')).toMatchObject({count:1,truncated:false});
+  expect(JSON.parse((s.rows('tickets') as any[]).find(t=>t.id==='example/demo#1').snapshot).state).toBe('CLOSED');
+ }finally{s.close();}
 });
 test('owner reconciliation includes second PR page and deduplicates its review',async()=>{
  const s=new Store(':memory:');s.set('owner-github-primed:example/demo',true);
@@ -19,8 +24,8 @@ test('owner reconciliation includes second PR page and deduplicates its review',
 });
 test('late-page failure publishes neither partial tickets nor owner events',async()=>{
  const s=new Store(':memory:');s.set('owner-github-primed:example/demo',true);
- let n=0;const execute=async()=>{if(n++)throw Error('second page offline');return githubPage('issues',[issue(1)],{total:2,next:true,cursor:'next'});};
- try{expect(await reconcile(s,config(),now,execute)).toEqual([]);expect(s.rows('tickets')).toEqual([]);expect(s.get<any>('github:example/demo').error).toContain('offline');let p=0;await expect(githubWakes(s,config(),async()=>{if(p++)throw Error('offline');return githubPage('pullRequests',[pr(1)],{total:2,next:true,cursor:'next'});})).rejects.toThrow('offline');expect(pendingWakes(s)).toEqual([]);expect(s.get('board-pulls:example/demo')).toBeNull();}finally{s.close();}
+ const execute=async()=>{throw Error('second page offline');};
+ try{expect(await reconcile(s,config(),now,execute,'open')).toEqual([]);expect(s.rows('tickets')).toEqual([]);expect(s.get<any>('github:example/demo').error).toContain('offline');let p=0;await expect(githubWakes(s,config(),async()=>{if(p++)throw Error('offline');return githubPage('pullRequests',[pr(1)],{total:2,next:true,cursor:'next'});})).rejects.toThrow('offline');expect(pendingWakes(s)).toEqual([]);expect(s.get('board-pulls:example/demo')).toBeNull();}finally{s.close();}
 });
 test('malformed, repeated and missing cursors, GraphQL errors and changed totals refuse',async()=>{
  for(const scenario of ['missing','repeated','total','duplicate','errors','nested']){let n=0;await expect(githubPages('example/demo','issues',async()=>{n++;const raw=JSON.parse(githubPage('issues',[issue(scenario==='duplicate'?1:n)],{total:scenario==='total'?n+2:3,next:true,cursor:scenario==='missing'?null:'same'}));if(scenario==='errors')raw.errors=[{message:'partial'}];if(scenario==='nested')raw.data.repository.issues.nodes[0].labels.pageInfo.hasNextPage=true;return JSON.stringify(raw);})).rejects.toThrow();expect(n).toBeLessThanOrEqual(2);}
@@ -33,7 +38,7 @@ test('issue and PR URL identities must exactly match node number before any effe
   const execute=async()=>githubPage(kind,rows);
   try{
    await expect(githubPages('example/demo',kind,execute)).rejects.toThrow('identity mismatch');
-   if(kind==='issues'){expect(await reconcile(s,config(),now,execute)).toEqual([]);expect(s.rows('tickets')).toEqual([]);}
+   if(kind==='issues'){expect(await reconcile(s,config(),now,execute,'open')).toEqual([]);expect(s.rows('tickets')).toEqual([]);}
    else {await expect(githubWakes(s,config(),execute,now)).rejects.toThrow('identity mismatch');expect(s.get('board-pulls:example/demo')).toBeNull();expect(pendingWakes(s)).toEqual([]);}
   }finally{s.close();}
  }

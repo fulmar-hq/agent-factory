@@ -1,3 +1,5 @@
+import {githubContext} from '../adapters/github-budget';
+import {githubHealth} from './github-health';
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
 import {claimableReady,reviewPublished} from './queue';
@@ -62,7 +64,8 @@ export function spawnSupervisor(id: string, dir: string) {
   });
   p.unref();
 }
-export async function tick(dir = root) {
+export async function tick(dir=root){return githubContext.run(dir,()=>tickOnce(dir));}
+async function tickOnce(dir:string) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite"));
   try {
@@ -70,11 +73,12 @@ export async function tick(dir = root) {
       now = Date.now();
     observeDisk(s,diskReading(dir,now));
     diskCapacityAlert(s,now);
-    s.set("heartbeat", { at: now, status: "reconciling" });
+    const priorHeartbeat=s.get<{ready?:number|null;lastKnownReady?:number|null}>('heartbeat');
+    s.set("heartbeat", { at: now, status: "reconciling",lastKnownReady:priorHeartbeat?.ready??priorHeartbeat?.lastKnownReady??null });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     if(!healthOwnsAlerts(dir,now))qualificationAlerts(s, qualifications, now);
     localWakes(s,c,[],qualifications,now);
-    recoverWorkers(e,now);
+
     const versions: Record<string, string> = { bun: Bun.version };
     for (const cmd of ["codex", "claude", "gh"])
       try {
@@ -110,16 +114,23 @@ export async function tick(dir = root) {
     expireDecisions(s,now);
     failures(e,now);
     let autoResolved = resolveQuestions(e,now);
-    let observed = await reconcile(s,c,now);
-    if(await reviewPublished(e))observed=await reconcile(s,c,now);
+    let observed = await reconcile(s,c,now,command,'open');
+    let health=githubHealth(s,c,now);
+    if(health){s.set('heartbeat',health);return health;}
+    recoverWorkers(e,now);
+    if(await reviewPublished(e))observed=await reconcile(s,c,now,command,'open');
+    health=githubHealth(s,c,Date.now());
+    if(health){s.set('heartbeat',health);return health;}
     let ready = claimableReady(e,observed);
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
-      ready=claimableReady(e,await reconcile(s,c,now));
+      ready=claimableReady(e,await reconcile(s,c,now,command,'open'));
       const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
-      if(count)ready=claimableReady(e,await reconcile(s,c,now));
+      if(count)ready=claimableReady(e,await reconcile(s,c,now,command,'open'));
       return count;
     }) ?? 0 : 0;
+    health=githubHealth(s,c,Date.now());
+    if(health){s.set('heartbeat',health);return health;}
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
@@ -163,7 +174,7 @@ export async function tick(dir = root) {
     await autonomyEffects(s,async()=>supply(e,ready,Date.now(),{claimed,refusals}));
     if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
     autoResolved += resolveQuestions(e);
-    const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
+    const heartbeat = { at: Date.now(), status: ownerReconciled ? "ok" : "degraded", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
     observeClaimProgress(e,heartbeat);
     watchdogAlert(s,heartbeat.at);
@@ -175,7 +186,7 @@ export async function tick(dir = root) {
   }
 }
 // launchd routes stdout to tick.log; exactly one summary for success or error.
-export async function tickSummary(run: () => Promise<{ at: number; status: string; ready: number; paused?: boolean; claimed?: number; refusals?: { ticket: string; reason: string }[] }> = () => tick(), emit = console.info) {
+export async function tickSummary(run: () => Promise<{ at: number; status: string; ready: number|null; paused?: boolean; claimed?: number; refusals?: { ticket: string; reason: string }[] }> = () => tick(), emit = console.info) {
   try {
     const result = await run();
     emit(JSON.stringify(result));

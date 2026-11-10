@@ -19,14 +19,14 @@ const pullFields = `number title url headRefOid headRefName reviewDecision
 export async function githubPages(repo:string,kind:'issues'|'pullRequests',execute=command) {
  if(!/^[\w.-]+\/[\w.-]+$/.test(repo))throw Error('invalid repository');
  const [owner,name]=repo.split('/');
- const schema=z.object({data:z.object({repository:z.object({[kind]:z.object({totalCount:z.number().int().nonnegative(),nodes:z.array(kind==='issues'?issue:pull),pageInfo})})}),errors:z.unknown().optional()});
- const query=`query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){${kind}(first:100,after:$endCursor${kind==='pullRequests'?',states:OPEN':''},orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{${kind==='issues'?issueFields:pullFields}} pageInfo{hasNextPage endCursor}}}}`;
+ const schema=z.object({data:z.object({rateLimit:z.object({cost:z.number(),remaining:z.number(),resetAt:z.string()}).optional(),repository:z.object({[kind]:z.object({totalCount:z.number().int().nonnegative(),nodes:z.array(kind==='issues'?issue:pull),pageInfo})})}),errors:z.unknown().optional()});
+ const query=`query($owner:String!,$name:String!,$endCursor:String){rateLimit{cost remaining resetAt} repository(owner:$owner,name:$name){${kind}(first:100,after:$endCursor${kind==='pullRequests'?',states:OPEN':''},orderBy:{field:CREATED_AT,direction:DESC}){totalCount nodes{${kind==='issues'?issueFields:pullFields}} pageInfo{hasNextPage endCursor}}}}`;
  let cursor:string|undefined,total:number|undefined;
  const seen=new Set<string>(),numbers=new Set<number>(),rows:unknown[]=[];
  const deadline=Date.now()+120000;
  for(;;) {
   if(Date.now()>=deadline)throw Error('GitHub pagination deadline exceeded');
-  const raw=schema.parse(JSON.parse(await execute(['gh','api','graphql','-f',`query=${query}`,'-F',`owner=${owner}`,'-F',`name=${name}`,...(cursor?['-F',`endCursor=${cursor}`]:[])],undefined,Math.max(1,deadline-Date.now()))));
+  const raw=schema.parse(JSON.parse(await execute(['gh','api','graphql','--cache','10m','-f',`query=${query}`,'-F',`owner=${owner}`,'-F',`name=${name}`,...(cursor?['-F',`endCursor=${cursor}`]:[])],undefined,Math.max(1,deadline-Date.now()))));
   if(raw.errors!==undefined)throw Error('GitHub pagination returned errors');
   const page=raw.data.repository[kind];
   if(total!==undefined && total!==page.totalCount)throw Error('GitHub pagination total changed');
@@ -52,4 +52,17 @@ export async function githubPages(repo:string,kind:'issues'|'pullRequests',execu
   if(!page.nodes.length || !next || seen.has(next))throw Error('GitHub pagination cursor stalled');
   seen.add(next);cursor=next;
  }
+}
+
+// Scheduling needs open issues, not thousands of closed bodies/label connections.
+// gh follows REST Link headers; a late-page failure rejects the entire command.
+export async function openIssuePages(repo:string,execute=command) {
+ if(!/^[\w.-]+\/[\w.-]+$/.test(repo))throw Error('invalid repository');
+ const pages=z.array(z.array(z.object({number:z.number().int().positive(),title:z.string(),body:z.string().nullable(),html_url:z.string(),updated_at:z.string(),closed_at:z.string().nullable(),state:z.enum(['open','closed']),labels:z.array(z.object({name:z.string()})),pull_request:z.unknown().optional()}))).parse(JSON.parse(await execute(['gh','api','--paginate','--slurp',`repos/${repo}/issues?state=open&per_page=100`],undefined,120000)));
+ if(!pages.length || pages.some((p,n)=>p.length>100 || n<pages.length-1&&p.length!==100))throw Error('GitHub REST pagination malformed');
+ const seen=new Set<number>();
+ return pages.flatMap(page=>page.filter(i=>!i.pull_request).map(i=>{
+  if(seen.has(i.number)||i.html_url!==`https://github.com/${repo}/issues/${i.number}`||i.state!=='open')throw Error('GitHub REST issue identity mismatch');seen.add(i.number);
+  return {number:i.number,title:i.title,body:i.body??'',url:i.html_url,updatedAt:i.updated_at,closedAt:i.closed_at,state:'OPEN',labels:i.labels};
+ }));
 }

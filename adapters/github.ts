@@ -1,4 +1,5 @@
-import { githubPages } from './github-pages';
+import {githubBudget,GitHubUnavailable,retryAtFor,recordGithubHttp} from './github-budget';
+import { githubPages,openIssuePages } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
@@ -12,10 +13,10 @@ export type Issue = {
   state: string;
   labels: { name: string }[];
 };
-export async function command(args: string[], cwd?: string, timeoutMs=30000) {
+async function rawCommand(args: string[], cwd?: string, timeoutMs=30000) {
   const p = Bun.spawn(args, {
     cwd,
-    env: process.env,
+    env: args[0]==='gh' ? {...process.env,GH_DEBUG:"api"} : process.env,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
@@ -28,10 +29,26 @@ export async function command(args: string[], cwd?: string, timeoutMs=30000) {
       new Response(p.stderr).text(),
       p.exited,
     ]);
-    if (code !== 0) throw Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${err.slice(0, 500)}`);
+    if(args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??'') && !args.includes('rate_limit'))recordGithubHttp(err,out);
+    const diagnostic=args[0]==='gh' ? err.split('\n').filter(line=>/^(?:gh: |GraphQL: |error: |fatal: |Post |Get |HTTP )/.test(line)).slice(-3).join('\n') || 'GitHub command failed; raw debug omitted' : err;
+    if (code !== 0) throw Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);
     return out;
   } finally {
     clearTimeout(timer);
+  }
+}
+export async function command(args:string[],cwd?:string,timeoutMs=30000) {
+  const api=args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??'') && !args.includes('rate_limit');
+  if(api)githubBudget('before',args);
+  try{return await rawCommand(args,cwd,timeoutMs);}
+  catch(error){
+    if(api && /rate limit|timed out|timeout|connection|network|resolve host|TLS handshake|EOF|HTTP 50[234]|context deadline|temporary failure/i.test(String(error))){
+      let resets:Parameters<typeof retryAtFor>[2];
+      if(/rate limit/i.test(String(error)))try{resets=JSON.parse(await rawCommand(['gh','api','rate_limit'],undefined,10000));}catch{}
+      const retryAt=retryAtFor(error,Date.now(),resets);githubBudget('failure',args,error,retryAt);
+      throw new GitHubUnavailable(String(error),retryAt);
+    }
+    throw error;
   }
 }
 export function intakeLabel(repo: string, i: Issue): string {
@@ -76,12 +93,18 @@ export async function reconcile(
   c: Config,
   now = Date.now(),
   execute = command,
+  scope:'all'|'open'='all',
 ) {
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
-      const issues = await githubPages(project.repo,'issues',execute) as Issue[];
+      const issues = await (scope==='open'?openIssuePages(project.repo,execute):githubPages(project.repo,'issues',execute)) as Issue[];
       s.atomic(() => {
+        const open=new Set(issues.map(i=>i.number));
+        for(const row of (scope==='open'?s.db.query('SELECT id,snapshot FROM tickets WHERE id LIKE ?').all(project.repo+'#%'):[]) as {id:string;snapshot:string}[]){
+          const old=JSON.parse(row.snapshot) as Issue;
+          if(old.state==='OPEN'&&!open.has(old.number))s.db.query("UPDATE tickets SET snapshot=?,observed=?,decision='closed in complete open inventory' WHERE id=?").run(JSON.stringify({...old,state:'CLOSED'}),now,row.id);
+        }
         for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
@@ -112,7 +135,7 @@ export async function reconcile(
         });
       });
     } catch (e) {
-      s.set(`github:${project.repo}`, { error: String(e), observedAt: now });
+      s.set(`github:${project.repo}`, { error: String(e), observedAt: now, retryAt:e instanceof GitHubUnavailable?e.retryAt:now+60000 });
     }
   }
   return ready;
