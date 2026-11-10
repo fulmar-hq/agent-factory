@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DecisionService, type DecisionDefinition } from "../tracking/decisions";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import { TestEngine as Engine } from "./fixtures";
 import { config, ticket, admission } from "./fixtures";
 
 const now = 1_800_000_000_000;
