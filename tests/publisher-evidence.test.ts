@@ -18,3 +18,16 @@ test('publisher expiry evidence stays bound to current Codex records across an u
  const head='a'.repeat(40),tree='b'.repeat(40),authority={version:2,expiresAt:now+3600000,evidence:report},readback={publisherExpiresAt:authority.expiresAt,publisherProof:{version:1,boundary,startedAt:now-1000,completedAt:now,authorityExpiresAt:now+1000,head,tree},pub:{head,tree},tested:{code:0,tree},verification:{verified:true,reason:'valid'}};writeFileSync(join(run,'publisher-readback.json'),JSON.stringify(readback));
  expect(publisherQualificationVerified(dir,authority,JSON.stringify(q),boundary)).toBe(true);q.claude={preserved:'legitimate update'};expect(publisherQualificationVerified(dir,authority,JSON.stringify(q),boundary)).toBe(true);readback.verification.verified=false;writeFileSync(join(run,'publisher-readback.json'),JSON.stringify(readback));expect(publisherQualificationVerified(dir,authority,JSON.stringify(q),boundary)).toBe(false);
 });
+
+
+test('changing only the trusted dependency helper invalidates publisher proof',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'publisher-helper-boundary-')),source=join(dir,'source'),helper='scripts/cache-retention.py';
+ for(const path of publisherSources){mkdirSync(dirname(join(source,path)),{recursive:true});writeFileSync(join(source,path),'fictional original code');}writeFileSync(join(dir,'config.yaml'),'fictional policy');
+ const before=publisherBoundary(source,dir,'fictional Git'),now=Date.now(),pub={id:'fictional',repo:'example/demo',head:'a'.repeat(40),tree:'b'.repeat(40),executionReceipt:join(dir,'runs/delivery/fictional/initial/publisher/implementation.json'),testedTreeReceipt:''};
+ mkdirSync(dirname(pub.executionReceipt),{recursive:true});writeFileSync(pub.executionReceipt,JSON.stringify({version:1,boundary:before,startedAt:now-1000,completedAt:now,authorityExpiresAt:now+1000,head:pub.head,tree:pub.tree}));
+ expect(readPublisherProof(dir,pub,before,now).tree).toBe(pub.tree);
+ writeFileSync(join(source,helper),'fictional changed dependency helper');
+ const after=publisherBoundary(source,dir,'fictional Git');expect(after.hashes[helper]).not.toBe(before.hashes[helper]);
+ expect(Object.fromEntries(Object.entries(after.hashes).filter(([path])=>path!==helper))).toEqual(Object.fromEntries(Object.entries(before.hashes).filter(([path])=>path!==helper)));
+ expect(()=>readPublisherProof(dir,pub,after,now)).toThrow('current implementation');
+});
