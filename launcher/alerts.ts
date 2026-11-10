@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync,readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../tracking/store";
@@ -35,3 +35,7 @@ export function qualificationAlerts(s: Store, qualifications: Record<string, unk
     }
   }
 }
+
+// Independent alarm owns overlapping notifications only while its completed
+// heartbeat remains fresh. Failed/stopped monitoring restores the legacy path.
+export function healthOwnsAlerts(dir:string,now:number){try{const value=JSON.parse(readFileSync(join(dir,'health','heartbeat.json'),'utf8'));return Number.isSafeInteger(value.at)&&value.at>=0&&value.at<=now&&now-value.at<=10*60000;}catch{return false;}}

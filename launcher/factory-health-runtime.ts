@@ -4,8 +4,9 @@ import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {z} from 'zod';
-import {configAt,QualificationSchema,BillingSchema} from './config';
-import {originalSessionExpiry} from './release-readiness';
+import {ConfigSchema,QualificationSchema,BillingSchema} from './config';
+import {releaseAvailable} from '../wallet/release';
+import {originalSessionExpiry,supportedReleaseHold} from './release-readiness';
 import {command} from '../adapters/github';
 import {diskReading} from './disk';
 import {processIdentity} from './process';
@@ -19,13 +20,12 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
  const snapshot:FactoryHealthSnapshot={version:1,capturedAt:now};
  const disk=diskReading(undefined,now);snapshot.disk='error' in disk?failed(now,disk.error):ok(now,'statfs Data volume', {usedFraction:disk.usedFraction});
  try{const entries=tail(join(dir,'tick.log')).filter(x=>Number.isSafeInteger(x.at)&&x.at<=now&&['ok','error'].includes(x.status));const latest=entries.at(-1),last=entries.findLast(x=>x.status==='ok');snapshot.tick=latest&&last?ok(now,'bounded tick.log readback',{lastSuccessAt:last.at,lastAttemptAt:latest.at,result:latest.status==='ok'?'success':'failure'}):failed(now,'successful tick log evidence unavailable');}catch(error){snapshot.tick=failed(now,String(error));}
- let inactive:number|null=null;let funds:{stop:boolean;committed:number;ceiling:number;hold:number;actualStop:number}|undefined;
+ let inactive:number|null=null;
  try {
-  const c=await configAt(join(dir,'config.yaml'));
+  const rawPolicy=Bun.YAML.parse(readFileSync(join(dir,'config.yaml'),'utf8')),c=ConfigSchema.parse(rawPolicy);
   const db=new Database(join(dir,'controller.sqlite'),{readonly:true,strict:true});
   try{db.exec('PRAGMA busy_timeout=1000; BEGIN');
-   const get=<T>(key:string):T|undefined=>{const row=db.query('SELECT value FROM kv WHERE key=?').get(key) as {value:string}|null;return row?JSON.parse(row.value):undefined;};
-   const committed=(db.query("SELECT COALESCE(SUM(cents),0) AS cents FROM debits WHERE source='aws' AND month=?").get(new Date(now).toISOString().slice(0,7)) as {cents:number}).cents;funds={stop:get('aws-stop-latched')===true,committed,ceiling:c.wallet.aws.ceiling_usd_month*100,hold:c.wallet.aws.hold_at_projected*100,actualStop:c.wallet.aws.stop_at_actual*100};
+   const get=<T>(key:string):T|null=>{const row=db.query('SELECT value FROM kv WHERE key=?').get(key) as {value:string}|null;return row?JSON.parse(row.value):null;};
    const paused=get<boolean>('paused');if(typeof paused!=='boolean')throw Error('controller pause state unavailable');
    const pause=db.query("SELECT id,at,data FROM events WHERE kind IN ('pause','resume') ORDER BY at DESC,rowid DESC LIMIT 1").get() as {id:string;at:number;data:string}|null;
    // Existing legacy pause events have no actor provenance. Never call them Vincent's.
@@ -57,6 +57,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     const refusal=/qualif/.test(reason)?'qualification':/usage/.test(reason)?'usage':/slot|capacity/.test(reason)?'capacity':/wallet|billing/.test(reason)?'billing':/approval|intake/.test(reason)?'approval':'unknown';
     snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims,running,inactiveSince:claims.length?null:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
    }
+   try{
    const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
    for(const role of Object.values(c.owners))required.set(`${role.harness}:${role.effort}`,role.model);
    for(const [key,value] of Object.entries(raw)){const provider=key.split(':')[0],q=QualificationSchema.safeParse(value);if(['codex','claude'].includes(provider!)&&q.success&&!required.has(`${provider}:${q.data.effort}`))required.set(`${provider}:${q.data.effort}`,q.data.model);}
@@ -69,20 +70,21 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     }
     return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&existsSync(q.data.evidence.split('#')[0]!),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
    snapshot.qualifications=ok(Date.now(),'protected qualification file and exact live renewal readback',{required:[...required.keys()],records});
+   }catch(error){snapshot.qualifications=failed(now,String(error));}
    const effects=db.query("SELECT key,value FROM kv WHERE key LIKE 'executor:%' LIMIT 10001").all() as {key:string;value:string}[];
    if(effects.length>10000)throw Error('release inventory truncated');
    const windows=effects.flatMap(row=>{const m=row.key.match(/^executor:(\d{4}-\d{2}-\d{2}):(qa|promote)$/);if(!m)return [];const e=JSON.parse(row.value),prefix=row.key+':';const events=db.query("SELECT at,data FROM events WHERE kind='release-executor' AND id LIKE ? ORDER BY at").all(prefix+'%') as {at:number;data:string}[];
     const started=events.find(r=>JSON.parse(r.data).kind===`${m[2]}:started`),completed=events.findLast(r=>[`${m[2]}:success`,`${m[2]}:failure`,`${m[2]}:deadline`].includes(JSON.parse(r.data).kind));
     return [{windowId:`${m[1]}:${m[2]==='qa'?'qa':'production'}`,state:e.state==='success'?'success' as const:e.state==='failure'?'failed' as const:'running' as const,startedAt:started?.at??null,completedAt:completed?.at??null,receipt:row.key}];});
    const first=db.query('SELECT MIN(at) AS at FROM events').get() as {at:number|null};snapshot.releases=first.at===null?failed(now,'release history unavailable'):ok(now,'complete retained release executor inventory',{completeFrom:first.at,completeThrough:now,windows});
+   try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
    db.exec('COMMIT');
   }finally{db.close();}
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
  // Existing non-secret sign-in provenance and cached budget import; never SSO
  // tokens, credential contents, AWS requests or a manufactured ready decision.
  try{const p=originalSessionExpiry(JSON.parse(readFileSync(join(dir,'release-auth-session.json'),'utf8')),now,0);snapshot.aws=ok(now,p.receipt,{verified:true,credentialId:createHash('sha256').update(p.receipt).digest('hex'),expiresAt:p.expiresAt});}catch(error){snapshot.aws=failed(now,String(error));}
- try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));if(!funds)throw Error('effective wallet state unavailable');snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:!funds.stop&&b.postedCents+b.unpostedCents<funds.actualStop&&b.projectedCents+funds.committed<funds.hold&&b.projectedCents+funds.committed+100<funds.ceiling});}catch(error){snapshot.billing=failed(now,String(error));}
- try{const [variable,issue]=await Promise.all([execute(['gh','api','--method','GET','repos/fulmar-hq/alido/actions/variables/QA_HOLD'],undefined,8000),execute(['gh','api','--method','GET','repos/fulmar-hq/alido/issues/1192'],undefined,8000)]),v=JSON.parse(JSON.parse(variable).value),i=JSON.parse(issue);if(v.version!==1||typeof v.held!=='boolean'||typeof v.id!=='string'||!v.id||!Array.isArray(i.labels)||i.labels.length>=100)throw Error('supported release hold readback unavailable');let blocking=v.held||i.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));if(v.legacy_issue!==null&&v.legacy_issue!==1192){if(!Number.isSafeInteger(v.legacy_issue)||v.legacy_issue<1)throw Error('legacy hold identity unavailable');const legacy=JSON.parse(await execute(['gh','api','--method','GET',`repos/fulmar-hq/alido/issues/${v.legacy_issue}`],undefined,8000));if(!Array.isArray(legacy.labels)||legacy.labels.length>=100)throw Error('legacy hold labels unavailable');blocking ||= legacy.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));}snapshot.holds=ok(now,'fresh supported GitHub hold and release-board labels',{blocking});}catch(error){snapshot.holds=failed(now,String(error));}
+ try{const [variable,issue]=await Promise.all([execute(['gh','api','--method','GET','repos/fulmar-hq/alido/actions/variables/QA_HOLD'],undefined,8000),execute(['gh','api','--method','GET','repos/fulmar-hq/alido/issues/1192'],undefined,8000)]),v=supportedReleaseHold(JSON.parse(JSON.parse(variable).value)),i=JSON.parse(issue);if(!Array.isArray(i.labels)||i.labels.length>=100)throw Error('supported release hold readback unavailable');let blocking=v.held||i.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));if(v.legacy_issue!==null&&v.legacy_issue!==1192){if(!Number.isSafeInteger(v.legacy_issue)||v.legacy_issue<1)throw Error('legacy hold identity unavailable');const legacy=JSON.parse(await execute(['gh','api','--method','GET',`repos/fulmar-hq/alido/issues/${v.legacy_issue}`],undefined,8000));if(!Array.isArray(legacy.labels)||legacy.labels.length>=100)throw Error('legacy hold labels unavailable');blocking ||= legacy.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));}snapshot.holds=ok(now,'fresh supported GitHub hold and release-board labels',{blocking});}catch(error){snapshot.holds=failed(now,String(error));}
  return {snapshot,inactive};
 }
 
@@ -130,4 +132,4 @@ export function rehearseFactoryAlarm(mail:string,day:string,now=Date.now()){
  try{bridge.send(id,'Vincent','This is a test of the new factory alarm. This message is a rehearsal, so no real factory fault is being reported.');return {id,queued:true,delivered:bridge.delivered(id,'Vincent')};}finally{bridge.close();}
 }
 
-export function healthOwnsAlerts(dir:string,now:number){try{const h=z.object({at:z.number().int().nonnegative()}).strict().parse(JSON.parse(readFileSync(join(dir,'health','heartbeat.json'),'utf8')));return h.at<=now&&now-h.at<=10*60000;}catch{return false;}}
+export {healthOwnsAlerts} from './alerts';

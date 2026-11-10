@@ -7,7 +7,7 @@ import {observeBilling,available,awsRefusal,monthAt} from './ledger';
 // outstanding reservations + lag, strictly below the monthly ceiling. The old
 // allocation reserve is not added a second time to that complete envelope.
 // Unknown/legacy policy retains the existing conservative wallet behavior.
-export function releaseAvailable(s:Store,c:Config,b:Billing|undefined,raw:unknown,now:number):number {
+export function releaseAvailable(s:Pick<Store,"get"|"db">,c:Config,b:Billing|undefined,raw:unknown,now:number):number {
  if(awsRefusal(s,c,now,b)||!b)return 0;
  const policy=(raw as {wallet?:{aws?:unknown}})?.wallet?.aws;
  const thresholds=policy as Config['wallet']['aws']|undefined;

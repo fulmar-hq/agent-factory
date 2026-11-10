@@ -2,9 +2,9 @@ import {ownerRuntimeKey} from './wake';
 import {Database} from 'bun:sqlite';
 import {createHash} from 'node:crypto';
 import {existsSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,dirname} from 'node:path';
 import {command} from '../adapters/github';
-import {mailPath} from './alerts';
+import {mailPath,healthOwnsAlerts} from './alerts';
 import {type Config,type Meter,QualificationSchema,optionalJSON} from './config';
 import {usageGate} from './engine';
 import {acceptanceProfile} from './acceptance-profile';
@@ -28,6 +28,13 @@ export function originalSessionExpiry(raw:unknown,now:number,validThrough:number
  const start=Date.parse(raw.signedInAt),end=Date.parse(raw.expiresAt);
  if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=start||end-start>24*3600000||end<=validThrough)throw Error('original AWS sign-in does not remain valid through 22:30');
  return {signedInAt:start,expiresAt:end,receipt:raw.receipt};
+}
+
+export function supportedReleaseHold(hold:unknown){
+ const fields=['at','by','held','id','legacy_issue','reason','version'];
+ if(!record(hold)||hold.version!==1||Object.keys(hold).sort().join(',')!==fields.join(',')||typeof hold.id!=='string'||!/^[-A-Za-z0-9_.:]{1,120}$/.test(hold.id)||typeof hold.held!=='boolean'||typeof hold.reason!=='string'||!hold.reason.trim()||hold.reason.length>500||typeof hold.by!=='string'||!hold.by.trim()||hold.by.length>120||typeof hold.at!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(hold.at)||!Number.isFinite(Date.parse(hold.at)))throw Error('current supported QA hold identity differs');
+
+ return hold as {id:string;held:boolean;legacy_issue:number|null;at:string;by:string;reason:string;version:1};
 }
 
 export async function releaseDiskReading(execute=command,path=process.platform==='darwin'?'/System/Volumes/Data':'/'):Promise<Disk> {
@@ -114,8 +121,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
    const hold=JSON.parse(variable?.value??'null');
    // This installation is on legacy protocol 1. A protocol migration requires
    // the captain's deliberate qualification, not permissive field guessing.
-   const fields=['at','by','held','id','legacy_issue','reason','version'];
-   if(!record(hold)||hold.version!==1||Object.keys(hold).sort().join(',')!==fields.join(',')||typeof hold.id!=='string'||!/^[-A-Za-z0-9_.:]{1,120}$/.test(hold.id)||typeof hold.held!=='boolean'||typeof hold.reason!=='string'||!hold.reason.trim()||hold.reason.length>500||typeof hold.by!=='string'||!hold.by.trim()||hold.by.length>120||typeof hold.at!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(hold.at)||!Number.isFinite(Date.parse(hold.at))||hold.id!==o.carrier?.holdId)throw Error('current supported QA hold identity differs');
+   supportedReleaseHold(hold);if(hold.id!==o.carrier?.holdId)throw Error('current supported QA hold identity differs');
    if(hold.held)throw Error('QA hold is on');
    if(!Array.isArray(issue?.labels)||issue.labels.length>=100)throw Error('release issue labels are unavailable or truncated');
    if(issue.labels.some(heldLabel))throw Error('release board has an explicit QA hold');
@@ -148,6 +154,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
 // Dry-runs/rehearsals never call this function.
 export function releasePreflightAlert(s:Store,r:ReleaseReadiness,now=Date.now(),path=mailPath()) {
  if(r.ready||!r.missing.length)return {queued:false};
+ if(healthOwnsAlerts(dirname(s.db.filename),now))return {queued:false,ownedBy:'independent-health-watch'};
  if(!Number.isSafeInteger(r.at)||!Number.isSafeInteger(now)||now<r.at)throw Error('preflight alert is only admitted at 19:00');
  const admitted=toronto(r.at),current=toronto(now);
  if(admitted.day!==r.day||admitted.minute!==1140||current.day!==r.day||current.minute>=1190)throw Error('preflight alert is only admitted at 19:00 and must finish before 19:50');
