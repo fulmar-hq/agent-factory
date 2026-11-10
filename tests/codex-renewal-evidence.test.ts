@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, linkSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { collectCodexRenewalEvidence, readCodexRenewalReceipt, securityChecks, type CodexRenewalManifest, type ReceiptRef } from "../launcher/codex-renewal-evidence";
+import { collectCodexRenewalEvidence, readCodexRenewalReceipt, securityChecks, securityProbe, type CodexRenewalManifest, type ReceiptRef } from "../launcher/codex-renewal-evidence";
 
 // Entirely fictional retained owner captures. No model, target, process, socket,
 // subscription command or qualification replacement is executed by this suite.
@@ -17,11 +17,12 @@ function fixture(root = "/fictional") {
     const data = bytes(value), path = `${root}/${name}`;
     files.set(path, data); return { path, sha256: digest(data) };
   };
-  const probe = put("probe.py", "# fictional 12-check probe, never executed\n");
+  const targets={socket:"/fictional/known-known_agent_socket",credential:"/fictional/known-credential",sentinel:"/fictional/known-private_sentinel",publisher:"/fictional/known-publisher_write",dependencies:"/fictional/known-dependencies_write",toolchain:"/fictional/known-toolchain_write"};
+  const probe = put("probe.py", securityProbe(targets));
   const q = { codex: { phoneVerified: false, waiver: { phone: "deferred" }, expiresAt: startedAt - 1, evidence: "retained old receipt" },
     "codex:medium": { phoneVerified: false, waiver: { phone: "deferred" } }, "codex:high": { phoneVerified: false, waiver: { phone: "deferred" } },
     claude: { expiresAt: 123, evidence: "opaque original", phoneVerified: false, waiver: { phone: "deferred" } }, unknown: ["preserved"] };
-  const m: CodexRenewalManifest = { version: 1, runId: id(99), startedAt, expiresAt: startedAt + 86400000, model: "gpt-6.1-sol", probe,
+  const m: CodexRenewalManifest = { version: 1, runId: id(99), startedAt, expiresAt: startedAt + 86400000, model: "gpt-6.1-sol", probe, targets,
     qualifications: put("qualifications.json", JSON.stringify(q, null, 4) + "\n"), sources: [put("workers.ts", "fictional adapter fingerprint")],
     subscription: put("subscription.json", { argv: ["codex", "login", "status"], code: 0, signal: null, stdout: "", stderr: "Logged in using ChatGPT\n", observedAt: startedAt }), runs: [] };
   const output = JSON.stringify(Object.fromEntries(securityChecks.map(k => [k, true]))) + "\n";
@@ -276,3 +277,6 @@ test('native security completion cannot precede the probe output',()=>{const f=f
 for(const error of [{status:'error'},{error:{message:'failed'}},{is_error:true},{success:false}])test('structured failure metadata cannot be ignored '+JSON.stringify(error),()=>{const f=fixture(),r=f.m.runs[0],rows=Buffer.from(f.read(r.stream.path)).toString().split('\n');rows.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'failed',...error}}));const b=bytes(rows.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
 
 test('an observed worker-group member stays owned after orphaning and regrouping',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{const orphan={pid:999,parent:1,group:x.pid,identity:'observed-orphan',state:'S'};x.before.rows.push(orphan);x.afterTerm.rows.push({...orphan,group:999});x.final.rows.push({...orphan,group:999});});expect(f.collect().status).toBe('refused');});
+
+test('known target existence cannot attest different probe paths',()=>{const f=fixture();f.mutate(f.m.runs[0].commandProbe!,x=>{for(const t of x.targets)t.target='/unrelated/existing/file';});expect(f.collect().status).toBe('refused');});
+test('a root killed before natural security completion cannot qualify',()=>{const f=fixture();f.mutate(f.m.runs[0].supervisor,x=>{x.signals.push({pid:x.pid,identity:x.identity,at:x.startedAt+100,signal:'SIGKILL',result:'sent'});});expect(f.collect().status).toBe('refused');});

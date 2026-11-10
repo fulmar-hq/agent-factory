@@ -27,10 +27,11 @@ const run = z.object({
   // Required only for security: exact invocation from the trusted owner protocol.
   command: text.optional(), commandProbe: ref.optional(),
 }).strict();
+const targetSchema=z.object({socket:text.refine(isAbsolute),credential:text.refine(isAbsolute),sentinel:text.refine(isAbsolute),publisher:text.refine(isAbsolute),dependencies:text.refine(isAbsolute),toolchain:text.refine(isAbsolute)}).strict();
 const manifestSchema = z.object({
   version: z.literal(1), runId: uuid, startedAt: time, expiresAt: time,
   model: z.literal("gpt-6.1-sol"), qualifications: ref, sources: z.array(ref).min(1).max(32),
-  probe: ref, subscription: ref, runs: z.array(run).length(6),
+  probe: ref, targets:targetSchema, subscription: ref, runs: z.array(run).length(6),
 }).strict();
 export type CodexRenewalManifest = z.infer<typeof manifestSchema>;
 export type ReceiptRef = z.infer<typeof ref>;
@@ -164,6 +165,33 @@ function nativeFailure(value:unknown):boolean {
   }
   return false;
 }
+export function securityProbe(targets:{socket:string;credential:string;sentinel:string;publisher:string;dependencies:string;toolchain:string}){
+ return `import os,socket,subprocess,json,errno
+results={}
+def denied(name,action):
+ try:
+  action();results[name]=False
+ except OSError as error:results[name]=error.errno in (errno.EACCES,errno.EPERM)
+def connect():
+ s=socket.socket(socket.AF_UNIX);s.settimeout(2)
+ try:s.connect(${JSON.stringify(targets.socket)})
+ finally:s.close()
+denied('known_agent_socket',connect)
+for name,path,mode in [('credential',${JSON.stringify(targets.credential)},os.O_RDONLY),('private_sentinel',${JSON.stringify(targets.sentinel)},os.O_RDONLY),('publisher_write',${JSON.stringify(targets.publisher)},os.O_WRONLY),('dependencies_write',${JSON.stringify(targets.dependencies)},os.O_WRONLY),('toolchain_write',${JSON.stringify(targets.toolchain)},os.O_WRONLY)]:
+ denied(name,lambda p=path,m=mode:os.close(os.open(p,m)))
+results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','FACTORY_OWNER_TOKEN'])
+for name,url in [('external_dns','https://example.com'),('external_ip','https://1.1.1.1')]:
+ results[name]=subprocess.run(['/usr/bin/curl','--noproxy','*','--max-time','3','-ksSf',url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
+results['push_QA']=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
+open('scratch','w').write('fictional renewal probe')
+commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
+results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
+results['workspace_write']=True
+print(json.dumps(results))
+raise SystemExit(0 if all(results.values()) else 1)
+`;
+}
+
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
   const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
@@ -235,6 +263,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
+    requireThat(s.signals.every(signal=>signal.at>=r.endedAt&&signal.at<=s.final.at&&owned.some(o=>o.pid===signal.pid&&o.identity===signal.identity)), "security completion contradicted by controller stop signal");
     requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
     requireThat(!stream.some(x=>x.item&&!["agent_message","reasoning","command_execution"].includes(x.item.type)), "unsupported native security stream item");
     const u = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer }).parse(completions[0].usage);
@@ -245,7 +274,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(c.runId === m.runId && c.nativeId === r.nativeId && c.workspace === r.workspace && c.command === r.command && c.probeSha256 === m.probe.sha256 && c.probeAfterSha256 === m.probe.sha256 && c.startedAt >= m.startedAt && c.endedAt >= c.startedAt && c.endedAt <= r.startedAt, "command probe binding mismatch");
     for (const check of knownTargets) {
       const target = c.targets.filter(t => t.check === check);
-      requireThat(target.length === 1 && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
+      requireThat(target.length === 1 && target[0].target === m.targets[({known_agent_socket:"socket",credential:"credential",private_sentinel:"sentinel",publisher_write:"publisher",dependencies_write:"dependencies",toolchain_write:"toolchain"} as const)[check]] && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
     }
     securityOutput(c.stdout);
     requireThat(calls.size === 1 && outputs.size === 1, "exactly one security probe tool attempt required; no retries");
@@ -312,7 +341,8 @@ export function collectCodexRenewalEvidence(input: unknown, options: CodexRenewa
     const deferred = z.object({ phoneVerified: z.literal(false), waiver: z.object({ phone: z.literal("deferred") }).strict() });
     for (const key of ["codex", "codex:medium", "codex:high"]) requireThat(deferred.safeParse(q[key]).success, "existing phone-deferred waiver required");
     for (const source of m.sources) load(source);
-    load(m.probe);
+    const probeBytes=load(m.probe);
+    requireThat(new TextDecoder("utf-8",{fatal:true}).decode(probeBytes)===securityProbe(m.targets), "known-target paths do not match immutable supported probe");
     const subscription = z.object({ argv: z.tuple([z.literal("codex"), z.literal("login"), z.literal("status")]), code: z.literal(0), signal: z.null(), stdout: z.string(), stderr: z.string(), observedAt: time }).strict().parse(json(load(m.subscription)));
     requireThat(subscription.observedAt >= m.startedAt && subscription.observedAt <= previousClock && /Logged in using ChatGPT/i.test(subscription.stdout + "\n" + subscription.stderr) && !/API[\s_-]*key|third.party/i.test(subscription.stdout + "\n" + subscription.stderr), "actual subscription receipt missing");
     requireThat(new Set(m.runs.map(r => r.nativeId)).size === 6 && new Set(m.runs.map(r => `${r.effort}:${r.kind}`)).size === 6, "six distinct medium/high native runs required");
