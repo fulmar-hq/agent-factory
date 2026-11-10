@@ -34,6 +34,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    // Existing legacy pause events have no actor provenance. Never call them Vincent's.
    const provenance=pause?JSON.parse(pause.data):null;
    snapshot.controller=ok(now,'read-only controller snapshot',{paused,actor:provenance?.actor==='Vincent'?'Vincent':null,actorVerified:provenance?.actor==='Vincent'&&provenance?.verified===true,changedAt:pause?.at??now,changeReceipt:pause?.id??'unpaused controller readback'});
+   try{
    const sessions=db.query("SELECT * FROM sessions LIMIT 10001").all() as {id:string;status:string;pid:number|null;native_id:string|null;provider:string;started:number|null;brief:string}[];
    if(sessions.length>10000)throw Error('session inventory truncated');
    const running=[];let workUnknown=false;
@@ -60,6 +61,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     const refusal=/qualif/.test(reason)?'qualification':/usage/.test(reason)?'usage':/slot|capacity/.test(reason)?'capacity':/wallet|billing/.test(reason)?'billing':/approval|intake/.test(reason)?'approval':'unknown';
     snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims,running,inactiveSince:claims.length?null:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
    }
+   }catch(error){snapshot.work=failed(now,String(error));}
    try{
    const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
    for(const role of Object.values(c.owners)){const key=`${role.harness}:${role.effort}`;if(required.has(key)&&required.get(key)!==role.model)throw Error("conflicting required qualification models");required.set(key,role.model);}
