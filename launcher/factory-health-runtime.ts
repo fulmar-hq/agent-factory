@@ -13,7 +13,7 @@ import {diskReading} from './disk';
 import {processIdentity} from './process';
 import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
-import {transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,type FactoryHealthSnapshot,type FactoryHealthState,type HealthDeliveryCommand} from './factory-health';
+import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,type FactoryHealthSnapshot,type FactoryHealthState,type HealthDeliveryCommand} from './factory-health';
 const failed=(at:number,reason:string)=>({state:'unavailable' as const,observedAt:at,reason});
 const ok=<T>(at:number,receipt:string,value:T)=>({state:'ok' as const,observedAt:at,receipt,value});
 function tail(path:string){const fd=openSync(path,'r');try{const stat=fstatSync(fd),n=Math.min(stat.size,65536),bytes=Buffer.alloc(n);readSync(fd,bytes,0,n,stat.size-n);return bytes.toString().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});}finally{closeSync(fd);}}
@@ -60,7 +60,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    }
    try{
    const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
-   for(const role of Object.values(c.owners))required.set(`${role.harness}:${role.effort}`,role.model);
+   for(const role of Object.values(c.owners)){const key=`${role.harness}:${role.effort}`;if(required.has(key)&&required.get(key)!==role.model)throw Error("conflicting required qualification models");required.set(key,role.model);}
    for(const [key,value] of Object.entries(raw)){const provider=key.split(':')[0],q=QualificationSchema.safeParse(value);if(['codex','claude'].includes(provider!)&&q.success&&!required.has(`${provider}:${q.data.effort}`))required.set(`${provider}:${q.data.effort}`,q.data.model);}
    const binding=get<{attempt:string;provider:string;qualificationId:string;expiresAt:number;nativeId:string;nativePath:string;workspace:string;pid:number;identity:string;startedAt:number;wake:string}>('codex-renewal-native');
    const slot=get<{id:string;state:string}>('codex-renewal-slot');
@@ -88,6 +88,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    const first=db.query('SELECT MIN(at) AS at FROM events').get() as {at:number|null};snapshot.releases=first.at===null?failed(now,'release history unavailable'):ok(now,'complete retained release executor inventory',{completeFrom:first.at,completeThrough:now,windows});
    }catch(error){snapshot.releases=failed(now,String(error));}
    try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
+   const day=healthReleaseWindows(now)[0]!.day,report=get<{day:string;validThrough:number;ready:boolean;missing:{input:string;reason:string}[]}>(`release-preflight-report:${day}`);if(report){const saved=db.query("SELECT at FROM events WHERE id=? AND kind='release-readiness'").get(`release-readiness:${day}`) as {at:number}|null;snapshot.readiness=ok(saved?.at??now,`release-preflight-report:${day}`,{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});}
    db.exec('COMMIT');
   }finally{db.close();}
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
@@ -123,6 +124,7 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   save();db.exec('COMMIT');
   const bridge=healthBridge(mail);
   try{for(const pending of pendingHealthDeliveries(state,()=>now)){
+   const notification=state.outbox.find(n=>n.id===pending.notificationId)!;const preflight=healthReleaseWindows(now).find(w=>w.stage==='qa'&&now>=w.startAt-3600000&&now<w.startAt-3600000+5*60000);if(notification.condition==='release'&&notification.kind==='opening'&&preflight)continue;
    db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
    const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;save();db.exec('COMMIT');
    const command=begun.command,id=command.idempotencyKey,condition=state.outbox.find(n=>n.id===command.notificationId)!.condition;

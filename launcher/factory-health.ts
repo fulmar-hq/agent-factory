@@ -79,6 +79,7 @@ const controllerSchema = z.object({
   changeReceipt: text,
 });
 const tickSchema = z.object({ lastSuccessAt: timestamp, lastAttemptAt: timestamp, result: z.enum(["success", "failure"]) });
+const readinessSchema=z.object({day:text,validThrough:timestamp,ready:z.boolean(),missing:z.array(text)});
 const releaseSchema = z.object({
   // A complete readback must cover the obligation's start and this observation.
   completeFrom: timestamp,
@@ -124,6 +125,7 @@ export const FactoryHealthSnapshotSchema = z.object({
   tick: evidence(tickSchema).nullish(),
   work: evidence(workSchema).nullish(),
   releases: evidence(releaseSchema).nullish(),
+  readiness:evidence(readinessSchema).nullish(),
   disk: evidence(diskSchema).nullish(),
   qualifications: evidence(qualificationSchema).nullish(),
   aws: evidence(awsSchema).nullish(),
@@ -141,7 +143,7 @@ const windowSchema = z.object({
   stage: z.enum(["qa", "production"]), startAt: timestamp, endAt: timestamp,
 });
 export type HealthReleaseWindow = z.infer<typeof windowSchema>;
-const HEALTH_SOURCES = ["controller", "tick", "work", "releases", "disk", "qualifications", "aws", "billing", "holds"] as const;
+const HEALTH_SOURCES = ["controller", "tick", "work", "releases", "readiness", "disk", "qualifications", "aws", "billing", "holds"] as const;
 type HealthSource = typeof HEALTH_SOURCES[number];
 const observationSchema = z.object({ observedAt: timestamp, fingerprint: z.string().regex(/^[a-f0-9]{64}$/), conflicted: z.boolean() });
 export const HealthMemorySchema = z.object({
@@ -232,6 +234,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   const tick = source("tick", tickSchema);
   const work = source("work", workSchema);
   const releases = source("releases", releaseSchema);
+  const readiness=snapshot.readiness===undefined?undefined:source("readiness",readinessSchema);
   const disk = source("disk", diskSchema);
   const qualifications = source("qualifications", qualificationSchema);
   const aws = source("aws", awsSchema);
@@ -331,6 +334,11 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
     else if (disk.value.usedFraction > 0.85) issues.push(issue("Factory release is blocked by low disk space"));
     if (!holds.ok) issues.push(unavailable("release holds"));
     else if (holds.value.blocking) issues.push(issue("Factory release is blocked by a hold"));
+    if(readiness){
+      if(!readiness.ok||readiness.value.day!==window.day||readiness.value.validThrough<window.endAt||readiness.value.ready!==(readiness.value.missing.length===0))issues.push(unavailable("effective release preflight"));
+      else if(!readiness.value.ready)issues.push(issue("Factory release preflight has missing inputs; review its complete readiness report"));
+      releaseSources.push(readiness);
+    }
     return issues;
   }
   const candidates = new Map<string, HealthReleaseWindow>();
