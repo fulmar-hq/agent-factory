@@ -6,7 +6,7 @@ import type {Store} from '../tracking/store';
 import type {BoardPull,PullSnapshot} from '../board/pulls';
 import type {FactoryPull,Challenge} from './factory-maintenance';
 import type {ReviewTarget} from '../adapters/factory-challenge';
-export const deepRisk=/(?:tenant|consent|opt.?out|send|dispatch|booking|permission|authoriz|billing|payment|money|wallet|migration|drizzle|row.level|\brls\b)/i;
+export const deepRisk=/(?:tenant|business_?id|consent|opt.?out|unsubscribe|send|dispatch|outbound|booking|calendar|availability|appointment|permission|auth|grant|billing|payment|pricing|currency|credit|charge|refund|invoice|money|wallet|migration|drizzle|row.level|\brls\b)/i;
 export const reviewDepth=(files:{filename:string;patch?:string}[])=>files.some(f=>deepRisk.test(f.filename+'\n'+(f.patch??'')))?'deep':'standard';
 export function reviewChecksGreen(p:BoardPull,repo:string) {
  const checks=p.statusCheckRollup.filter(c=>!/release[ -]hold/i.test(c.name??''));

@@ -18,7 +18,7 @@ test('green requires actual verification and security; release hold stays a merg
  expect(reviewChecksGreen({...p(),statusCheckRollup:[...p().statusCheckRollup,{name:'Release hold',status:'IN_PROGRESS'}]},'fulmar-hq/alido')).toBe(true);
 });
 test('deep review follows one written risk rule across paths and changed content',()=>{
- for(const path of ['drizzle/001.sql','src/booking.ts','src/permissions.ts','src/tenant.ts','src/consent.ts','src/send.ts','src/billing.ts'])expect(reviewDepth([{filename:path}])).toBe('deep');
+ for(const path of ['drizzle/001.sql','src/booking.ts','src/permissions.ts','src/tenant.ts','src/consent.ts','src/send.ts','src/billing.ts','src/pricing.ts','src/calendar.ts','src/auth.ts'])expect(reviewDepth([{filename:path}])).toBe('deep');
  expect(reviewDepth([{filename:'src/widget.ts',patch:'+ authorizeTenant(ctx)'}])).toBe('deep');
  expect(reviewDepth([{filename:'src/format.ts',patch:'+ return label.trim()'}])).toBe('standard');
 });
