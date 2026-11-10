@@ -1,3 +1,5 @@
+import {recordTickResult} from './controller-alerts';
+import {mailPath} from './alerts';
 import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
@@ -187,17 +189,20 @@ export async function tick(dir = root) {
   }
 }
 // launchd routes stdout to tick.log; exactly one summary for success or error.
-export async function tickSummary(run: () => Promise<{ at: number; status: string; ready: number; paused?: boolean; claimed?: number; refusals?: { ticket: string; reason: string }[] }> = () => tick(), emit = console.info) {
+export async function tickSummary(run: () => Promise<{ at: number; status: string; ready: number; paused?: boolean; claimed?: number; refusals?: { ticket: string; reason: string }[] }> = () => tick(), emit = console.info, observe: (result:{at:number;status:string}) => void = () => {}) {
   try {
     const result = await run();
     emit(JSON.stringify(result));
+    try { observe(result); } catch(error) { console.error("tick alert retained/retry needed: "+String(error)); }
     return result;
   } catch (error) {
-    emit(JSON.stringify({ at: Date.now(), status: "error", error: String(error) }));
+    const result={at:Date.now(),status:"error",error:String(error)};
+    emit(JSON.stringify(result));
+    try { observe(result); } catch(alertError) { console.error("tick alert retained/retry needed: "+String(alertError)); }
     throw error;
   }
 }
 if (import.meta.main) {
-  try { await tickSummary(); }
+  try { await tickSummary(() => tick(),console.info,result=>recordTickResult(root,mailPath(),result)); }
   catch (error) { console.error(String(error)); process.exitCode = 1; }
 }
