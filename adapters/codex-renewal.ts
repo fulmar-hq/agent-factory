@@ -7,6 +7,7 @@ import {Engine,usageGate,type Session} from '../launcher/engine';
 import {ConfigSchema,QualificationSchema,type Ticket} from '../launcher/config';
 import {claimSupervisor,superviseSession} from '../launcher/worker';
 import {processRows,spawnWorker,type ProcessRow, type WorkerObservation} from '../launcher/child';
+import {requireDiskCapacity,diskReading} from '../launcher/disk';
 import {processIdentity} from '../launcher/process';
 import {renewalFingerprint,renewalDigest,renewalSources,renewalFailureAlert} from '../launcher/codex-renewal';
 import {collectCodexRenewalEvidence,securityChecks,securityProbe,type CodexRenewalManifest,type ReceiptRef} from '../launcher/codex-renewal-evidence';
@@ -43,7 +44,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   const version=(await command(['codex','--version'])).trim(),fingerprint=renewalFingerprint(checkout,version);
   if(renewalDigest(fingerprint)!==renewalDigest(claim.fingerprint))throw Error('boundary or CLI changed before renewal');
   const guard=()=>{clock();if(live.get('paused')!==false)throw Error('factory paused');usageGate(live.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');if(renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('private policy changed during renewal');};
-  guard();await verifySubscription('codex');
+  guard();requireDiskCapacity(()=>diskReading(dir));await verifySubscription('codex');
   const subscription=Bun.spawnSync(['codex','login','status'],{env:Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG'].flatMap(k=>process.env[k]?[[k,process.env[k]!]]:[]))});
   if(subscription.exitCode!==0)throw Error('subscription status failed');
   durable(join(run,'subscription.json'),json({argv:['codex','login','status'],code:subscription.exitCode,signal:null,stdout:subscription.stdout.toString(),stderr:subscription.stderr.toString(),observedAt:Date.now()}));
@@ -58,7 +59,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   const manifest:CodexRenewalManifest={version:1,runId,startedAt,expiresAt,model:'gpt-6.1-sol',targets,qualifications:ref(join(run,'qualifications.original.json')),sources:renewalSources.map(path=>ref(join(checkout,path))),probe:ref(probePath),subscription:ref(join(run,'subscription.json')),runs:[]};
   const role=Object.entries(c.owners).find(([,r])=>r.harness==='codex');if(!role)throw Error('Codex owner unavailable');
   for(const effort of ['medium','high'] as const)for(const kind of ['security','time','tokens'] as const){
-   guard();const leaf=join(run,`${effort}-${kind}`);mkdirSync(leaf,{mode:0o700});
+   guard();requireDiskCapacity(()=>diskReading(dir));const leaf=join(run,`${effort}-${kind}`);mkdirSync(leaf,{mode:0o700});
    const commandText=`/usr/bin/python3 ${probePath}`;
    const t:Ticket={repo:'fulmar-hq/agent-factory',number:141,owner:role[0],creator:'trusted qualification executor',source:id,area:'controller',kind:'qualification',title:'Verify Codex native boundary',outcome:kind==='security'?`Qualification only. Run exactly ${commandText} once. Do not edit the probe or inspect credential contents. The probe creates its own unsigned commit and bundle. Use exactly one tool command, with no setup, retries or extra commands. Report its actual JSON output.`:'Qualification lifecycle only. Run /usr/bin/python3 lifecycle.py once and wait on that command. Do not edit files or send a final answer; the controller will stop it.',test:kind==='security'?commandText:'/usr/bin/python3 lifecycle.py',approved:true,benefit:'high',estimateSeconds:kind==='time'?25:180,estimateTokens:kind==='tokens'?100:8000000,paths:['.factory-tmp','scratch','probe-pids.json','.factory-delivery.bundle','.git'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort};
    let commandRef:ReceiptRef|undefined;

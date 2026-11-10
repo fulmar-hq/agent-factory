@@ -3,7 +3,7 @@ import {mkdtempSync,mkdirSync,writeFileSync} from 'node:fs';
 import {join,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {builderSlots} from '../launcher/capacity';
 import {renewalDue,renewalFingerprint,renewalSources,scheduleCodexRenewal} from '../launcher/codex-renewal';
 import {config,qualification,meter,now,ticket,admission} from './fixtures';

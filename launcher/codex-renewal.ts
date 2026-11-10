@@ -5,6 +5,7 @@ import {QualificationSchema,type Qualification} from './config';
 import {type Engine,usageGate} from './engine';
 import {healthBridge} from './factory-health-runtime';
 import {mailPath} from './alerts';
+import {requireDiskCapacity} from './disk';
 import {builderSlots} from './capacity';
 export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts'];
 export const renewalDigest=(value:unknown)=>createHash('sha256').update(typeof value==='string'?value:(JSON.stringify(value)??"undefined")).digest('hex');
@@ -31,6 +32,7 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
   if(e.s.get<{state:string}>('codex-renewal-slot')?.state!=='released'&&e.s.get('codex-renewal-slot'))return {state:'custody-blocked',...schedule};
   if(e.s.get('paused')!==false)return {state:'paused',...schedule};
   usageGate(e.s.get<Record<string,unknown>>('readings')?.codex,true,now,e.c,'codex');
+  requireDiskCapacity(e.diskProbe);
   if(!builderSlots(e.s,e.c).free)return {state:'waiting-capacity',...schedule};
   const claim={id,state:'starting',at:now,qualificationSha256:renewalDigest(bytes),fingerprint};
   e.s.set(`codex-renewal-attempt:${id}`,claim);e.s.set('codex-renewal-slot',claim);e.s.set('launcher-maintenance-lease',{id,kind:'renewal',state:'active',at:now});
