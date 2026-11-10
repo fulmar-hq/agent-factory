@@ -15,10 +15,10 @@ export function observeIdleQueue(db:Reader,c:Config,now:number):IdleQueueObserva
  if(get('paused')!==false)return no('paused');
  const latest=get<{at:number;status:string;ready?:number;claimed?:number}>('heartbeat');
  const h=latest?.status==='reconciling'?get<typeof latest>('last-successful-heartbeat'):latest;
- if(!h||h.status!=='ok'||h.ready!==0||h.at>now||now-h.at>300000)return no('queue not freshly confirmed empty');
+ if(!h||h.status!=='ok'||h.ready!==0||!Number.isSafeInteger(h.at)||h.at<=0||h.at>now||now-h.at>300000)return no('queue not freshly confirmed empty');
  for(const project of Object.values(c.projects)){
   const inventory=get<{observedAt:number;count?:number;truncated?:boolean;error?:string|null}>(`github:${project.repo}`);
-  if(!inventory||inventory.error||inventory.truncated!==false||!Number.isSafeInteger(inventory.count)||inventory.observedAt>h.at||now-inventory.observedAt>300000)return no('complete fresh project inventory unavailable');
+  if(!inventory||inventory.error||inventory.truncated!==false||!Number.isSafeInteger(inventory.count)||inventory.count!<0||!Number.isSafeInteger(inventory.observedAt)||inventory.observedAt<=0||inventory.observedAt>h.at||now-inventory.observedAt>300000)return no('complete fresh project inventory unavailable');
  }
  const sessions=db.query("SELECT id,status,pid FROM sessions WHERE status!='archived' LIMIT 10001").all() as {id:string;status:string;pid:number|null}[];
  if(sessions.length>10000)return no('session inventory truncated');
@@ -31,7 +31,7 @@ export function observeIdleQueue(db:Reader,c:Config,now:number):IdleQueueObserva
  // Actual builder start/cleanup receipts survive observer restarts. Maintenance
  // challenge starts are intentionally absent from this query.
  const activity=db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','worker-cleanup','worker-exit','worker-halt','worker-failure') AND at<=?").get(now) as {at:number|null};
- if(activity.at===null)return no('builder history unavailable');
+ if(!Number.isSafeInteger(activity.at)||activity.at===null||activity.at<=0)return no('builder history unavailable');
  return {at:now,eligible:true,reason:'empty queue and stopped builders; high-benefit usage allowed',lastActivity:activity.at,heartbeatAt:h.at};
 }
 

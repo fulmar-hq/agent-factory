@@ -31,6 +31,15 @@ test('source errors and incomplete or stale inventories cannot prove an empty qu
   f.s.set(`github:${p.repo}`,state);expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);
  }
 }finally{f.s.close();f.db.close();}});
+test('missing or malformed queue timestamps including fallback remain unknown',()=>{const f=fixture();try{
+ for(const at of [undefined,null,0,-1,'now',f.now+.5]){
+  f.s.set('heartbeat',{status:'ok',ready:0,at});expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);
+  f.s.set('heartbeat',{status:'reconciling',at:f.now});f.s.set('last-successful-heartbeat',{status:'ok',ready:0,at});expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);
+ }
+ f.s.set('heartbeat',{status:'ok',ready:0,at:f.now});
+ const p=Object.values(f.c.projects)[0]!;
+ for(const observedAt of [undefined,null,0,-1,'now',f.now+.5]){f.s.set(`github:${p.repo}`,{count:0,truncated:false,error:null,observedAt});expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);}
+}finally{f.s.close();f.db.close();}});
 test('an incident retained before bridge failure still wakes after builders resume',()=>{const f=fixture();try{
  expect(()=>watchIdleQueue(f.dir,join(f.dir,'missing-mail.sqlite'),f.now)).toThrow('bridge unavailable');
  f.s.set('heartbeat',{at:f.now+1,status:'ok',ready:3});
