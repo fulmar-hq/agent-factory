@@ -22,9 +22,9 @@ export function observeDisk(s:Store,r:DiskReading,warn:(message:string)=>void=co
  return s.atomic(()=>{
  const state='error' in r || !Number.isFinite(r.freeGiB) ? 'unknown' : r.freeGiB<minimumFreeGiB ? 'critical' : r.usedFraction>=0.8 ? 'warning' : 'healthy';
  const prior=s.get<{state:string;episode?:string}>('disk-capacity');
- const episode=prior?.state===state ? prior.episode : `disk-capacity:${r.at}:${state}`;
+ const episode=prior?.state===state && prior.episode ? prior.episode : `disk-capacity:${r.at}:${state}`;
  s.set('disk-capacity',{...r,state,episode});
- if(prior?.state===state)return;
+ if(prior?.state===state && prior.episode)return;
  const message=state==='unknown' ? 'Factory disk capacity unavailable; new work is blocked. Platform must inspect the Data volume.' : state==='critical' ? `Factory disk has ${'freeGiB' in r ? r.freeGiB.toFixed(1) : '?'} GiB free; new work is blocked below 30 GiB. Platform must reclaim factory caches.` : state==='warning' ? `Factory disk ${Math.round(('usedFraction' in r ? r.usedFraction : 0)*100)}% used; ${'freeGiB' in r ? r.freeGiB.toFixed(1) : '?'} GiB free. Platform: follow docs/operations.md Mac mini disk capacity; target 60 GiB free.` : 'Factory disk capacity below 80% used.';
  s.event(`disk-capacity:${r.at}:${state}`,'disk-capacity',{...r,state,message},'Advisory evidence only; retain readings and reconcile capacity before owner-authorized resume.',r.at);
  if(state!=='healthy')warn(message);

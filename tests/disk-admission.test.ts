@@ -54,3 +54,13 @@ test('critical/unknown alarms retry existing bridge once per episode and rearm a
   expect(s.get('paused')).toBe(true);
  }finally{s.close();db.close();}
 });
+
+test('upgrade from an existing unknown advisory record acquires an alarm episode',()=>{
+ const s=new Store(':memory:');
+ try {
+  s.set('disk-capacity',{at:1,state:'unknown',path:'fictional',error:'old observation'});
+  observeDisk(s,{at:2,path:'fictional',error:'still unavailable'},()=>{});
+  expect(s.get<{episode:string}>('disk-capacity')?.episode).toBe('disk-capacity:2:unknown');
+  expect(s.rows('events').filter((r:any)=>r.kind==='disk-capacity')).toHaveLength(1);
+ }finally{s.close();}
+});
