@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { config, ticket, admission, now } from "./fixtures";
 import { BrowserNeeded, BrowserResult, queueBrowser, browserJobs, browserDir, reconcileBrowsers, readBrowserJSON, resumeBrowser, type BrowserPorts, type BrowserJob } from "../launcher/browser";

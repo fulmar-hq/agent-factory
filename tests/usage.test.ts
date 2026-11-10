@@ -94,7 +94,7 @@ test("Claude unified window events require an original timestamp and both window
 
 import { ConfigSchema } from "../launcher/config";
 import { codexMetadata } from "../adapters/usage";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { ticket, admission } from "./fixtures";
 const exposedConfig = () => ConfigSchema.parse({...config(), usage_windows: {
