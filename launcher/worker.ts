@@ -6,7 +6,8 @@ import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { Engine } from "./engine";
-import { configAt, root, optionalJSON, QualificationSchema, type Ticket, type Meter } from "./config";
+import { configAt, root, optionalJSON, type Ticket, type Meter } from "./config";
+import { qualificationFor } from "./usage-push-policy";
 import { Store } from "../tracking/store";
 import {
   workerSpec,
@@ -27,6 +28,11 @@ export function claimSupervisor(e: Engine, id: string) {
     return current;
   });
 }
+export function requireWorkerQualification(e: Engine, t: Ticket, raw: unknown, now = Date.now()) {
+  const q = qualificationFor(raw, e.c, t, now);
+  if (!t.model || !t.effort || !q || e.s.get("paused") !== false) throw Error("qualification expired or paused");
+  return q;
+}
 export async function runWorker(id: string) {
   const c = await configAt(), s = new Store(join(root, "controller.sqlite")), e = new Engine(s, c);
   const x = claimSupervisor(e, id);
@@ -36,14 +42,7 @@ export async function runWorker(id: string) {
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;
-    const q = QualificationSchema.parse(qs?.[t.provider]);
-    if (
-      q.expiresAt <= Date.now() ||
-      q.model !== t.model ||
-      q.effort !== t.effort ||
-      s.get("paused") !== false
-    )
-      throw Error("qualification expired or paused");
+    requireWorkerQualification(e, t, qs);
     const readings = s.get<Record<string, Meter>>("readings");
     e.workerUsage(id, readings?.[t.provider], Date.now());
     await verifySubscription(t.provider);
