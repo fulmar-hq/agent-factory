@@ -355,6 +355,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(firstTerm, "owner TERM missing");
     if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");
     requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
+    for(const snapshot of [s.before,s.afterTerm,s.final])if(snapshot&&snapshot.at>=r.endedAt)requireThat(!snapshot.rows.some(row=>owner(row)&&alive(row)),'live root contradicts reported exit');
     if(s.signal===null){
       if(s.exitCode===0)requireThat(r.endedAt-firstTerm.at<=STOP_POLL_GRACE_MS,'graceful native exit was not prompt after actual TERM');
       else requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt),'nonzero native exit has no controlled abort evidence');

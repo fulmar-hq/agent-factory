@@ -330,3 +330,8 @@ test('literal lifecycle wait keys and prompt graceful zero exits retain positive
  }expect(f.collect().status).toBe('verified');const r=f.m.runs[2];f.mutate(r.supervisor,s=>{s.signals=[];});expect(f.collect().status).toBe('refused');
 });
 test('a zero exit without prompt verified root termination remains refused',()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.supervisor,s=>{s.exitCode=0;s.signal=null;});expect(f.collect().status).toBe('refused');});
+
+
+test('a live bound root after its claimed graceful exit cannot qualify',()=>{
+ const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+50020;f.mutate(r.supervisor,s=>{s.endedAt=r.endedAt;s.exitCode=0;s.signal=null;s.afterTerm.rows.push({...s.before.rows.find((row:any)=>row.pid===s.pid)});});expect(f.collect().status).toBe('refused');
+});
