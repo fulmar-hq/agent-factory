@@ -49,10 +49,18 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     const refusal=/qualif/.test(reason)?'qualification':/usage/.test(reason)?'usage':/slot|capacity/.test(reason)?'capacity':/wallet|billing/.test(reason)?'billing':/approval|intake/.test(reason)?'approval':'unknown';
     snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims:[],running,inactiveSince:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
    }
-   const required=[...new Set(Object.values(c.owners).map(r=>`${r.harness}:${r.effort}`))],raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8'));
-   const records=required.map(key=>{const q=QualificationSchema.safeParse(raw[key]??raw[key.split(':')[0]]),role=Object.values(c.owners).find(r=>`${r.harness}:${r.effort}`===key)!;
-    return {provider:key,qualificationId:q.success?createHash('sha256').update(JSON.stringify(q.data)).digest('hex'):key,verified:q.success&&q.data.model===role.model&&q.data.effort===role.effort,expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal:null};});
-   snapshot.qualifications=ok(now,'protected qualification file readback',{required,records});
+   const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
+   for(const role of Object.values(c.owners))required.set(`${role.harness}:${role.effort}`,role.model);
+   for(const [key,value] of Object.entries(raw)){const provider=key.split(':')[0],q=QualificationSchema.safeParse(value);if(['codex','claude'].includes(provider!)&&q.success&&!required.has(`${provider}:${q.data.effort}`))required.set(`${provider}:${q.data.effort}`,q.data.model);}
+   const binding=get<{attempt:string;provider:string;qualificationId:string;expiresAt:number;nativeId:string;nativePath:string;workspace:string;pid:number;identity:string;startedAt:number;wake:string}>('codex-renewal-native');
+   const slot=get<{id:string;state:string}>('codex-renewal-slot');
+   const records=[...required].map(([key,model])=>{const q=QualificationSchema.safeParse(raw[key]??raw[key.split(':')[0]]),effort=key.split(':')[1],qualificationId=q.success?createHash('sha256').update(JSON.stringify(q.data)).digest('hex'):key;
+    let renewal:null|NonNullable<Extract<NonNullable<FactoryHealthSnapshot['qualifications']>,{state:'ok'}>['value']['records'][number]['renewal']>=null;
+    if(q.success&&binding?.provider===key&&binding.qualificationId===qualificationId&&binding.expiresAt===q.data.expiresAt&&slot?.id===binding.attempt&&slot.state==='running'){
+     try{const observed=identity(binding.pid),receipt=new NativeReceipt('codex',binding.nativeId,binding.workspace,homedir(),binding.startedAt),accounting=new WorkerAccounting();for(let i=0;i<64;i++){receipt.poll(accounting);if(receipt.caughtUp)break;}if(observed===binding.identity&&receipt.evidence(model,effort!).verified){const at=Date.now();renewal={qualificationId,expiresAt:q.data.expiresAt,wakeId:binding.wake,sessionId:binding.attempt,nativeSessionId:binding.nativeId,receipt:binding.nativePath,process:{sessionId:binding.attempt,nativeSessionId:binding.nativeId,provider:key,purpose:'qualification-renewal',qualificationId,qualificationExpiresAt:q.data.expiresAt,wakeId:binding.wake,pid:binding.pid,startedAt:binding.startedAt,observedAt:at,recordedIdentity:binding.identity,observedIdentity:observed,receipt:binding.nativePath,state:'running'}};}}catch{/* Unknown custody never suppresses a qualification warning. */}
+    }
+    return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&existsSync(q.data.evidence.split('#')[0]!),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
+   snapshot.qualifications=ok(Date.now(),'protected qualification file and exact live renewal readback',{required:[...required.keys()],records});
    const effects=db.query("SELECT key,value FROM kv WHERE key LIKE 'executor:%' LIMIT 10001").all() as {key:string;value:string}[];
    if(effects.length>10000)throw Error('release inventory truncated');
    const windows=effects.flatMap(row=>{const m=row.key.match(/^executor:(\d{4}-\d{2}-\d{2}):(qa|promote)$/);if(!m)return [];const e=JSON.parse(row.value),prefix=row.key+':';const events=db.query("SELECT at,data FROM events WHERE kind='release-executor' AND id LIKE ? ORDER BY at").all(prefix+'%') as {at:number;data:string}[];
@@ -83,11 +91,13 @@ export function healthBridge(path:string){
   return row?.wake_state==='woken'&&row.wake_id?`alido-mail:${id}:${row.wake_id}`:null;
  }};
 }
-export async function watchFactoryHealth(dir:string,mail:string,now=Date.now()){
+export async function watchFactoryHealth(dir:string,mail:string,at?:number){
+ const clock=at===undefined?Date.now:()=>at;let now=clock();
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});const db=new Database(join(dir,'health','state.sqlite'),{create:true,strict:true});
  db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER);');
  try{db.exec('BEGIN IMMEDIATE');const row=db.query('SELECT json,inactive FROM state WHERE id=1').get() as {json:string;inactive:number|null}|null;
   const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null);
+  const evaluated=clock();if(evaluated<now)throw Error("health collection clock regressed");now=evaluated;collected.snapshot.capturedAt=now;
   let {state,evaluation}=transitionFactoryHealth(old,collected.snapshot,()=>now);
   const save=()=>db.query('INSERT INTO state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json,inactive=excluded.inactive').run(JSON.stringify(state),collected.inactive);
   save();db.exec('COMMIT');
@@ -109,7 +119,7 @@ export function rehearseFactoryAlarm(mail:string,day:string,now=Date.now()){
  const result=transitionFactoryHealth(initialFactoryHealthState(),{version:1,capturedAt:now,disk:ok(now,'explicit synthetic alarm rehearsal',{usedFraction:0.9})},()=>now);
  if(!result.state.outbox.some(n=>n.condition==='disk'&&n.kind==='opening'))throw Error('alarm evaluator rehearsal failed');
  const bridge=healthBridge(mail),id=`factory-alarm-test:${day}`;
- try{bridge.send(id,'Vincent','This is a test of the new factory alarm. The factory has not stopped; this checks that its warning reaches your Telegram.');return {id,queued:true,delivered:bridge.delivered(id,'Vincent')};}finally{bridge.close();}
+ try{bridge.send(id,'Vincent','This is a test of the new factory alarm. This message is a rehearsal, so no real factory fault is being reported.');return {id,queued:true,delivered:bridge.delivered(id,'Vincent')};}finally{bridge.close();}
 }
 
 export function healthOwnsAlerts(dir:string,now:number){try{const h=z.object({at:z.number().int().nonnegative()}).strict().parse(JSON.parse(readFileSync(join(dir,'health','heartbeat.json'),'utf8')));return h.at<=now&&now-h.at<=10*60000;}catch{return false;}}

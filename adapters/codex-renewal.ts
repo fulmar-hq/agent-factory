@@ -1,24 +1,24 @@
-import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {z} from 'zod';
 import {Store} from '../tracking/store';
 import {Engine,usageGate,type Session} from '../launcher/engine';
-import {configAt,QualificationSchema,type Ticket} from '../launcher/config';
+import {ConfigSchema,QualificationSchema,type Ticket} from '../launcher/config';
 import {claimSupervisor,superviseSession} from '../launcher/worker';
 import {processRows,spawnWorker,type ProcessRow, type WorkerObservation} from '../launcher/child';
 import {processIdentity} from '../launcher/process';
-import {renewalFingerprint,renewalDigest,renewalSources} from '../launcher/codex-renewal';
+import {renewalFingerprint,renewalDigest,renewalSources,renewalFailureAlert} from '../launcher/codex-renewal';
 import {collectCodexRenewalEvidence,securityChecks,type CodexRenewalManifest,type ReceiptRef} from '../launcher/codex-renewal-evidence';
 import {workerSpec,verifySubscription} from './workers';
 import {command} from './github';
-import {copyDependencies} from './delivery';
+import {copyDependencies,localizeDependencies} from './delivery';
 import {healthBridge} from '../launcher/factory-health-runtime';
 import {mailPath} from '../launcher/alerts';
 const usageSchema=z.object({input_tokens:z.number().int().nonnegative(),output_tokens:z.number().int().nonnegative(),cached_input_tokens:z.number().int().nonnegative(),total_tokens:z.number().int().nonnegative()});
 type Usage=z.infer<typeof usageSchema>;
 type Snapshot={at:number;error:null;rows:ProcessRow[]};
-const snapshot=():Snapshot=>{const rows=processRows();return {at:Date.now(),error:null,rows};};
+const snapshot=():Snapshot=>{const at=Date.now(),rows=processRows();return {at,error:null,rows};};
 function durable(path:string,bytes:string){const fd=openSync(path,'wx',0o600);try{writeFileSync(fd,bytes);fsyncSync(fd);}finally{closeSync(fd);}}
 function sync(path:string){const fd=openSync(path,'r');try{fsyncSync(fd);}finally{closeSync(fd);}}
 const json=(x:unknown)=>JSON.stringify(x,null,2)+'\n';
@@ -54,16 +54,17 @@ raise SystemExit(0 if all(results.values()) else 1)
 `;
 }
 export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..')){
- const live=new Store(join(dir,'controller.sqlite')),c=await configAt(join(dir,'config.yaml'));
+ const live=new Store(join(dir,'controller.sqlite')),policyBytes=readFileSync(join(dir,'config.yaml'),'utf8'),c=ConfigSchema.parse(Bun.YAML.parse(policyBytes));
  const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown}>(`codex-renewal-attempt:${id}`);
  const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false;
  const status=(state:string,detail:unknown)=>{live.set(`codex-renewal-attempt:${id}`,{...claim,state,detail,at:Date.now()});live.event(`codex-renewal:${id}:${state}`,'codex-renewal',{id,state,detail,run},'Retain native/probe/custody receipts; no automatic replay of an attempt');};
  try{
-  if(!claim||claim.state!=='starting'||claim.id!==id||live.get<{id:string}>('codex-renewal-slot')?.id!==id)throw Error('detached renewal claim mismatch');
+  if(!claim||claim.state!=='starting'||claim.id!==id||live.get<{id:string}>('codex-renewal-slot')?.id!==id||live.get<{id:string}>('launcher-maintenance-lease')?.id!==id)throw Error('detached renewal claim mismatch');
   live.atomic(()=>{const current=live.get<{state:string}>(`codex-renewal-attempt:${id}`);if(current?.state!=='starting')throw Error('renewal already claimed');live.set(`codex-renewal-attempt:${id}`,{...claim,state:'running',pid:process.pid,identity:processIdentity(process.pid)});live.set('codex-renewal-slot',{id,state:'running',pid:process.pid,identity:processIdentity(process.pid)});});
-  ownsClaim=true;mkdirSync(run,{mode:0o700});const startedAt=Date.now(),expiresAt=startedAt+86400000,runId=crypto.randomUUID();let lastClock=startedAt;
+  ownsClaim=true;if(Bun.version!=='1.3.14')throw Error('pinned Bun runtime required');mkdirSync(run,{mode:0o700});const startedAt=Date.now(),expiresAt=startedAt+86400000,runId=crypto.randomUUID();let lastClock=startedAt;
   const clock=()=>{const now=Date.now();if(now<lastClock||now>=expiresAt)throw Error('renewal clock regression or expiry');lastClock=now;return now;};
-  const original=readFileSync(join(dir,'qualifications.json'),'utf8'),privatePolicy=renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'));
+  const original=readFileSync(join(dir,'qualifications.json'),'utf8'),privatePolicy=renewalDigest(policyBytes);
+  const previousDelivery=live.get<{version?:number}>('delivery-qualified');if(previousDelivery?.version!==2)throw Error('prior publisher v2 authority unavailable');durable(join(run,'delivery-qualified.original.json'),json(previousDelivery));
   if(renewalDigest(original)!==claim.qualificationSha256)throw Error('qualification bytes changed before renewal');
   const version=(await command(['codex','--version'])).trim(),fingerprint=renewalFingerprint(checkout,version);
   if(renewalDigest(fingerprint)!==renewalDigest(claim.fingerprint))throw Error('boundary or CLI changed before renewal');
@@ -73,7 +74,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(subscription.exitCode!==0)throw Error('subscription status failed');
   durable(join(run,'subscription.json'),json({argv:['codex','login','status'],code:subscription.exitCode,signal:null,stdout:subscription.stdout.toString(),stderr:subscription.stderr.toString(),observedAt:Date.now()}));
   durable(join(run,'qualifications.original.json'),original);
-  const workspace=join(run,'workspace');mkdirSync(join(workspace,'.factory-tmp'),{recursive:true,mode:0o700});await command(['git','init','-q',workspace]);await copyDependencies(join(checkout,'node_modules'),join(workspace,'node_modules'));
+  const workspace=join(run,'workspace');mkdirSync(join(workspace,'.factory-tmp'),{recursive:true,mode:0o700});await command(['git','init','-q',workspace]);await copyDependencies(join(checkout,'node_modules'),join(workspace,'node_modules'));localizeDependencies(workspace,checkout,join(run,'dependency-links'));if(!realpathSync(join(workspace,'node_modules/zod/package.json')).startsWith(realpathSync(join(workspace,'node_modules'))+'/'))throw Error('dependency target escapes actual rehearsal workspace');
   const targets={socket:process.env.SSH_AUTH_SOCK??'',credential:join(homedir(),'.codex/auth.json'),sentinel:join(run,'protected-sentinel'),publisher:join(checkout,'adapters/delivery.ts'),dependencies:join(workspace,'node_modules/zod/package.json'),toolchain:process.execPath};
   durable(targets.sentinel,'Fictional protected qualification sentinel\n');
   if(!targets.socket||!statSync(targets.socket).isSocket())throw Error('known live signing socket unavailable');
@@ -85,13 +86,13 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   for(const effort of ['medium','high'] as const)for(const kind of ['security','time','tokens'] as const){
    guard();const leaf=join(run,`${effort}-${kind}`);mkdirSync(leaf,{mode:0o700});
    const commandText=`/usr/bin/python3 ${probePath}`;
-   const t:Ticket={repo:'fulmar-hq/agent-factory',number:141,owner:role[0],creator:'trusted qualification executor',source:id,area:'controller',kind:'qualification',title:'Verify Codex native boundary',outcome:kind==='security'?`Qualification only. Run exactly ${commandText} once. Do not edit the probe or inspect credential contents. Report its actual JSON output.`:'Qualification lifecycle only. Run /usr/bin/python3 lifecycle.py once and wait on that command. Do not edit files or send a final answer; the controller will stop it.',test:kind==='security'?commandText:'/usr/bin/python3 lifecycle.py',approved:true,benefit:'high',estimateSeconds:kind==='time'?25:180,estimateTokens:kind==='tokens'?100:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort};
+   const t:Ticket={repo:'fulmar-hq/agent-factory',number:141,owner:role[0],creator:'trusted qualification executor',source:id,area:'controller',kind:'qualification',title:'Verify Codex native boundary',outcome:kind==='security'?`Qualification only. Run exactly ${commandText} once. Do not edit the probe or inspect credential contents. The probe creates its own unsigned commit and bundle. Use exactly one tool command, with no setup, retries or extra commands. Report its actual JSON output.`:'Qualification lifecycle only. Run /usr/bin/python3 lifecycle.py once and wait on that command. Do not edit files or send a final answer; the controller will stop it.',test:kind==='security'?commandText:'/usr/bin/python3 lifecycle.py',approved:true,benefit:'high',estimateSeconds:kind==='time'?25:180,estimateTokens:kind==='tokens'?100:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort};
    let commandRef:ReceiptRef|undefined;
    if(kind==='security'){
     const spec=workerSpec(t,workspace,'print',dir,{}),overrides=spec.argv.flatMap((arg,i)=>arg==='-c'?[arg,spec.argv[i+1]!]:[]);
     const names=[['known_agent_socket',targets.socket],['credential',targets.credential],['private_sentinel',targets.sentinel],['publisher_write',targets.publisher],['dependencies_write',targets.dependencies],['toolchain_write',targets.toolchain]] as const;
     const known=names.map(([check,target])=>{const stat=statSync(target);return {check,target,existedAt:Date.now(),kind:stat.isSocket()?'socket':'file',dev:stat.dev,ino:stat.ino};});
-    const before=clock(),priorCleanup=allCleanup;allCleanup=false;
+    const before=clock(),priorCleanup:boolean=allCleanup;allCleanup=false;
     const err=openSync(join(leaf,'command.stderr'),'ax',0o600),child=spawnWorker({...spec,argv:['codex','sandbox',...overrides,'-P','factory','-C',workspace,'/usr/bin/python3',probePath]},workspace,err);
     let timedOut=false,stdout='',code:number|null=null;
     const timer=setTimeout(()=>{timedOut=true;void child.stop();},60000);
@@ -105,17 +106,19 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
    }
    const s=new Store(join(leaf,'rehearsal.sqlite')),e=new Engine(s,c),sessionId=`qualification-${effort}-${kind}`;
    let captureError:string|undefined,exit:{code:number|null;signal:NodeJS.Signals|null;at:number}|undefined,before:Snapshot|undefined,afterTerm:Snapshot|null=null,final:Snapshot|undefined;
-   const samples:{at:number;alive:true;usage:Usage}[]=[],signals:{pid:number;identity:string;signal:'SIGTERM'|'SIGKILL';at:number}[]=[];
+   const samples:{at:number;alive:true;usage:Usage}[]=[],signals:{pid:number;identity:string;signal:'SIGTERM'|'SIGKILL';at:number;result:'sent'}[]=[];
    // These are isolated rehearsal custody rows, never admitted production work or fabricated qualifications.
    s.set('paused',false);s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run(sessionId,'qualification/codex#141',t.owner,'codex','reserved',JSON.stringify(t));e.claimStart(sessionId);claimSupervisor(e,sessionId);
    const observation:WorkerObservation & {sample:(native:import('./native').NativeReceipt|undefined,at:number)=>void}={
-    signal:(pid,identity,signal,at)=>{if(signal==='SIGTERM'||signal==='SIGKILL')signals.push({pid,identity,signal,at});},
+    signal:(pid,identity,signal,at)=>{if(signal==='SIGTERM'||signal==='SIGKILL')signals.push({pid,identity,signal,at,result:'sent'});},
     snapshot:(stage,rows,at)=>{if(stage==='afterTerm')afterTerm={at,error:null,rows};else final={at,error:null,rows};},
     exited:(code,signal,at)=>{exit={code,signal,at};},
-    sample:(native,at)=>{if(!native?.path||signals.length)return;const usage=lastUsage(native.path,at);if(!usage||usage.total_tokens<=0)return;const raw=s.db.query("SELECT data FROM events WHERE kind='native-process' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!raw)return;const pid=JSON.parse(raw.data).pid,table=snapshot();if(!table.rows.some(row=>row.pid===pid&&!row.state.startsWith('Z')))return;before=table;samples.push({at,alive:true,usage});}
+    sample:(native,at)=>{if(!native?.path||signals.length)return;const usage=lastUsage(native.path,at);if(!usage||usage.total_tokens<=0)return;const raw=s.db.query("SELECT data FROM events WHERE kind='native-process' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!raw)return;const pid=JSON.parse(raw.data).pid,table=snapshot();if(!table.rows.some(row=>row.pid===pid&&!row.state.startsWith('Z')))return;before=table;samples.push({at,alive:true,usage});
+      const evidence=native.evidence(t.model!,effort),old=QualificationSchema.parse(JSON.parse(original)[`codex:${effort}`]);
+      if(evidence.verified)live.set('codex-renewal-native',{attempt:id,provider:`codex:${effort}`,qualificationId:renewalDigest(old),expiresAt:old.expiresAt,nativeId:native.id,nativePath:evidence.path,workspace,pid,identity:processIdentity(pid),startedAt:s.get<{at:number}>(`active-clock:${sessionId}`)!.at,observedAt:at,wake:`renewal:${id}:${effort}:${kind}`});}
    };
    let guardError:string|undefined;const watch=setInterval(()=>{try{guard();}catch(error){guardError=String(error);s.set(`stop:${sessionId}`,{reason:guardError});}},500);
-   const priorCleanup=allCleanup;allCleanup=false;
+   const priorCleanup:boolean=allCleanup;allCleanup=false;
    try{startedNative=true;await superviseSession(e,sessionId,t,workspace,join(leaf,'native.jsonl'),kind==='security'?{}:undefined,observation);}catch(error){captureError=String(error);}finally{clearInterval(watch);}
    const current=e.sessions()[0]!,native=s.get<{id:string;path:string;verified:boolean}>(`native-evidence:${sessionId}`),cleanup=s.get<{verified:boolean}>(`cleanup-evidence:${sessionId}`),nativeProcess=s.db.query("SELECT data FROM events WHERE kind='native-process' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;
    allCleanup=priorCleanup&&cleanup?.verified===true;
@@ -149,12 +152,12 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(readFileSync(join(dir,'qualifications.json'),'utf8')!==original||renewalDigest(renewalFingerprint(checkout,finalVersion))!==renewalDigest(fingerprint)||renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('final qualification/source/clock comparison refused');
   live.set('codex-renewal-uncertain',true);renameSync(join(run,'qualifications.next.json'),join(dir,'qualifications.json'));replaced=true;sync(dir);
   clock();if(readFileSync(join(dir,'qualifications.json'),'utf8')!==next)throw Error('adoption readback uncertain');
-  live.atomic(()=>{live.set('delivery-qualified',{version:2,expiresAt,evidence:join(run,'report.md')});live.set('codex-renewal-uncertain',false);live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});status('renewed',{expiresAt,manifest:join(run,'manifest.json')});});
+  live.atomic(()=>{if(renewalDigest(live.get('delivery-qualified'))!==renewalDigest(previousDelivery))throw Error('publisher authority changed during renewal');live.set('delivery-qualified',{version:2,expiresAt,evidence:join(run,'report.md')});live.set('codex-renewal-uncertain',false);live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});status('renewed',{expiresAt,manifest:join(run,'manifest.json')});});
   return {state:'renewed',expiresAt,run};
  }catch(error){
   const reason=String(error);if(!ownsClaim)return {state:'refused',reason,run};if(replaced)live.set('codex-renewal-uncertain',true);
-  status(replaced?'uncertain':'failed',{reason,allCleanup,startedNative});if(allCleanup)live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});
-  try{const bridge=healthBridge(mailPath());try{bridge.send(`codex-renewal-failure:${id}`,'Vincent','Factory qualification renewal failed. New work may stop when the current proof expires; the retained failure needs review.');}finally{bridge.close();}}catch(notification){live.event(`renewal-alert-failure:${id}`,'codex-renewal-alert-failure',{id,error:String(notification)},'Retry notification only with the same ID; never replay native probes');}
+  status(replaced?'uncertain':'failed',{reason,allCleanup,startedNative});if(allCleanup){live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});}
+  renewalFailureAlert(live,id);
   return {state:replaced?'uncertain':'failed',reason,run};
  }finally{live.close();}
 }

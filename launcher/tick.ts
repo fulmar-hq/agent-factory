@@ -1,3 +1,4 @@
+import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
 import { memoryPressure, reconcileCapacity } from "./capacity";
@@ -104,7 +105,8 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     try {scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
-      const child=Bun.spawn([process.execPath,join(import.meta.dir,"../scripts/renew-codex.ts"),id],{env:{...process.env,FACTORY_PRIVATE_DIR:dir},detached:true,stdin:"ignore",stdout:"ignore",stderr:"ignore"});child.unref();
+      mkdirSync(join(dir,"logs"),{recursive:true,mode:0o700});const fd=openSync(join(dir,"logs",`codex-renewal-${id}.log`),"ax",0o600);
+      try{const child=Bun.spawn([process.execPath,join(import.meta.dir,"../scripts/renew-codex.ts"),id],{env:{...process.env,FACTORY_PRIVATE_DIR:dir},detached:true,stdin:"ignore",stdout:fd,stderr:fd});child.unref();}finally{closeSync(fd);}
     });}catch(error){s.event(crypto.randomUUID(),"codex-renewal-scheduler-refusal",{error:String(error)},"Retain refusal; qualification and capacity gates remain closed");}
 
     observeBilling(s, c, r.billing, now);
