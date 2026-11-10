@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync } from "node:fs";
 import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -49,6 +49,14 @@ export function executableTest(test:string) {
   return test;
 }
 export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c",executableTest(test)];
+// Retained snapshots may predate the macOS-safe diagnostic test. Refuse the
+// known crashing suite rather than changing a frozen tree or skipping a test.
+export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
+  if(platform!=="darwin" || !/test_calendar_build_diagnostic|unittest\s+discover/.test(test))return;
+  const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
+  if(existsSync(path) && readFileSync(path,"utf8").includes("os.abort()"))
+    throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");
+}
 export function prepareTestScratch(checkout:string) {
   mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
   appendFileSync(join(checkout,".git/info/exclude"),"\n.factory-tmp/\n");
@@ -167,6 +175,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
 // checks clean status and the tree again after this process exits.
 export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
   executableTest(t.test);
+  assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
     await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);

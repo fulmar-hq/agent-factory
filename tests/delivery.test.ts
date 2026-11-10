@@ -5,6 +5,20 @@ import { Store } from "../tracking/store";
 import { Engine } from "../launcher/engine";
 import { config, ticket, admission } from "./fixtures";
 
+test("publisher refuses retained macOS abort fixtures without changing the snapshot",async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {assertMacCrashSafe,testSnapshot}=await import("../adapters/delivery");
+ const checkout=mkdtempSync(join(tmpdir(),"factory-crash-test-")),path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
+ mkdirSync(join(checkout,"infra/ci"),{recursive:true});writeFileSync(path,"os.abort()");
+ const command="python3 -m unittest discover -s infra/ci -p 'test_*.py'";
+ expect(()=>assertMacCrashSafe(checkout,command,"darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,command,"linux")).not.toThrow();
+ if(process.platform==="darwin")await expect(testSnapshot({...ticket(),test:command},checkout,"unused","unused")).rejects.toThrow("crash-producing");
+ expect(readFileSync(path,"utf8")).toBe("os.abort()");
+ writeFileSync(path,"os.kill(os.getpid(), int(child_signal))");
+ expect(()=>assertMacCrashSafe(checkout,command,"darwin")).not.toThrow();
+});
+
 test("source command timeout retains an explicit failure diagnostic",async()=>{
  const {command}=await import("../adapters/github");
  await expect(command([process.execPath,"-e","setTimeout(()=>{},10000)"],undefined,50)).rejects.toThrow("timed out after 50ms");

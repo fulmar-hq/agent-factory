@@ -1,3 +1,4 @@
+import {reviewPublished} from './queue';
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
@@ -94,6 +95,7 @@ export async function runWorker(id: string) {
       };
       const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
       s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+      await reviewPublished(e);
     }
   } catch (error) {
     e.finish(id, false);
