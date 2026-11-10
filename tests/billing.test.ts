@@ -4,7 +4,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {billingFromBudget,releaseBilling} from '../adapters/billing';
 const now=Date.parse('2031-11-10T01:00:00Z');
-const policy={wallet:{aws:{ceiling_usd_month:75,hold_at_projected:75,stop_at_actual:68,stop_rule:'gross_actual_plus_remaining_cost_plus_reservations_plus_lag',reviewed_month:'2031-11',stopped_monthly_gross_usd:30,lag_reserve_usd:5,reserved_usd:2}}};
+const policy={wallet:{aws:{ceiling_usd_month:75,reserve_usd:15,hold_at_projected:75,stop_at_actual:68,stop_rule:'gross_actual_plus_remaining_cost_plus_reservations_plus_lag',reviewed_month:'2031-11',stopped_monthly_gross_usd:30,lag_reserve_usd:5,reserved_usd:2}}};
 const budget=()=>({BudgetType:'COST',TimeUnit:'MONTHLY',BudgetLimit:{Amount:'75',Unit:'USD'},CostTypes:{IncludeTax:true,IncludeSubscription:true,IncludeRefund:false,IncludeCredit:false},TimePeriod:{Start:'2031-11-01T00:00:00Z'},LastUpdatedTime:'2031-11-09T18:12:00Z',CalculatedSpend:{ActualSpend:{Amount:'20.123',Unit:'USD'},ForecastedSpend:{Amount:'110.5',Unit:'USD'}}});
 test('retains actual source time and conservatively rounds reviewed gross obligations',()=>{
  const b=billingFromBudget(budget(),policy,'fixture',now);expect(b.observedAt).toBe(Date.parse(budget().LastUpdatedTime));expect(b.postedCents).toBe(2013);expect(b.fixedCents).toBe(2100);expect(b.unpostedCents).toBe(700);expect(b.projectedCents).toBe(4813);
@@ -71,4 +71,9 @@ test('commitment-inclusive native stop persists and stale policy thresholds refu
  s.atomic(()=>debit(s,'pending','aws',2687,now));
  observeReleaseBilling(s,c,b,now);expect(s.get('aws-stop-latched')).toBe(true);
  }finally{s.close();}
+});
+
+test('AWS local-offset month-start is normalized to the billing month',()=>{
+ const value=budget();value.TimePeriod.Start='2031-10-31T20:00:00-04:00';
+ expect(billingFromBudget(value,policy,'fixture',now).month).toBe('2031-11');
 });

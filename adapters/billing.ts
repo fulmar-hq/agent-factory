@@ -16,7 +16,7 @@ const sourceSchema=z.object({profile:z.string().regex(/^[\w-]+$/),accountId:z.st
 
 export function billingFromBudget(rawBudget:unknown,policy:unknown,receipt:string,now:number):Billing {
  const b=budgetSchema.parse(rawBudget),observedAt=Date.parse(b.LastUpdatedTime),month=monthAt(now);
- if(!Number.isFinite(observedAt)||observedAt>now||now-observedAt>=24*3600000||!b.TimePeriod.Start.startsWith(month))throw Error('gross billing receipt stale or wrong month');
+ if(!Number.isFinite(observedAt)||observedAt>now||now-observedAt>=24*3600000||!Number.isFinite(Date.parse(b.TimePeriod.Start))||new Date(b.TimePeriod.Start).toISOString().slice(0,7)!==month)throw Error('gross billing receipt stale or wrong month');
  const raw=policy as {wallet?:{aws?:unknown}},reviewed=reviewedSchema.safeParse(raw?.wallet?.aws);
  const cents=(n:number)=>Math.ceil(n*100),postedCents=cents(Number(b.CalculatedSpend.ActualSpend.Amount));
  let fixedCents=0,unpostedCents=0,projectedCents=cents(Number(b.CalculatedSpend.ForecastedSpend.Amount));

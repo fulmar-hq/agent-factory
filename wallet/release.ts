@@ -11,7 +11,7 @@ export function releaseAvailable(s:Store,c:Config,b:Billing|undefined,raw:unknow
  if(awsRefusal(s,c,now,b)||!b)return 0;
  const policy=(raw as {wallet?:{aws?:unknown}})?.wallet?.aws;
  const thresholds=policy as Config['wallet']['aws']|undefined;
- if(!thresholds || ['ceiling_usd_month','stop_at_actual','hold_at_projected'].some(k=>thresholds[k as keyof typeof thresholds]!==c.wallet.aws[k as keyof typeof thresholds]))return 0;
+ if(!thresholds || ['ceiling_usd_month','stop_at_actual','hold_at_projected','reserve_usd'].some(k=>thresholds[k as keyof typeof thresholds]!==c.wallet.aws[k as keyof typeof thresholds]))return 0;
  const p=reviewedSchema.safeParse(policy);
  if(!p.success)return available(s,c,'aws',now,b);
  if(p.data.reviewed_month!==monthAt(now))return 0;
