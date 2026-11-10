@@ -213,6 +213,7 @@ export class Engine {
         if (this.s.get("usage-bootstrap") || this.active().length) blocked("usage recovery awaiting fresh native reading");
         bootstrap = true;
       }
+      if(t.provider==="codex" && this.s.get("codex-renewal-uncertain")===true)blocked("worker qualification replacement uncertain");
       const q = QualificationSchema.safeParse(a.qualification);
       const model = t.model ?? this.c.owners[t.owner].model,
         effort = t.effort ?? this.c.owners[t.owner].effort;
