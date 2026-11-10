@@ -2,6 +2,65 @@
 
 The fixed America/Toronto windows are 19:00 preflight, 20:00 frozen QA batch and 21:30 Production admission. A separate 30-second reconciliation job observes already-claimed operations. Missed admission minutes refuse; observations never authorize a new late admission. The system timezone must be Toronto because launchd calendars use the system timezone.
 
+## Frozen source batch
+
+The private current-day `release-batch.json` binds the existing QA base, signed
+carrier head/tree/PR, supported OFF hold, ordered exact source heads, overlap
+groups and independent composition review. The carrier's PR body binds the
+strict manifest's SHA-256. Assemble it in an isolated Alido worktree, preserve
+source history there, resolve overlaps in the recorded order, and pass the
+normal exact-head Verify, Secret scan and Release hold checks. Failed or pending
+heads are explicit exclusions. A green individual source is not proof that the
+combined carrier works.
+
+At20:00 the trusted executor rereads the current carrier, base, tree, checks,
+holds and promotion inventory, then requests one protected expected-head squash.
+The GitHub-signed squash must have the expected base parent and the exact
+reviewed carrier tree. Its actual new QA revision becomes the sole Quality and
+Production candidate. The original source PRs are not falsely recorded as
+individually merged: their histories remain retained and any supersession must
+cite the delivered carrier. Unknown merge outcomes retain the original claim;
+there is no rebase, changed-head substitution, blind retry or catch-up.
+
+After that admitted merge, freeze, light-push completion, pinned full suite,
+candidate and hosted QA deployment may finish before21:20. A failed initial push
+is terminal; the scheduled full-batch pass is not a retry of failed tests. Main
+scheduled verification is read-only with respect to releases and is not a release
+overlap. Queued/active QA or Main push CI, deployments, remote release operations
+and open promotions remain overlaps. Inventories are scoped to those workflows
+and events so unrelated PR queues cannot crowd out release evidence.
+
+## Readiness and alerting
+
+The19:00 check independently collects a new gross Budgets reading, the original
+AWS password/MFA-session provenance valid beyond22:30, configured Release/Quality
+qualifications and fresh native usage, Quality process custody, Data-volume
+capacity (60GiB free; the existing80% signal remains advisory), supported OFF hold and release-board labels, and the exact
+carrier's base/head/tree/current required checks. Billing is read even while
+pause or STOP independently prevents dispatch. Access-token refresh expiry never
+extends the original authentication session.
+
+If Claude has no fresh structured quota receipt, the explicit preflight reads
+the built-in `/usage` screen with tools and customizations disabled. It submits
+only that local command, requires a complete native quota panel and zero model
+tokens, and stops its own bounded CLI process group. Every exposed quota window
+is retained. Unknown UI, trust or authentication prompts supply no evidence;
+the reader never answers them. This is not a qualification renewal or a per-tick
+model session.
+
+A CLI qualification does not establish hosted acceptance. Private
+`release-quality-path.json` must contain genuine evidence of hosted browser
+access and trusted receipt ingestion for the configured Quality harness/model/
+effort on this exact factory source through22:30. Missing evidence refuses;
+fixtures, CI success and deployment health cannot manufacture that receipt.
+
+Every missing input is retained in one readiness report. An admitted19:00 check
+queues one plain blocker through the existing Alido Mail outbox only when inputs
+are missing. A healthy check is silent. Slow reads may complete that alert
+before19:50, but a fresh late invocation cannot claim the preflight. Configuration
+errors also enter this path. Rehearsals never invoke the alert. Failed outbox
+access remains a recorded delivery failure rather than a claimed notification.
+
 `scripts/install-release.ts` prepares four private plists. `--install` installs and verifies them after review and explicit owner authorization. Existing definitions are archived before replacement. There is no RunAtLoad catch-up. Every external admission checks the current clock after asynchronous reads, the actual QA SHA/tree, overlap inventory, supported hold identity, factory pause and AWS wallet. Each paid operation reserves a conservative dollar atomically with its stable day/step claim. No cap, billing evidence or qualification is manufactured.
 
 Claims are written to SQLite before dispatch. A lost response leaves uncertain custody and is never retried automatically. Successful operations carry their native handle and evidence; failures/deadlines produce durable refusal receipts and one Release diagnosis event. Reconciliation and duplicate calendar invocations retain the original claims. The trusted GitHub adapter never falls back to workstation AWS SSO or changes protection rules.

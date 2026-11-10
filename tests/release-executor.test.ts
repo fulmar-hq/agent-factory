@@ -19,6 +19,21 @@ test('calendar night runs without chat, promotes same accepted tree with differe
 test('duplicate launch and restart do not replay effects',async()=>{
  const r=rig();await qa(r);await r.executor.run('qa');const restarted=new ReleaseExecutor(r.s,r.executor.port,async()=>null,r.now);await restarted.run('qa');expect(r.calls).toEqual(['preflight','qa']);r.s.close();
 });
+test('squashed carrier binds Quality and Production to the actual merged QA revision',async()=>{
+ const r=rig(),merged='f'.repeat(40),batch={version:1 as const,day:'2026-11-09',base:'c'.repeat(40),revision,tree,pr:7,ref:'feat/fixture-batch',holdId:'fixture-hold',sources:[{number:8,head:revision,ref:'feat/source',title:'Fictional change'}],overlaps:[],review:'fictional independent review'};
+ let current=revision;
+ const snapshot=r.executor.port.snapshot;
+ r.executor.port.snapshot=async()=>({...await snapshot(),revision:current});
+ r.executor.port.observe=async(step)=>({state:'success',evidence:{artifact,completedAt:r.now(),holdId:'fixture-hold',revision,tree,...(step==='qa'?{qaRevision:merged}:{})}});
+ const executor=new ReleaseExecutor(r.s,r.executor.port,async()=>null,r.now,()=>{},batch);
+ await executor.run('preflight');r.set('20:00');await executor.run('qa');
+ expect(executor.effect(batch.day,'qa')?.context.revision).toBe(merged);
+ expect(()=>recordAcceptance(r.s,`qa-deployed:${batch.day}:${tree}`,'native',{day:batch.day,revision,tree,artifact,verdict:'ACCEPT',evidence:'fictional'})).toThrow();
+ recordAcceptance(r.s,`qa-deployed:${batch.day}:${tree}`,'native',{day:batch.day,revision:merged,tree,artifact,verdict:'ACCEPT',evidence:'fictional'},r.now());
+ current=merged;r.set('21:30');await executor.run('production');
+ expect(executor.effect(batch.day,'promote')?.context.revision).toBe(merged);
+ expect(r.calls).toEqual(['preflight','qa','promote','readback']);r.s.close();
+});
 test('deliberate check failure refuses and wakes diagnosis without a hang',async()=>{
  const r=rig();r.failed.add('preflight');await r.executor.run('preflight');r.set('20:00');expect((await r.executor.run('qa')).state).toBe('refused');expect(r.calls).toEqual(['preflight']);expect(r.s.get('owner-wake:release-failed:2026-11-09:preflight')).toBeTruthy();r.s.close();
 });
