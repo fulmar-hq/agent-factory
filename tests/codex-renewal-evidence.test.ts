@@ -248,3 +248,6 @@ test("delaying token TERM after observed threshold cannot qualify", () => {
   f.mutate(r.supervisor,x=>{x.endedAt=r.endedAt;x.final.at=r.endedAt;x.signals[0].at=r.startedAt+300000;});
   expect(f.collect().status).toBe("refused");
 });
+
+test("a native workdir override cannot substitute another relative probe",()=>{const f=fixture(),r=f.m.runs[0],command="/usr/bin/python3 probe.py";r.command=command;f.mutate(r.commandProbe!,x=>{x.command=command;});f.mutate(r.rollout,x=>{x[2].payload.arguments=JSON.stringify({cmd:command,workdir:"/unrelated-workspace"});},true);const raw=Buffer.from(f.read(r.stream.path)).toString().replace(`/usr/bin/python3 ${f.m.probe.path}`,command),b=bytes(raw);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe("refused");});
+test("a late-only descendant cleanup observation cannot qualify",()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.final.at=now-1;});expect(f.collect().status).toBe("refused");});

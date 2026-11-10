@@ -225,7 +225,11 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(target.length === 1 && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
     }
     securityOutput(c.stdout);
-    const matching = [...calls].filter(([, call]) => ["exec_command", "functions.exec_command"].includes(call.name) && z.object({ cmd: text }).parse(JSON.parse(call.arguments)).cmd === r.command);
+    const matching = [...calls].filter(([, call]) => {
+      if (!["exec_command", "functions.exec_command"].includes(call.name)) return false;
+      const args = z.object({cmd:text,workdir:text.optional()}).parse(JSON.parse(call.arguments));
+      return args.cmd === r.command && (args.workdir === undefined || args.workdir === r.workspace);
+    });
     requireThat(matching.length === 1 && outputs.has(matching[0][0]), "actual native security invocation missing");
     securityOutput(outputs.get(matching[0][0])!);
     const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution" && x.item.command === r.command);
@@ -237,7 +241,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
-    requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
+    requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS && s.final.at - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {
       requireThat(s.timeBudget !== null && s.tokenBudget === null && s.stopAt! - r.startedAt >= 50000 && s.stopAt! - r.startedAt <= 50000 + STOP_POLL_GRACE_MS, "original 25s estimate/50s stop required");
       const d = s.descendant;
