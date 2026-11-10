@@ -30,7 +30,7 @@ function fixture(root = "/fictional") {
     const u = { input_tokens: kind === "tokens" ? 200 : 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: kind === "tokens" ? 210 : 110 };
     const row = (offset: number, type: string, payload: unknown) => ({ timestamp: new Date(start + offset).toISOString(), type, payload });
     const command = `/usr/bin/python3 ${probe.path}`;
-    const rollout: unknown[] = [row(0, "session_meta", { id: nativeId, cwd: workspace }), row(1, "turn_context", { model: m.model, effort })];
+    const rollout: unknown[] = [row(0, "session_meta", { id: nativeId, cwd: workspace }), row(1, "turn_context", { model: m.model, effort, cwd: workspace })];
     if (kind === "security") rollout.push(row(20, "response_item", { type: "function_call", name: "exec_command", call_id: "tool-1", arguments: JSON.stringify({ cmd: command }) }),
       row(50, "response_item", { type: "function_call_output", call_id: "tool-1", output: "Wall time: 0.1 seconds\nOutput:\n" + output }));
     rollout.push(row(100, "event_msg", { type: "token_count", info: { total_token_usage: { ...u, reasoning_output_tokens: 2 } } }));
@@ -44,13 +44,13 @@ function fixture(root = "/fictional") {
     const supervisor = { runId: m.runId, nativeId, workspace, startedAt: start, endedAt: end, pid: parent.pid, identity: parent.identity,
       probeBeforeSha256: probe.sha256, probeAfterSha256: probe.sha256,
       reason: kind === "security" ? "complete" : kind, timeBudget: kind === "time" ? { estimateSeconds: 25, pauseSeconds: 50 } : null, tokenBudget: kind === "tokens" ? { estimateTokens: 100, pauseTokens: 200 } : null, exitCode: kind === "security" ? 0 : null, signal: kind === "security" ? null : "SIGTERM", stopAt,
-      samples: [{ at: start + 500, alive: true, usage: u }], before: snapshot(start + 500, kind === "time" ? [parent, child] : [parent]),
+      samples: [{ at: start + 500, alive: true, usage: u },...(kind === "time"?[{at:start+49500,alive:true,usage:u}]:[])], before: snapshot(start + (kind === "time"?49500:500), kind === "time" ? [parent, child] : [parent]),
       afterTerm: kind === "time" ? snapshot(start + 52000, [child]) : null, final: snapshot(end, []),
       descendant: kind === "time" ? { pid: child.pid, identity: child.identity } : null,
-      signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM" },
-        ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL" }] : [])] };
+      signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM",result:"sent" },
+        ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM",result:"sent" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL",result:"sent" }] : [])] };
     m.runs.push({ nativeId, effort, kind, workspace, startedAt: start, endedAt: end,
-      stream: put(`stream-${n}`, "OpenAI Codex v0.0 fictional CLI banner\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
+      stream: put(`stream-${n}`, "OpenAI Codex v0.0.0\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
       ...(kind === "security" ? { command, commandProbe: put(`command-${n}`, { runId: m.runId, nativeId, workspace, command, probeSha256: probe.sha256, probeAfterSha256: probe.sha256,
         startedAt: start - 500, endedAt: start - 100, code: 0, signal: null, stdout: output,
         targets: securityChecks.slice(0, 6).map(check => ({ check, target: `/fictional/known-${check}`, existedAt: start - 1000, kind: check === "known_agent_socket" ? "socket" : "file" })) }) } : {}) });
@@ -253,3 +253,22 @@ test("a native workdir override cannot substitute another relative probe",()=>{c
 test("a late-only descendant cleanup observation cannot qualify",()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.final.at=now-1;});expect(f.collect().status).toBe("refused");});
 
 test("installed CLI shell wrapper still binds the exact immutable probe",()=>{const f=fixture(),r=f.m.runs[0],raw=Buffer.from(f.read(r.stream.path)).toString().replace(`"command":"/usr/bin/python3 ${f.m.probe.path}"`,`"command":"/bin/zsh -c '/usr/bin/python3 ${f.m.probe.path}'"`),b=bytes(raw);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe("verified");});
+
+test("turn context cwd cannot redirect a relative probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x[1].payload.cwd="/unrelated-workspace";},true);expect(f.collect().status).toBe("refused");});
+test("an aborted native turn before the budget stop cannot qualify",()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+200).toISOString(),type:"event_msg",payload:{type:"turn_aborted"}});},true);expect(f.collect().status).toBe("refused");});
+
+test("a failed earlier tool attempt cannot be hidden by a later passing probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:"response_item",payload:{type:"function_call",name:"exec_command",call_id:"failed",arguments:JSON.stringify({cmd:"/usr/bin/python3 probe.py"})}},{timestamp:new Date(r.startedAt+6).toISOString(),type:"response_item",payload:{type:"function_call_output",call_id:"failed",output:"failed security probe"}});},true);expect(f.collect().status).toBe("refused");});
+test("missing turn cwd is unknown rather than workspace evidence",()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{delete x[1].payload.cwd;},true);expect(f.collect().status).toBe("refused");});
+
+for(const failure of ['error-item','failed-status','tool-exit'] as const)test('explicit '+failure+' refuses despite passing booleans',()=>{const f=fixture(),r=f.m.runs[0];if(failure==='tool-exit')f.mutate(r.rollout,x=>{x[3].payload.output='Process exited with code 1\n'+x[3].payload.output;},true);else{const lines=Buffer.from(f.read(r.stream.path)).toString().split('\n');if(failure==='error-item')lines.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'error',message:'failed'}}));else{const row=JSON.parse(lines[2]);row.item.status='failed';lines[2]=JSON.stringify(row);}const b=bytes(lines.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);}expect(f.collect().status).toBe('refused');});
+test('abort between stop intent and actual TERM cannot qualify',()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.supervisor,x=>{x.signals[0].at=r.startedAt+1200;});f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1100).toISOString(),type:'event_msg',payload:{type:'turn_aborted'}});},true);expect(f.collect().status).toBe('refused');});
+
+test('non-JSON error text is never a harmless CLI banner',()=>{const f=fixture(),r=f.m.runs[0],b=bytes('Error: probe failed\n'+Buffer.from(f.read(r.stream.path)).toString());f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+test('a successful security stream needs its native terminal receipt too',()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{x.splice(-1,1);},true);expect(f.collect().status).toBe('refused');});
+
+test('unsupported custom tool attempts cannot hide an earlier failed probe',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'failed-custom',input:'probe'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'failed-custom',output:'Process exited with code 1'}});},true);expect(f.collect().status).toBe('refused');});
+test('uncontrolled positive native exit cannot qualify a budget stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.exitCode=1;x.signal=null;});expect(f.collect().status).toBe('refused');});
+test('an old root observation cannot establish liveness at the controlled stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.before.at=x.startedAt+500;});expect(f.collect().status).toBe('refused');});
+
+for(const index of [1,2])test('failed lifecycle command cannot be hidden by a later stop '+index,()=>{const f=fixture(),r=f.m.runs[index],raw=Buffer.from(f.read(r.stream.path)).toString().split('\n');raw.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'failed setup',status:'completed',exit_code:1,aggregated_output:'setup failed'}}));const b=bytes(raw.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+test('native security completion cannot precede the probe output',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{const terminal=x.pop();terminal.timestamp=new Date(r.startedAt+2).toISOString();x.splice(2,0,terminal);},true);expect(f.collect().status).toBe('refused');});
