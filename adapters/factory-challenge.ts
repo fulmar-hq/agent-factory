@@ -52,7 +52,8 @@ export async function runFactoryChallenge(s:Store,p:FactoryPull,dir:string,check
   if((await git(['rev-parse','HEAD'],work)).trim()!==p.head)throw Error('review snapshot head differs');
   for(const path of [scratch,join(work,'node_modules'),join(work,'review.diff'),join(work,'review-contract.md')])if(existsSync(path)||(()=>{try{return lstatSync(path).isSymbolicLink();}catch{return false;}})())throw Error('review scratch/dependency path is already tracked or linked');
   mkdirSync(join(scratch,'home'),{recursive:true,mode:0o700});await command(process.platform==='darwin'?['cp','-cR',join(checkout,'node_modules'),join(work,'node_modules')]:['cp','-R',join(checkout,'node_modules'),join(work,'node_modules')]);localizeDependencies(work,checkout,join(run,'dependency-links'));
-  const diff=await git(['diff','--no-ext-diff','--no-textconv',main,p.head],work);
+  const diff=target?await command(['gh','api',`repos/${reviewRepo}/pulls/${p.number}`,'-H','Accept: application/vnd.github.diff']):await git(['diff','--no-ext-diff','--no-textconv',main,p.head],work);
+  if(diff.length>2*1024*1024)throw Error('review diff exceeds bounded scope');
   if(!target){const {deepRisk}=await import('../launcher/code-review');if(deepRisk.test(diff))minutes=30;}
   writeFileSync(join(work,'review.diff'),diff,{flag:'wx',mode:0o600});
   const pr=JSON.parse(await command(['gh','api',`repos/${t.repo}/pulls/${p.number}`]));let body=String(pr.body);const issue=body.match(/refs\s+#([0-9]+)/i);if(issue)body+='\nLinked issue:\n'+await command(['gh','api',`repos/${t.repo}/issues/${issue[1]}`,'--jq','.body']);if(pr.head?.sha!==p.head||pr.base?.ref!==baseRef||pr.base?.repo?.full_name!==reviewRepo||pr.head?.repo?.full_name!==reviewRepo||pr.state!=='open')throw Error('review PR identity changed');if(body.length>100000)throw Error('review contract exceeds bound');
