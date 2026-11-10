@@ -13,7 +13,7 @@ test('scheduler reads only complete open REST inventory while retaining closed h
  try{
   const old=issue(1);s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run('example/demo#1',JSON.stringify(old),now-1);
   const result=await reconcile(s,config(),now,async args=>{calls++;if(args.includes('--paginate'))expect(args.at(-1)).toContain('state=open');return args.includes('--paginate')?JSON.stringify([[rest(ready)]]):JSON.stringify({...rest(old),state:'closed',closed_at:'2026-11-10'});},'open');
-  expect(calls).toBe(2);expect(result.map(t=>t.number)).toEqual([1002]);expect(s.get<any>('github:example/demo')).toMatchObject({count:1,truncated:false});
+  expect(calls).toBe(3);expect(result.map(t=>t.number)).toEqual([1002]);expect(s.get<any>('github:example/demo')).toMatchObject({count:1,truncated:false});
   expect(JSON.parse((s.rows('tickets') as any[]).find(t=>t.id==='example/demo#1').snapshot).state).toBe('CLOSED');
  }finally{s.close();}
 });
@@ -60,6 +60,26 @@ test('repository underscores remain literal when finding missing open snapshots'
  s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run('example/fooXbar#1',JSON.stringify(issue(1)),now-1);
  let calls=0;try{
   await reconcile(s,c,now,async()=>{calls++;return '[[]]';},'open');
-  expect(calls).toBe(1);expect(s.get<any>('github:example/foo_bar').error).toBeNull();
+  expect(calls).toBe(2);expect(s.get<any>('github:example/foo_bar').error).toBeNull();
  }finally{s.close();}
+});
+
+test('shifted REST pages cannot hide an unseen or reopened ready issue before a stable follow-up',async()=>{
+ for(const previouslyClosed of [false,true]){
+  const s=new Store(':memory:'),lost={...issue(101),body:'```factory\n'+JSON.stringify(ticket(101))+'\n```',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:ready'}]};lost.labels.push({name:intakeLabel('example/demo',lost)});
+  if(previouslyClosed)s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run('example/demo#101',JSON.stringify({...lost,state:'CLOSED'}),now-1);
+  const row=(n:number)=>rest(n===101?lost:issue(n));
+  // #201 closes after page one, shifting #101 off page two. Both reads have
+  // 200 rows; only exact identities/content reveal the incomplete first pass.
+  const shifted=[Array.from({length:100},(_,n)=>row(201-n)),Array.from({length:100},(_,n)=>row(100-n))];
+  const stable=[Array.from({length:100},(_,n)=>row(200-n)),Array.from({length:100},(_,n)=>row(100-n))];
+  let reads=0;
+  try{
+   const before=s.rows('tickets');
+   expect(await reconcile(s,config(),now,async()=>JSON.stringify(reads++===0?shifted:stable),'open')).toEqual([]);
+   expect(s.rows('tickets')).toEqual(before);expect(s.get<any>('github:example/demo').error).toContain('changed between complete observations');expect(reads).toBe(2);
+   const ready=await reconcile(s,config(),now+1,async()=>JSON.stringify(stable),'open');
+   expect(ready.map(t=>t.number)).toEqual([101]);expect(s.get<any>('github:example/demo').error).toBeNull();
+  }finally{s.close();}
+ }
 });

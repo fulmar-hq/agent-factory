@@ -60,15 +60,25 @@ export function restIssue(repo:string,raw:unknown) {
  if(i.pull_request || i.html_url!==`https://github.com/${repo}/issues/${i.number}`)throw Error('GitHub REST issue identity mismatch');
  return {number:i.number,title:i.title,body:i.body??'',url:i.html_url,updatedAt:i.updated_at,closedAt:i.closed_at,state:i.state.toUpperCase(),labels:i.labels};
 }
-// Scheduling needs open issues, not thousands of closed bodies/label connections.
-// gh follows REST Link headers; a late-page failure rejects the entire command.
+// Offset pagination is not an immutable snapshot: a close/reopen between pages
+// can skip an unseen issue. Publish only two matching complete observations,
+// with one deadline shared by both reads; an unstable pass retains old state.
 export async function openIssuePages(repo:string,execute=command) {
  if(!/^[\w.-]+\/[\w.-]+$/.test(repo))throw Error('invalid repository');
- const pages=z.array(z.array(restIssueSchema)).parse(JSON.parse(await execute(['gh','api','--paginate','--slurp',`repos/${repo}/issues?state=open&per_page=100`],undefined,120000)));
- if(!pages.length || pages.some((p,n)=>p.length>100 || n<pages.length-1&&p.length!==100))throw Error('GitHub REST pagination malformed');
- const seen=new Set<number>();
- return pages.flatMap(page=>page.filter(i=>!i.pull_request).map(i=>{
-  if(seen.has(i.number)||i.state!=='open')throw Error('GitHub REST issue identity mismatch');seen.add(i.number);
-  return restIssue(repo,i);
- }));
+ const deadline=Date.now()+120000;
+ const read=async()=>{
+  const remaining=deadline-Date.now();if(remaining<=0)throw Error('GitHub REST inventory consistency deadline exceeded');
+  const pages=z.array(z.array(restIssueSchema)).parse(JSON.parse(await execute(['gh','api','--paginate','--slurp',`repos/${repo}/issues?state=open&per_page=100`],undefined,remaining)));
+  if(Date.now()>=deadline)throw Error('GitHub REST inventory consistency deadline exceeded');
+  if(!pages.length || pages.some((p,n)=>p.length>100 || n<pages.length-1&&p.length!==100))throw Error('GitHub REST pagination malformed');
+  const seen=new Set<number>();
+  return pages.flatMap(page=>page.filter(i=>!i.pull_request).map(i=>{
+   if(seen.has(i.number)||i.state!=='open')throw Error('GitHub REST issue identity mismatch');seen.add(i.number);
+   return restIssue(repo,i);
+  }));
+ };
+ const normalized=(rows:Awaited<ReturnType<typeof read>>)=>JSON.stringify(rows.map(i=>({...i,labels:[...i.labels].sort((a,b)=>a.name.localeCompare(b.name))})).sort((a,b)=>a.number-b.number));
+ const first=await read(),second=await read();
+ if(normalized(first)!==normalized(second))throw Error('GitHub REST open inventory changed between complete observations; retain snapshots and retry');
+ return second;
 }

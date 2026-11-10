@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
 import {TestEngine as Engine,config,ticket,admission,githubPage} from './fixtures';
-import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext,githubDiagnostic} from '../adapters/github-budget';
+import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext,githubDiagnostic,githubSource,unavailable} from '../adapters/github-budget';
 import {githubHealth} from '../launcher/github-health';
 import {recordWorkerFailure} from '../launcher/worker';
 import {recoverWorkers} from '../launcher/wake';
@@ -130,4 +130,24 @@ for(const phase of ['owner-poll','final-intake'] as const)test(`a full tick keep
   expect(s.get('last-successful-heartbeat')).toBeNull();
   expect(s.rows('events').filter((r:any)=>r.kind==='session-archive')).toHaveLength(0);
  }finally{dispatch.mockRestore();supply.mockRestore();subscription.mockRestore();command.mockRestore();s.close();rmSync(dir,{recursive:true});}
+});
+
+test('HTTP500 backs off the real command path and legacy native completion keeps custody',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-gh-500-')),bin=join(dir,'bin'),calls=join(dir,'calls'),old=process.env.PATH;
+ mkdirSync(bin);writeFileSync(join(bin,'gh'),`#!/bin/sh\necho call >> '${calls}'\necho 'gh: InternalServerError (HTTP 500)' >&2\nexit 1\n`,{mode:0o700});process.env.PATH=bin;
+ try{
+  await githubContext.run(dir,async()=>{await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toBeInstanceOf(GitHubUnavailable);await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toThrow('GitHub backoff');});
+  expect(readFileSync(calls,'utf8').trim().split('\n')).toHaveLength(1);
+  const s=new Store(':memory:'),e=new Engine(s,config());e.pause(false,'owner');
+  try{const x=e.admit(ticket(),admission());s.db.query("UPDATE sessions SET status='unknown',native_id='fictional',pid=NULL WHERE id=?").run(x.id);s.set(`cleanup-evidence:${x.id}`,{verified:true});
+   for(const status of [500,501,502,503,504,599]){const error=`Error: gh failed (exit 1): gh: InternalServerError (HTTP ${status})`;expect(unavailable(error)).toBe(true);s.event(crypto.randomUUID(),'worker-failure',{id:x.id,error},'retain');recoverWorkers(e);expect(e.sessions()[0].status).toBe('unknown');}
+   expect(s.db.query('SELECT * FROM claims').all()).toHaveLength(1);expect(s.rows('events').filter((r:any)=>r.kind==='session-archive')).toHaveLength(0);
+  }finally{s.close();}
+ }finally{process.env.PATH=old;rmSync(dir,{recursive:true});}
+});
+test('physical GitHub usage attributes the actual supervisor entrypoint to builders',()=>{
+ expect(githubSource(['bun','/fictional/launcher/worker-entry.ts','session'])).toBe('builder');
+ expect(githubSource(['bun','/fictional/launcher/worker.ts','session'])).toBe('builder');
+ expect(githubSource(['bun','/fictional/launcher/tick.ts'])).toBe('tick');
+ expect(githubSource(['bun','/fictional/scripts/control.ts'])).toBe('control');
 });

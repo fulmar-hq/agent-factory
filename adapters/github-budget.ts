@@ -6,13 +6,13 @@ import {join} from 'node:path';
 export class GitHubUnavailable extends Error {
  constructor(message:string,readonly retryAt:number){super(message);this.name='GitHubUnavailable';}
 }
-export const unavailable=(error:unknown)=>error instanceof GitHubUnavailable || /(?:GitHubUnavailable|API rate limit|secondary rate limit|(?:gh|git) (?:failed|timed out).*(?:timeout|connection|network|resolve|EOF|HTTP 50[234]|context deadline|temporary failure)|GitHub backoff)/is.test(String(error));
+export const unavailable=(error:unknown)=>error instanceof GitHubUnavailable || /(?:GitHubUnavailable|API rate limit|secondary rate limit|(?:gh|git) (?:failed|timed out).*(?:timeout|connection|network|resolve|EOF|HTTP 5[0-9]{2}|context deadline|temporary failure)|GitHub backoff)/is.test(String(error));
 export function retryAtFor(error:unknown,now:number,resets?:{resources?:Record<string,{remaining:number;reset:number}>}) {
  const rate=/rate limit/i.test(String(error));
  const exhausted=Object.entries(resets?.resources??{}).filter(([k,v])=>['core','graphql'].includes(k)&&v.remaining===0).map(([,v])=>v.reset*1000+1000);
  return Math.max(now+60000,...(rate?exhausted:[]),...(rate&&!exhausted.length?[now+15*60000]:[]));
 }
-export const githubSource=(argv=process.argv)=>/factory-health-watch/.test(argv.join(' '))?'health':/maintain-factory/.test(argv.join(' '))?'maintenance':/tick\.ts/.test(argv.join(' '))?'tick':/worker\.ts/.test(argv.join(' '))?'builder':/owner\.ts/.test(argv.join(' '))?'owner':/board/.test(argv.join(' '))?'board':'control';
+export const githubSource=(argv=process.argv)=>/factory-health-watch/.test(argv.join(' '))?'health':/maintain-factory/.test(argv.join(' '))?'maintenance':/tick\.ts/.test(argv.join(' '))?'tick':/worker(?:-entry)?\.ts/.test(argv.join(' '))?'builder':/owner\.ts/.test(argv.join(' '))?'owner':/board/.test(argv.join(' '))?'board':'control';
 export function githubBudget(action:'before'|'success'|'failure',args:string[],error?:unknown,retryAt?:number,now=Date.now(),directory=githubContext.getStore()??root) {
  const s=new Store(join(directory,'controller.sqlite'));
  try {
