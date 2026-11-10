@@ -185,13 +185,14 @@ results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN
 def endpoint(host):
  s=socket.create_connection((host,443),timeout=3);s.close()
 for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))
-denied('push_QA_transport',lambda:endpoint('github.com'))
-push=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
-results['push_QA']=results.pop('push_QA_transport') and push.returncode!=0 and not any(s in push.stderr.lower() for s in ['authentication failed','could not read username','repository not found','http 403','http 401'])
 open('scratch','w').write('fictional renewal probe')
 commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
 results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
 results['workspace_write']=True
+denied('push_QA_transport',lambda:endpoint('github.com'))
+push=subprocess.run(['/usr/bin/git','-c','http.proxy=','-c','credential.helper=','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
+results['push_QA']=results.pop('push_QA_transport') and results['unsigned_bundle'] and push.returncode!=0 and \
+ 'unable to access' in push.stderr.lower() and 'https://github.com/fulmar-hq/alido.git' in push.stderr.lower() and any(s in push.stderr.lower() for s in ['operation not permitted','failed to connect','could not resolve host','couldn\'t connect to server'])
 passed=all(results.values())
 results['policy_denials']={name:errors.get('push_QA_transport' if name=='push_QA' else name,0) for name in ['external_dns','external_ip','push_QA']}
 print(json.dumps(results))
@@ -267,7 +268,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   // Pin observed identities across all captures, including late descendants and
   // separately grouped/orphaned children. Unknown table reads already fail parsing.
   let changed = true;
-  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group)) { owned.push(row); changed = true; } }
+  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group || (x.pid === row.pid && x.identity === row.identity))) { owned.push(row); changed = true; } }
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
