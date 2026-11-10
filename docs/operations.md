@@ -241,3 +241,21 @@ Worker setup pins `refs/factory/base` and requests an incremental delivery bundl
 second full repository history. Publication still imports against its original
 expected base and checks every intermediate commit and the exact tested tree.
 Existing full bundles, source snapshots and Git objects remain preserved.
+
+Browser-parent eviction requires the trusted controller's initial complete
+installation fingerprint, bound to the session before native execution. Only
+Codex Alido/factory parents have the restoration path. Missing legacy bindings
+or unsupported repositories retain their dependencies. Eviction does not replace
+that binding with a later canonical installation. Resume verifies both the
+canonical installation and the restored copy against the private original
+fingerprint, including package contents, normalized local links and executable
+bits. Changed or unverifiable installations retain the parent/marker and refuse
+resume for owner repair. Fingerprints are never accepted solely from worker
+scratch. Database recovery sidecars and SQLite headers remain evidence.
+
+The Nov 10 longer sample also identified `runs/browser-drain` recovery publication
+copies. These session-backed clones use their original session cleanup/status and
+fresh process evidence rather than the unrelated-rehearsal age gate. All publisher
+callers now default to the shared immutable source seed under their enclosing
+`runs`, including recovery scripts using the installed adapter directly. Original
+bundles, Git objects, source and exact-tree test/publication receipts remain.

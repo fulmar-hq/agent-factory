@@ -1,5 +1,5 @@
 import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync, cpSync, lstatSync } from "node:fs";
-import { join, dirname, relative, resolve, isAbsolute } from "node:path";
+import { join, dirname, relative, resolve, isAbsolute, basename } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
 
@@ -186,7 +186,7 @@ export function prepareTestScratch(checkout:string) {
 }
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
-export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string) {
+export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string, pinnedDependencies?:string|null) {
   mkdirSync(archive,{recursive:true,mode:0o700});
   workspace=realpathSync(workspace);
   const git = (...args:string[]) => command(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",workspace,...args]);
@@ -211,8 +211,13 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   const scratch=join(workspace,".factory-tmp");
   if(existsSync(scratch) && (lstatSync(scratch).isSymbolicLink() || !lstatSync(scratch).isDirectory() || realpathSync(scratch)!==scratch))throw Error("linked dependency receipt root refused");
   const eviction=join(scratch,"dependencies-evicted.jsonl");
+  const expectedDependencies=pinnedDependencies ?? undefined;
+  const dependencyFingerprint=(deps:string)=>command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",deps],undefined,120000).then(s=>s.trim());
   if(existsSync(eviction)) {
     if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
+    const receipt=JSON.parse(readFileSync(eviction,"utf8").trim().split("\n")[0]!);
+    if(!expectedDependencies || receipt.dependencyFingerprint!==expectedDependencies || !/^[a-f0-9]{64}$/.test(expectedDependencies))throw Error("pinned dependency identity unavailable; retain parent and receipt");
+    if(await dependencyFingerprint(join(source,"node_modules"))!==expectedDependencies)throw Error("pinned dependency installation changed; retain parent and receipt");
     // Keep in-cache logs/receipts and the eviction receipt. Resume gets a
     // complete pinned dependency copy before any native process starts.
     if(existsSync(join(workspace,"node_modules")))renameSync(join(workspace,"node_modules"),join(archive,`dependency-evidence-${crypto.randomUUID()}`));
@@ -223,6 +228,8 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   }
   verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
+  const installedDependencies=await dependencyFingerprint(join(workspace,"node_modules"));
+  if(expectedDependencies && installedDependencies!==expectedDependencies)throw Error("restored dependency installation differs; retain parent and receipt");
   if(existsSync(eviction))renameSync(eviction,join(archive,`dependency-restored-${crypto.randomUUID()}.jsonl`));
   const metadata=join(workspace,".git");
   if(realpathSync(metadata)!==metadata || existsSync(join(metadata,"commondir")) || existsSync(join(metadata,"objects/info/alternates")))throw Error("standalone worker Git required");
@@ -239,6 +246,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     ["user.name","Vincent Messina"], ["user.email","72951696+vincentmessina@users.noreply.github.com"],
     ["commit.gpgsign","false"], ["core.hooksPath","/dev/null"], ["core.excludesFile","/dev/null"],
   ]) await git("config","--local",key,value);
+  return installedDependencies;
 }
 
 // Snapshot through a non-following descriptor before trusted Git reads the
@@ -271,8 +279,12 @@ export type PublishAuthority = {
   testTree: (checkout:string, tree:string) => Promise<{tree:string; passed:boolean}>;
   isolationVerified: boolean;
 };
+function publicationSeedDirectory(dir:string) {
+  for(let p=resolve(dir);dirname(p)!==p;p=dirname(p))if(basename(p)==="runs")return join(p,"source-seeds");
+  return join(dirname(dir),"source-seeds");
+}
 export async function publish(t:Ticket, id:string, workspace:string, dir:string, baseline:string,
-  authority:PublishAuthority, execute=command, trustedSource=workspace, seeds?:string) {
+  authority:PublishAuthority, execute=command, trustedSource=workspace, seeds=publicationSeedDirectory(dir)) {
   if (!authority.isolationVerified) throw Error("publisher blocked: isolation unproven");
   if (![deliveryRepo,"fulmar-hq/agent-factory"].includes(t.repo) || !/^[a-f0-9]{40}$/.test(baseline)) throw Error("publisher destination/base refused");
   authority.verifyClaim();

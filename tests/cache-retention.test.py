@@ -10,9 +10,10 @@ class Safety(unittest.TestCase):
   self.git('init','-q');self.git('config','user.name','Fixture');self.git('config','user.email','fixture@example.test')
   (self.repo/'.gitignore').write_text('node_modules/\n.next/\n.factory-tmp/\n')
   self.git('add','.gitignore');self.git('-c','commit.gpgsign=false','commit','-qm','fixture')
-  self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer);create table kv(key text,value text);')
-  self.db.execute("insert into sessions values('a','waiting-browser',null)");self.db.execute('insert into kv values(?,?)',('cleanup-evidence:a',json.dumps({'verified':True})));self.db.commit()
+  self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer,provider text,brief text);create table kv(key text,value text);')
+  self.db.execute("insert into sessions values(?,?,?,?,?)",('a','waiting-browser',None,'codex',json.dumps({'repo':'fulmar-hq/alido'})));self.db.execute('insert into kv values(?,?)',('cleanup-evidence:a',json.dumps({'verified':True})));self.db.commit()
   self.cache=self.repo/'node_modules';self.cache.mkdir();(self.cache/'generated.js').write_text('regenerable');(self.cache/'result.jsonl').write_text('evidence')
+  self.db.execute('insert into kv values(?,?)',('dependency-installation:a',json.dumps(m.dependency_identity(self.cache))));self.db.commit()
  def git(self,*args):
   return subprocess.check_output(['git','-C',str(self.repo),*args],stderr=subprocess.STDOUT)
  def test_waiting_browser_preserves_evidence_source_and_git(self):
@@ -71,6 +72,14 @@ class Safety(unittest.TestCase):
   recovered=sqlite3.connect(path)
   try:self.assertEqual(recovered.execute('select value from events').fetchone()[0],'retained')
   finally:recovered.close()
+ def test_unbound_browser_parent_keeps_dependencies(self):
+  self.db.execute("delete from kv where key='dependency-installation:a'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_unsupported_browser_parent_retains_dependencies(self):
+  self.db.execute('update sessions set brief=?',(json.dumps({'repo':'fictional/other-project'}),));self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertTrue((self.cache/'generated.js').exists());self.assertFalse((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists())
  def test_hardlinked_marker_cannot_modify_source(self):
   scratch=self.repo/'.factory-tmp';scratch.mkdir();source=self.repo/'dirty-source';source.write_text('preserve')
   os.link(source,scratch/'dependencies-evicted.jsonl')

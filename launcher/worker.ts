@@ -85,7 +85,9 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
     if (delivery) {
       const qualified=s.get<{expiresAt:number;version:number}>("delivery-qualified");
       if(!qualified || qualified.version!==2 || qualified.expiresAt<=Date.now())throw Error("publisher blocked: isolation unproven");
-      await prepareDelivery(workspace,source,archive,id,s.get<string>(baselineKey)??undefined);
+      const dependencyKey=`dependency-installation:${id}`;
+      const installed=await prepareDelivery(workspace,source,archive,id,s.get<string>(baselineKey)??undefined,s.get<string>(dependencyKey));
+      if(!s.get(dependencyKey))s.set(dependencyKey,installed);
     }
     mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
     if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Factory-only regenerable caches. Source, Git and operational evidence stay put."""
-import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat, re
+import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat, re, hashlib
 
 CACHES = {'node_modules', '.next', '.turbo'}
 PROTECTED = {'.git', '.factory-tmp', 'receipts', 'evidence', 'transcripts', 'logs',
@@ -189,6 +189,36 @@ def remove(cache):
         pass
 
 
+def dependency_identity(root):
+    if not root.is_dir() or not real(root):
+        raise RuntimeError('local dependency installation required')
+    digest = hashlib.sha256()
+    def visit(directory):
+        for p in sorted(directory.iterdir(), key=lambda q: q.name):
+            relative = str(p.relative_to(root)).encode()
+            if p.is_symlink():
+                target = p.resolve(strict=True)
+                if not target.is_relative_to(root):
+                    raise RuntimeError('external dependency link refused')
+                digest.update(b'link\0' + relative + b'\0' + str(target.relative_to(root)).encode() + b'\0')
+            elif p.is_dir():
+                digest.update(b'dir\0' + relative + b'\0');visit(p)
+            elif p.is_file():
+                before = p.stat()
+                digest.update(b'file\0' + relative + b'\0' + str(before.st_size).encode() + b':' + str(before.st_mode & 0o100).encode() + b'\0')
+                with p.open('rb') as data:
+                    for chunk in iter(lambda: data.read(1024*1024), b''):
+                        digest.update(chunk)
+                digest.update(b'\0')
+                after = p.stat()
+                if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode):
+                    raise RuntimeError('dependency installation changed while reading')
+            else:
+                raise RuntimeError('special dependency object refused')
+    visit(root)
+    return digest.hexdigest()
+
+
 def repositories(root):
     # Explicit factory roots only. Never walk arbitrary work/owner scratch.
     roots = [root / 'workspaces', root / 'runs'] + sorted((root / 'work').glob('review-*'))
@@ -207,7 +237,7 @@ def session_for(root, repo):
     parts = repo.relative_to(root).parts
     if parts[0] == 'workspaces':
         return parts[1]
-    if parts[:2] == ('runs', 'delivery'):
+    if parts[0] == 'runs' and len(parts) >= 3 and parts[1] in {'delivery', 'browser-drain'}:
         return parts[2]
     return None
 
@@ -215,13 +245,19 @@ def session_for(root, repo):
 def custody(db, root, repo):
     sid = session_for(root, repo)
     if sid:
-        row = db.execute('select status,pid from sessions where id=?', (sid,)).fetchone()
+        row = db.execute('select status,pid,provider,brief from sessions where id=?', (sid,)).fetchone()
         if row is None or row[0] not in {'finished', 'archived', 'waiting-browser'} or row[1] is not None:
             return None
+        if row[0] == 'waiting-browser' and (row[2] != 'codex' or json.loads(row[3]).get('repo') not in {'fulmar-hq/alido', 'fulmar-hq/agent-factory'}):
+            return None
+        if row[0] == 'waiting-browser':
+            binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
+            if binding is None or not isinstance(json.loads(binding[0]), str) or not re.fullmatch(r'[a-f0-9]{64}', json.loads(binding[0])):
+                return None
         proof = db.execute('select value from kv where key=?', ('cleanup-evidence:' + sid,)).fetchone()
         if proof is None or json.loads(proof[0]).get('verified') is not True:
             return None
-        return [root / 'workspaces' / sid, root / 'runs/delivery' / sid]
+        return [root / 'workspaces' / sid, root / 'runs/delivery' / sid, repo]
     # Non-session review/rehearsal clones need a full quiet hour as well as
     # process/cwd/open-file proof. A live maintenance lease excludes them.
     lease = db.execute("select value from kv where key='launcher-maintenance-lease'").fetchone()
@@ -277,7 +313,9 @@ def sweep(root, apply=False):
                                     continue
                                 record({'state': 'intent', 'path': str(cache), 'apply': apply})
                                 if apply:
-                                    if name == 'node_modules':
+                                    sid = session_for(root, repo)
+                                    state = db.execute('select status from sessions where id=?', (sid,)).fetchone() if sid else None
+                                    if name == 'node_modules' and repo.parent == root / 'workspaces' and state and state[0] == 'waiting-browser':
                                         scratch = repo / '.factory-tmp'
                                         if scratch.is_symlink():
                                             raise RuntimeError('linked scratch refused')
@@ -285,8 +323,11 @@ def sweep(root, apply=False):
                                         marker = scratch / 'dependencies-evicted.jsonl'
                                         if marker.is_symlink() or (marker.exists() and (not marker.is_file() or marker.stat().st_nlink != 1)):
                                             raise RuntimeError('linked restoration marker refused')
-                                        with marker.open('a') as pending:
-                                            pending.write(json.dumps({'at': time.time(), 'receipt': str(output)}) + '\n')
+                                        if not marker.exists():
+                                            binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
+                                            identity = json.loads(binding[0])
+                                            with marker.open('x') as pending:
+                                                pending.write(json.dumps({'at': time.time(), 'receipt': str(output), 'dependencyFingerprint': identity}) + '\n')
                                     remove(cache)
                                 record({'state': 'removed' if apply else 'planned', 'path': str(cache)})
                             finally:
@@ -301,7 +342,12 @@ def sweep(root, apply=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', required=True, type=pathlib.Path)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--root', type=pathlib.Path)
+    group.add_argument('--fingerprint', type=pathlib.Path)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(sweep(args.root, args.apply)))
+    if args.fingerprint:
+        print(dependency_identity(args.fingerprint))
+    else:
+        print(json.dumps(sweep(args.root, args.apply)))

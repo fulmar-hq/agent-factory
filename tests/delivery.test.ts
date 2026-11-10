@@ -126,7 +126,7 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  await git("worktree","add","-b",branchFor(id),work,"HEAD");
  writeFileSync(join(work,"fixture"),"preserved edit");writeFileSync(join(work,"untracked"),"preserved new file");
  const before=await command(["git","-C",work,"diff","--binary"]),head=(await git("rev-parse","HEAD")).trim();
- await prepareDelivery(work,source,join(dir,"archive"),id);
+ const pinnedFingerprint=await prepareDelivery(work,source,join(dir,"archive"),id);
  expect(await command(["git","-C",work,"diff","--binary"])).toBe(before);
  expect(readFileSync(join(work,"untracked"),"utf8")).toBe("preserved new file");
  expect((await command(["git","-C",work,"rev-parse","HEAD"])).trim()).toBe(head);
@@ -138,9 +138,15 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  const {existsSync,readdirSync}=await import('node:fs');
  expect(existsSync(join(dir,'archive/local-clone/fixture'))).toBe(false);
  mkdirSync(join(work,'.factory-tmp'),{recursive:true});
- writeFileSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'),'retained eviction receipt');
+ writeFileSync(join(work,'node_modules/fixture'),'original dependency');
+ const fingerprint=pinnedFingerprint;
+ writeFileSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'),JSON.stringify({dependencyFingerprint:fingerprint}));
  writeFileSync(join(work,'node_modules/result.log'),'retained evidence');
- await prepareDelivery(work,source,join(dir,'archive'),id);
+ writeFileSync(join(source,'node_modules/fixture'),'different canonical installation');
+ await expect(prepareDelivery(work,source,join(dir,'archive'),id,undefined,pinnedFingerprint)).rejects.toThrow('pinned dependency installation changed');
+ expect(existsSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'))).toBe(true);
+ writeFileSync(join(source,'node_modules/fixture'),'original dependency');
+ await prepareDelivery(work,source,join(dir,'archive'),id,undefined,pinnedFingerprint);
  expect(readFileSync(join(work,'node_modules/fixture'),'utf8')).toBe('original dependency');
  const preserved=readdirSync(join(dir,'archive')).find(p=>p.startsWith('dependency-evidence-'))!;
  expect(readFileSync(join(dir,'archive',preserved,'result.log'),'utf8')).toBe('retained evidence');
@@ -156,7 +162,7 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  writeFileSync(join(hooks,'reference-transaction'),'#!/bin/sh\nexit 91\n');chmodSync(join(hooks,'reference-transaction'),0o755);
  await command(['git','-C',work,'config','core.hooksPath',hooks]);
 
- await prepareDelivery(work,source,join(dir,'archive'),id,head);
+ await prepareDelivery(work,source,join(dir,'archive'),id,head,pinnedFingerprint);
  expect((await command(['git','-C',work,'rev-parse','refs/factory/base'])).trim()).toBe(head);
  await command(['git','-C',work,'bundle','create',join(dir,'incremental.bundle'),'HEAD','^refs/factory/base']);
 
@@ -199,9 +205,10 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
   return command(a);
  };
  let claims=0;
- const result=await publish(t,"a".repeat(64),source,join(dir,"pass"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
+ const result=await publish(t,"a".repeat(64),source,join(dir,"runs/browser-drain/session/initial"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
   expect(await Bun.file(join(checkout,"fixture")).text()).toBe("tested");return {tree,passed:true};
- }},execute,source,join(dir,"source-seeds"));
+ }},execute,source);
+ expect((await Bun.file(join(dir,"runs/source-seeds",base,"source/fixture")).text())).toBe("base");
  expect(claims).toBe(3);expect(calls.find(a=>a.includes("commit-tree"))).toContain("-S");
  expect(calls.find(a=>a.includes("push"))?.at(-1)).toBe(`refs/heads/${result.branch}:refs/heads/${result.branch}`);
  expect((await command(["git","-C",source,"rev-parse","HEAD^{tree}"])).trim()).toBe(result.tree);
