@@ -1,8 +1,9 @@
 import {z} from 'zod';
 import {Store} from '../tracking/store';
 import {queueWake} from './wake';
+import type {ReleaseBatch} from './release-batch';
 export type ReleaseStep='preflight'|'freeze'|'qa'|'promote'|'readback';
-export type ReleaseContext={day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object};
+export type ReleaseContext={day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object;batch?:ReleaseBatch;readiness?:object};
 export type Snapshot={revision:string;tree:string;holdId:string;held:boolean;overlap:boolean};
 export interface ReleasePort {
  snapshot():Promise<Snapshot>;
@@ -23,7 +24,7 @@ export function toronto(now:number) {
 export function deadlineAt(now:number,minute:number){const d=new Date(now);return now-d.getUTCSeconds()*1000-d.getUTCMilliseconds()+(minute-toronto(now).minute)*60000;}
 const undo='Retain effects, handles, frozen source, rollback and receipts. Reconcile uncertain writes; never replay a claim.';
 export class ReleaseExecutor {
- constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{}){}
+ constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{},readonly batch?:ReleaseBatch){}
  receipt(day:string,kind:string,data:unknown) {this.s.event(`executor:${day}:${kind}`,'release-executor',{day,kind,data},undo,this.clock());}
  effect(day:string,step:ReleaseStep){return this.s.get<Effect>(`executor:${day}:${step}`);}
  refuse(day:string,reason:string){this.receipt(day,`refused:${reason}`,{reason});return {state:'refused',reason};}
@@ -57,7 +58,15 @@ export class ReleaseExecutor {
   const result=await this.port.observe(step,effect.context,effect.handle!);
   if(result.state==='pending')return effect;
   if(this.clock()>=effect.context.deadline)throw Error('completion after deadline');
-  const final:Effect={...effect,state:result.state,evidence:result.evidence};
+  let context=effect.context;
+  if(step==='qa'&&result.state==='success'&&context.batch){
+   if(!sha.safeParse(result.evidence.qaRevision).success||result.evidence.tree!==context.tree)throw Error('Merged QA identity missing');
+   context={...context,revision:String(result.evidence.qaRevision)};
+   const night=this.s.get<Night>(`executor:${day}:night`);
+   if(!night?.candidate)throw Error('Frozen night missing');
+   this.s.set(`executor:${day}:night`,{...night,candidate:{...night.candidate,revision:context.revision}});
+  }
+  const final:Effect={...effect,context,state:result.state,evidence:result.evidence};
   this.s.atomic(()=>{this.s.set(`executor:${day}:${step}`,final);this.receipt(day,`${step}:${result.state}`,result.evidence);});return final;
  }
  async run(stage:'preflight'|'qa'|'production'|'reconcile'){
@@ -82,10 +91,10 @@ export class ReleaseExecutor {
    if(stage==='preflight'){
     if(!night){const candidate=SnapshotSchema.parse(await this.port.snapshot());night=this.s.atomic(()=>{const existing=this.s.get<Night>(`executor:${day}:night`);if(existing)return existing;const value={day,candidate};this.s.set(`executor:${day}:night`,value);return value;});}
     const c=night.candidate!;
-    await this.start(day,'preflight',{day,...c,deadline:deadlineAt(now,1190)},target);
+    await this.start(day,'preflight',{day,...c,...(this.batch?{batch:this.batch}:{}),deadline:deadlineAt(now,1190)},target);
    }else if(stage==='qa'){
     if(!night?.candidate || this.effect(day,'preflight')?.state!=='success')throw Error('successful preflight missing');
-    const context={day,...night.candidate,deadline:deadlineAt(now,1280)};
+    const context={day,...night.candidate,...(this.batch?{batch:this.batch}:{}),deadline:deadlineAt(now,1280)};
     await this.start(day,'qa',context,target);
    }else{
     if(!night?.candidate || this.effect(day,'qa')?.state!=='success')throw Error('QA deployed proof missing');

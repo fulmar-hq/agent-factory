@@ -1,3 +1,4 @@
+import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
 import { memoryPressure, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
@@ -65,6 +66,7 @@ export async function tick(dir = root) {
   try {
     const e = new Engine(s, c),
       now = Date.now();
+    observeDisk(s,diskReading(undefined,now));
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     qualificationAlerts(s, qualifications, now);
