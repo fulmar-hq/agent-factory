@@ -1,4 +1,4 @@
-import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync,readdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {z} from 'zod';
@@ -28,7 +28,15 @@ function lastUsage(path:string,at:number):Usage|undefined{
  const bytes=readFileSync(path,'utf8');if(bytes.length>16*1024*1024)throw Error('native receipt exceeds capture bound');
  for(const line of bytes.split('\n').reverse())try{const row=JSON.parse(line);if(row.type==='event_msg'&&row.payload?.type==='token_count'&&Date.parse(row.timestamp)<=at)return usageSchema.parse(row.payload.info.total_token_usage);}catch(error){if(error instanceof z.ZodError)throw error;}
 }
-export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..')){
+export function publisherTestedReceipt(dir:string,pub:{id:string;tree:string;testedTreeReceipt?:unknown}){
+ const archive=realpathSync(join(dir,'runs/delivery',pub.id));
+ const candidates=typeof pub.testedTreeReceipt==='string'?[pub.testedTreeReceipt]:readdirSync(archive,{withFileTypes:true}).filter(x=>x.isDirectory()&&(x.name==='initial'||/^[a-f0-9-]{36}$/.test(x.name))).map(x=>join(archive,x.name,'publisher/tested-tree.json'));
+ if(candidates.length>1000)throw Error('publisher receipt inventory truncated');
+ const matched=candidates.filter(path=>{try{if(!realpathSync(path).startsWith(archive+'/'))throw Error('publisher receipt escapes retained archive');const t=JSON.parse(readFileSync(path,'utf8'));return t.code===0&&t.tree===pub.tree;}catch{return false;}});
+ if(!matched.length)throw Error('trusted exact publisher tested-tree path unavailable');
+ return matched.sort()[0]!;
+}
+export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..'),notify=renewalFailureAlert){
  const live=new Store(join(dir,'controller.sqlite'));
  const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown}>(`codex-renewal-attempt:${id}`);
  const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false,interrupted:string|undefined,activePreflight:ReturnType<typeof spawnWorker>|undefined,activeProbe:Store|undefined,activeSession:string|undefined;
@@ -120,8 +128,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   guard();await verifySubscription('codex');
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
   const pubRow=live.db.query("SELECT data FROM events WHERE kind='launcher-publish' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!pubRow)throw Error('real publisher receipt unavailable');
-  const pub=JSON.parse(pubRow.data),testedPath=pub.testedTreeReceipt;
-  if(typeof testedPath!=='string'||!realpathSync(testedPath).startsWith(realpathSync(join(dir,'runs/delivery',pub.id))+'/'))throw Error('trusted exact publisher tested-tree path unavailable');
+  const pub=JSON.parse(pubRow.data),testedPath=publisherTestedReceipt(dir,pub);
   const tested=JSON.parse(readFileSync(testedPath,'utf8'));
   const remote=JSON.parse(await command(['gh','api',`repos/${pub.repo}/commits/${pub.head}`]));if(tested.code!==0||tested.tree!==pub.tree||remote.sha!==pub.head||remote.commit.tree.sha!==pub.tree||remote.commit.verification.verified!==true)throw Error('publisher signed tested-tree readback refused');
   durable(join(run,'publisher-readback.json'),json({at:Date.now(),pub,testedPath,tested,verification:remote.commit.verification}));
@@ -138,7 +145,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
  }catch(error){
   const reason=String(error);if(!ownsClaim)return {state:'refused',reason,run};if(replaced)live.set('codex-renewal-uncertain',true);
   status(replaced?'uncertain':'failed',{reason,allCleanup,startedNative});if(allCleanup){live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});}
-  renewalFailureAlert(live,id);
+  notify(live,id);
   return {state:replaced?'uncertain':'failed',reason,run};
  }finally{process.off('SIGTERM',onTerm);process.off('SIGINT',onInt);if(activePreflight)await activePreflight.stop().catch(()=>{});activeProbe?.close();live.close();}
 }
