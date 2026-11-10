@@ -1,3 +1,4 @@
+import { routingInstructions } from './routing';
 import {z} from 'zod';
 import {join} from 'node:path';
 import {openSync,readFileSync,fstatSync,closeSync,constants} from 'node:fs';
@@ -19,10 +20,10 @@ function correctionPlan(dir:string) {
  } finally {closeSync(fd);}
 }
 export function intakeInstructions(c:Config,dir:string) {
- if(c.autonomy?.intake_mode!=='drain')return 'Intake mode: build. New useful product scope is permitted within the existing policy.';
+ if(c.autonomy?.intake_mode!=='drain')return `Intake mode: build. New useful product scope is permitted within the existing policy.\n${routingInstructions}`;
  let plan='Correction plan unavailable: do not propose factory-plan tickets.';
  try {plan=correctionPlan(dir).split('## 5. Steps')[1]?.split('## 6.')[0] ?? plan;}catch{}
- return `Intake mode: drain. Clear existing work before reprioritizing. Do not propose new Alido product scope, even to fill the buffer. An empty tickets array is valid. Review-state work is work to staff: propose bounded review, challenge and fix-up leaves against the existing OPEN issue/PR, using kind fix and executable targeted checks or findings. Do not wait for all reviews or create new product scope. Only repairs for existing OPEN issues/PRs or failed sessions, and factory self-tickets from the correction plan in fulmar-hq/agent-factory, are allowed. Every brief must include intakeEvidence: {kind: "issue" or "pr", number: positive integer}, {kind: "session", session: "failed session ID"}, or {kind: "factory-plan", step: "A1" through "A9", quote: "exact source excerpt, at least 20 characters"}. Issue/PR/session references must belong to the proposed repo. Existing-work leaves must use kind fix. Review/challenge leaves must describe the acceptance evidence to check; repair leaves must explain the concrete defect. A reference does not authorize extending the existing scope. Factory-plan tickets must implement the quoted step. Leave already-running work alone.\nCorrection plan steps (private context, never copy the plan into Git):\n${plan}`;
+ return `${routingInstructions}\nIntake mode: drain. Clear existing work before reprioritizing. Do not propose new Alido product scope, even to fill the buffer. An empty tickets array is valid. Review-state work is work to staff: propose bounded review, challenge and fix-up leaves against the existing OPEN issue/PR, using kind fix and executable targeted checks or findings. Do not wait for all reviews or create new product scope. Only repairs for existing OPEN issues/PRs or failed sessions, and factory self-tickets from the correction plan in fulmar-hq/agent-factory, are allowed. Every brief must include intakeEvidence: {kind: "issue" or "pr", number: positive integer}, {kind: "session", session: "failed session ID"}, or {kind: "factory-plan", step: "A1" through "A9", quote: "exact source excerpt, at least 20 characters"}. Issue/PR/session references must belong to the proposed repo. Existing-work leaves must use kind fix. Review/challenge leaves must describe the acceptance evidence to check; repair leaves must explain the concrete defect. A reference does not authorize extending the existing scope. Factory-plan tickets must implement the quoted step. Leave already-running work alone.\nCorrection plan steps (private context, never copy the plan into Git):\n${plan}`;
 }
 // Validate at both creation and auto-approval. A stale queued build wake cannot
 // mint new scope after a mode change. Remote errors and absent proof fail closed.

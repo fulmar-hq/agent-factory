@@ -169,12 +169,13 @@ for(const pressure of ['unknown','warning','critical'] as const)test(`capacity r
 test('verified intake output becomes one durable proposal and restart readback prevents duplicate creates',async()=>{
  const e=setup();try {
   const scratch=mkdtempSync(join(tmpdir(),'factory-intake-'));
-  writeFileSync(join(scratch,'intake.json'),JSON.stringify({tickets:[{repo:'example/demo',title:'Useful controller leaf',brief:{...ticket(),area:'controller',kind:'fix',estimateBasis:'Bounded synthetic source inspection supports this small leaf'}}]}));
+  writeFileSync(join(scratch,'intake.json'),JSON.stringify({tickets:[{repo:'example/demo',title:'Useful controller leaf',brief:{...ticket(),execution:{computerControl:false,browser:false,signIn:false,aws:false,localDatabase:false,closeCollaboration:false},area:'controller',kind:'fix',estimateBasis:'Bounded synthetic source inspection supports this small leaf'}}]}));
   const wake={id:'intake-fixture',owner:'builder',kind:'product-intake',payload:{round:'fixture-round'},state:'done',cleanupVerified:true,scratch};
   e.s.set('owner-wake:intake-fixture',wake);
   let creates=0;const calls:string[][]=[];
   const execute=async(args:string[])=>{calls.push(args);if(args.includes('list'))return '[]';if(args.includes('issue') && args.includes('create')){creates++;return 'https://github.com/example/demo/issues/12';}return '';};
   await applyOwnerResults(e,scratch,undefined,now,execute);
+  expect(calls.find(a=>a.includes('issue')&&a.includes('create'))).toContain('runs:cloud');
   expect(creates).toBe(1);expect(e.s.get('proposal-round:example/demo#12')).toBe('fixture-round');
   e.s.set('owner-result:intake-fixture',null);await applyOwnerResults(e,scratch,undefined,now,execute);expect(creates).toBe(1);
   expect(calls.some(a=>a.includes('factory-event:intake-fixture'))).toBe(false); // data lives in the JSON body, no executable event command

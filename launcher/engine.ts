@@ -1,4 +1,5 @@
 import { builderSlots, type SlotProcessEvidence } from "./capacity";
+import { requireHeadlessLocal } from "./routing";
 import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
 import {dirname} from 'node:path';
 import { processIdentity } from "./process";
@@ -169,6 +170,7 @@ export class Engine {
   }
   admit(raw: unknown, a: Admission): Session {
     const original = TicketSchema.parse(raw);
+    requireHeadlessLocal(original);
     const defaults=this.c.ticket_budget_default;
     const completed=this.sessions().filter(x=>x.status==="finished" && x.actual_tokens>0).filter(x=>{
       const brief=JSON.parse(x.brief) as Ticket;

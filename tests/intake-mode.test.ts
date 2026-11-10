@@ -71,7 +71,7 @@ test('a stale build wake cannot create new scope after drain; empty intake is ac
 });
 test('drain creates referenced repairs and blocks unproven drafts from auto-approval',async()=>{
  const e=setup(),dir=scratch();try {
-  writeFileSync(join(dir,'intake.json'),JSON.stringify({tickets:[{repo:'example/demo',title:'Repair existing work',brief:brief({kind:'issue',number:42})}]}));
+  writeFileSync(join(dir,'intake.json'),JSON.stringify({tickets:[{repo:'example/demo',title:'Repair existing work',brief:{...brief({kind:'issue',number:42}),execution:{computerControl:false,browser:false,signIn:false,aws:false,localDatabase:false,closeCollaboration:false}}}]}));
   e.s.set('owner-wake:repair',{id:'repair',owner:'builder',kind:'product-intake',payload:{round:'repair'},state:'done',cleanupVerified:true,scratch:dir});
   const calls:string[][]=[];const execute=async(args:string[])=>{calls.push(args);if(args.includes('view'))return '{"number":42,"state":"OPEN"}';if(args.includes('list'))return '[]';if(args.includes('create') && args.includes('issue'))return 'https://github.com/example/demo/issues/12';return '';};
   await applyOwnerResults(e,dir,undefined,now,execute);expect(e.s.get('proposal:repair:0')).toBe(12);

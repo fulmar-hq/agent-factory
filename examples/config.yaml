@@ -29,3 +29,6 @@ autonomy:
   restart: {max_retries: 1, causes_per_hour: 3}
 # To enable measured growth, add this under capacity (not a second mapping):
 # controller: {start: 6, max: 12, interval_minutes: 60, busy_above: 0.8, failure_below: 0.3}
+
+# Cloud dispatch remains unqualified; this cap never changes local capacity.
+cloud: {max_parallel: 0, environments: {}, billing: subscription_only}
