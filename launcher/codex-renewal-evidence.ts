@@ -19,7 +19,7 @@ const ref = z.object({ path: text.refine(isAbsolute), sha256: hash }).strict();
 const effort = z.enum(["medium", "high"]);
 const kind = z.enum(["security", "time", "tokens"]);
 const usage = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer, total_tokens: integer, reasoning_output_tokens: integer.optional() });
-const processRow = z.object({ pid: time, parent: integer, group: time, identity: text, state: text }).strict();
+const processRow = z.object({ pid: integer, parent: integer, group: integer, identity: text, state: text }).strict();
 const snapshot = z.object({ at: time, error: z.null(), rows: z.array(processRow) }).strict();
 const run = z.object({
   nativeId: uuid, effort, kind, workspace: text.refine(isAbsolute), startedAt: time, endedAt: time,

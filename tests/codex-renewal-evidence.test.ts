@@ -312,3 +312,8 @@ for(const bad of ['extra code','extra key','failed command','unbound response','
 for(const bad of ['unsupported command','permission key','other workdir','second launch','unbound stdin'] as const)test('raw lifecycle receipt refuses '+bad,()=>{
  const f=fixture(),r=f.m.runs.find(r=>r.kind==='time')!;f.mutate(r.rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='function_call').payload,args=JSON.parse(call.arguments);if(bad==='unsupported command')args.cmd='/usr/bin/touch /outside/authorized/workspace';if(bad==='permission key')args.sandbox_permissions='require_escalated';if(bad==='other workdir')args.workdir='/outside';call.arguments=JSON.stringify(args);if(bad==='second launch')rows.splice(3,0,{...rows[2],payload:{...call,call_id:'duplicate-launch'}});if(bad==='unbound stdin'){call.name='write_stdin';call.arguments=JSON.stringify({session_id:999,chars:''});}},true);expect(f.collect().status).toBe('refused');
 });
+
+
+test('unrelated kernel rows with zero process/group IDs do not invalidate complete snapshots',()=>{
+ const f=fixture(),r=f.m.runs[0];f.mutate(r.supervisor,s=>{for(const snapshot of [s.before,s.final])snapshot.rows.push({pid:0,parent:0,group:0,state:'S',identity:'fictional kernel zero'},{pid:2,parent:0,group:0,state:'S',identity:'fictional kernel task'});});expect(f.collect().status).toBe('verified');
+});
