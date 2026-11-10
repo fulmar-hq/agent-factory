@@ -16,10 +16,14 @@ export function observeIdleQueue(db:Reader,c:Config,now:number):IdleQueueObserva
  const latest=get<{at:number;status:string;ready?:number;claimed?:number}>('heartbeat');
  const h=latest?.status==='reconciling'?get<typeof latest>('last-successful-heartbeat'):latest;
  if(!h||h.status!=='ok'||h.ready!==0||h.at>now||now-h.at>300000)return no('queue not freshly confirmed empty');
- const sessions=db.query("SELECT id,status,pid FROM sessions WHERE status NOT IN ('finished','archived') LIMIT 10001").all() as {id:string;status:string;pid:number|null}[];
+ for(const project of Object.values(c.projects)){
+  const inventory=get<{observedAt:number;count?:number;truncated?:boolean;error?:string|null}>(`github:${project.repo}`);
+  if(!inventory||inventory.error||inventory.truncated!==false||!Number.isSafeInteger(inventory.count)||inventory.observedAt>h.at||now-inventory.observedAt>300000)return no('complete fresh project inventory unavailable');
+ }
+ const sessions=db.query("SELECT id,status,pid FROM sessions WHERE status!='archived' LIMIT 10001").all() as {id:string;status:string;pid:number|null}[];
  if(sessions.length>10000)return no('session inventory truncated');
  for(const x of sessions){
-  if(!['paused','waiting-browser','waiting-person','waiting-question','question'].includes(x.status)||x.pid!==null||get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return no('builder active or custody unknown');
+  if(!['finished','paused','waiting-browser','waiting-person','waiting-question','question'].includes(x.status)||x.pid!==null||get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return no('builder active or custody unknown');
  }
  const provider=c.owners[c.autonomy?.intake_owner??'product']?.harness;
  if(!provider)return no('product provider unavailable');
