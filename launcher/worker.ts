@@ -1,11 +1,15 @@
+import type {PublisherBoundary} from './publisher-evidence';
+import {reviewPublished} from './queue';
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
+import { planDeliveryRetention } from "./delivery-retention";
 import { NativeReceipt } from "../adapters/native";
-import { spawnWorker } from "./child";
+import { spawnWorker, type WorkerObservation } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
-import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
+import { mkdirSync, openSync, closeSync, writeSync,writeFileSync } from "node:fs";
 import { Engine } from "./engine";
-import { configAt, root, optionalJSON, QualificationSchema, type Ticket, type Meter } from "./config";
+import { configAt, root, optionalJSON, type Ticket, type Meter } from "./config";
+import { qualificationFor } from "./usage-push-policy";
 import { Store } from "../tracking/store";
 import {
   workerSpec,
@@ -26,7 +30,12 @@ export function claimSupervisor(e: Engine, id: string) {
     return current;
   });
 }
-export async function runWorker(id: string) {
+export function requireWorkerQualification(e: Engine, t: Ticket, raw: unknown, now = Date.now()) {
+  const q = qualificationFor(raw, e.c, t, now);
+  if (!t.model || !t.effort || !q || e.s.get("paused") !== false || (t.provider==="codex" && e.s.get("codex-renewal-uncertain")===true)) throw Error("qualification expired or paused");
+  return q;
+}
+export async function runWorker(id: string,publisher?:{boundary:PublisherBoundary;assert:()=>void}) {
   const c = await configAt(), s = new Store(join(root, "controller.sqlite")), e = new Engine(s, c);
   const x = claimSupervisor(e, id);
   if (!x) { s.close(); return; }
@@ -35,14 +44,7 @@ export async function runWorker(id: string) {
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;
-    const q = QualificationSchema.parse(qs?.[t.provider]);
-    if (
-      q.expiresAt <= Date.now() ||
-      q.model !== t.model ||
-      q.effort !== t.effort ||
-      s.get("paused") !== false
-    )
-      throw Error("qualification expired or paused");
+    requireWorkerQualification(e, t, qs);
     const readings = s.get<Record<string, Meter>>("readings");
     e.workerUsage(id, readings?.[t.provider], Date.now());
     await verifySubscription(t.provider);
@@ -87,14 +89,22 @@ export async function runWorker(id: string) {
     await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery || continuation ? {native:continuation?.native} : undefined);
     if(e.sessions().find(x=>x.id===id)?.status==="finished")collectBrowserRequest(e,id,workspace);
     if(delivery && e.sessions().find(x=>x.id===id)?.status==="finished") {
+      const publishingAt=Date.now();
       const verifyClaim=()=>{
+        publisher?.assert();
         const current=e.sessions().find(x=>x.id===id);
         const q=s.get<{expiresAt:number;version:number}>("delivery-qualified");
         const claims=s.db.query("SELECT path FROM claims WHERE session=?").all(id) as {path:string}[];
         if(!current || current.status!=="finished" || s.get("paused")!==false || s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true || !q || q.version!==2 || q.expiresAt<=Date.now() || claims.length!==t.paths.length || t.paths.some(p=>!claims.some(c=>c.path===p.toLowerCase())))throw Error("publisher claim/cleanup/qualification refused");
       };
       const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
-      s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+      verifyClaim();const executionReceipt=publisher?join(archive,'publisher/implementation.json'):undefined;
+      if(executionReceipt)writeFileSync(executionReceipt,JSON.stringify({version:1,boundary:publisher!.boundary,startedAt:publishingAt,completedAt:Date.now(),authorityExpiresAt:s.get<{expiresAt:number}>('delivery-qualified')!.expiresAt,head:result.head,tree:result.tree}),{flag:'wx',mode:0o600});
+      s.event(`publish:${id}`,"launcher-publish",{id,...result,executionReceipt,testedTreeReceipt:join(archive,'publisher/tested-tree.json')},"Retain PR and signed tree; undo accepted changes with signed revert");
+      await reviewPublished(e);
+      // Only plan here. The trusted archive API is also the missed-cleanup path;
+      // no timer, native deletion or automatic archival runs in a supervisor.
+      await planDeliveryRetention(s,root,id,process.env.FACTORY_DELIVERY_ARCHIVE);
     }
   } catch (error) {
     e.finish(id, false);
@@ -106,7 +116,7 @@ export async function runWorker(id: string) {
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.
-export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {native?:string}) {
+export async function superviseSession(e: Engine, id: string, t: Ticket, workspace: string, logPath: string, delivery?: {native?:string}, observation?:WorkerObservation & {sample?:(native:NativeReceipt|undefined,at:number)=>void}) {
   const continuation = e.s.get<{attempt:string;native:string}>(`continuation:${id}`);
   const attempt = continuation?.attempt ?? id;
   const original = e.sessions().find(x => x.id === id)!;
@@ -133,7 +143,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
     const spec = materializeSettings(workerSpec(t, workspace,"print",root,delivery), settingsPath);
     if (spec.settings) e.s.event(`native-settings:${attempt}`, "native-settings", {id, path:settingsPath, settings:spec.settings}, "Retain the per-run settings with native receipts; requalify policy changes");
     fd = openSync(logPath, "ax", 0o600);
-    child = spawnWorker(spec, workspace, fd);
+    child = spawnWorker(spec, workspace, fd,observation);
     e.s.event(`native-process:${attempt}`, "native-process", {id, pid:child.pid, processGroup:child.pid, identity:child.pid ? processIdentity(child.pid) : null}, "Reconcile process identity and group before archiving; retain native receipts");
     e.register(id, process.pid, spec.nativeId ?? null);
     let stop = false,
@@ -160,6 +170,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
           e.s.set(`native-evidence:${id}`,evidence);
           if(evidence.conflict) {e.s.set(`stop:${id}`,{reason:"native model/effort conflict"});halt!();}
         }
+        observation?.sample?.(native,Date.now());
       } catch(error) {e.s.set(`stop:${id}`,{reason:String(error)});halt!();}
       e.account(id,original.actual_seconds+(Date.now()-start)/1000,totalTokens);
     };
@@ -205,6 +216,7 @@ export async function superviseSession(e: Engine, id: string, t: Ticket, workspa
         }
         if (event.tokens !== undefined) totalTokens = event.tokens;
         if (event.done) completed = true;
+        observation?.sample?.(native,Date.now());
         e.account(id, original.actual_seconds+(Date.now() - start) / 1000, totalTokens);
         if (e.sessions().find((x) => x.id === id)?.status === "paused") halt();
       }

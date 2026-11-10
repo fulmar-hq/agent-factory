@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { config, ticket, admission, now } from "./fixtures";
 import { BrowserNeeded, BrowserResult, queueBrowser, browserJobs, browserDir, reconcileBrowsers, readBrowserJSON, resumeBrowser, type BrowserPorts, type BrowserJob } from "../launcher/browser";
@@ -29,6 +29,25 @@ function setup() {
   };
   return {dir,s,e,parent,j,calls,ports,current,result,close:()=>{s.close();rmSync(dir,{recursive:true});}};
 }
+
+test('low disk retains queued browser and returned parent until fresh capacity recovers',async()=>{
+ const f=setup();
+ try {
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:29,usedFraction:0.9});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now);
+  expect(f.current().state).toBe('queued');expect(f.calls).toEqual([]);
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:30,usedFraction:0.8});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+1);expect(f.current().state).toBe('running');
+  f.result(f.current());f.ports.observe=async()=>'done';
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:29,usedFraction:0.9});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+2);
+  expect(f.e.sessions()[0].status).toBe('waiting-browser');
+  expect(f.current().result?.status).toBe('done');expect(f.calls.some(c=>c.startsWith('resume:'))).toBe(false);
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:30,usedFraction:0.8});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+3);
+  expect(f.e.sessions()[0].status).toBe('starting');expect(f.calls.filter(c=>c.startsWith('resume:'))).toHaveLength(1);
+ }finally{f.close();}
+});
 test("structured request is strict; handoff keeps parent claims, RW deadline and default",()=>{
   const f=setup();try {
     expect(f.e.sessions()[0].status).toBe("waiting-browser");
@@ -200,4 +219,48 @@ test("mail outbox is idempotent and only a correlated timely Telegram reply answ
     db.query("INSERT INTO messages(id,sender_app,created_at,summary,body,reply_to) VALUES(?,?,?,?,?,?)").run("answer","telegram",now+2,"I signed in.","",id);
     expect(browserMailAnswer(f.j,path)).toBe("I signed in.");
   }finally{db.close();f.close();}
+});
+
+test('a returned browser parent waits at full capacity, retains result across restart, then reacquires once',async()=>{
+ const f=setup();try{
+  f.e.c.capacity.start_parallel=1;
+  const other=f.e.admit(ticket(2),admission());f.e.claimStart(other.id,now);
+  const original=f.e.sessions().find(x=>x.id===f.parent.id)!,claims=f.s.db.query('SELECT * FROM claims').all(),debits=f.s.rows('debits');
+  await reconcileBrowsers(f.e,f.dir,f.ports,now);f.result(f.current());f.ports.observe=async()=>'done';
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+1);await reconcileBrowsers(f.e,f.dir,f.ports,now+2);
+  expect(f.e.sessions().find(x=>x.id===f.parent.id)).toEqual(original);expect(f.e.slots()).toMatchObject({used:1,free:0});
+  expect(f.calls.filter(x=>x.startsWith('resume:'))).toHaveLength(0);expect(f.current().state).toBe('returned');
+  const path=join(f.dir,'workspaces',f.parent.id,'.factory-tmp/browser-result.json'),result=readFileSync(path,'utf8');
+  expect(JSON.parse(result)).toMatchObject({child:f.j.id,status:'done',evidence:'Observed status'});
+  const reopened=new Store(join(f.dir,'controller.sqlite')),engine=new Engine(reopened,f.e.c);
+  try{
+   engine.finish(other.id,true);
+   await reconcileBrowsers(engine,f.dir,f.ports,now+3);await reconcileBrowsers(engine,f.dir,f.ports,now+4);
+   expect(engine.slots()).toMatchObject({used:1,free:0});expect(f.calls.filter(x=>x===`resume:${f.parent.id}`)).toHaveLength(1);
+   expect(engine.sessions().find(x=>x.id===f.parent.id)).toMatchObject({status:'starting',native_id:original.native_id,brief:original.brief,actual_seconds:original.actual_seconds,actual_tokens:original.actual_tokens});
+   expect(readFileSync(path,'utf8')).toBe(result);
+  }finally{reopened.close();}
+  expect(f.s.db.query('SELECT * FROM claims').all()).toEqual(claims);expect(f.s.rows('debits')).toEqual(debits);
+ }finally{f.close();}
+});
+
+test('browser resume requires positive stale-PID evidence, frozen budget and cleanup',async()=>{
+ const f=setup();try{
+  f.e.slotEvidence={identity:()=>null,absent:()=>false};
+  await reconcileBrowsers(f.e,f.dir,f.ports,now);f.result(f.current());f.ports.observe=async()=>'done';
+  f.s.db.query('UPDATE sessions SET pid=90001 WHERE id=?').run(f.parent.id);
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+1);
+  expect(f.e.sessions()[0]!.status).toBe('waiting-browser');expect(f.e.slots().used).toBe(1);
+  f.e.slotEvidence={identity:()=>null,absent:()=>true};
+  f.s.db.query('UPDATE sessions SET actual_tokens=2000 WHERE id=?').run(f.parent.id);
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+2);expect(f.calls.filter(x=>x.startsWith('resume:'))).toHaveLength(0);
+  expect(f.s.get(`token-extension:${f.parent.id}`)).toBeNull();
+  // Reconcile only fictional accounting to exercise the independent cleanup gate.
+  f.s.db.query('UPDATE sessions SET actual_tokens=0 WHERE id=?').run(f.parent.id);
+  f.s.set(`cleanup-evidence:${f.parent.id}`,{verified:false});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+3);expect(f.calls.filter(x=>x.startsWith('resume:'))).toHaveLength(0);
+  f.s.set(`cleanup-evidence:${f.parent.id}`,{verified:true});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+4);
+  expect(f.e.sessions()[0]).toMatchObject({status:'starting',pid:null,brief:f.parent.brief});expect(f.calls.filter(x=>x.startsWith('resume:'))).toHaveLength(1);
+ }finally{f.close();}
 });

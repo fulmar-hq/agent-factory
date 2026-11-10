@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, openSync, closeSync, fstatSync, readFileSync, writeFileSync, mkdirSync, renameSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "./engine";
+import {requireDiskCapacity} from './disk';
 import type { Store } from "../tracking/store";
 import type { Ticket } from "./config";
 
@@ -97,6 +98,7 @@ function parentScratch(workspace:string) {
   return scratch;
 }
 export async function reconcileBrowsers(e:Engine, dir:string, p:BrowserPorts, now=Date.now()) {
+  e.resumeContinuations(p.resume);
   // Effects are serialized by the caller's cross-process lease. Starting is
   // committed before spawn: an uncertain start is never silently replayed.
   for (const j of browserJobs(e.s)) {
@@ -208,6 +210,7 @@ export async function reconcileBrowsers(e:Engine, dir:string, p:BrowserPorts, no
   if(e.s.get("paused")!==false || browserJobs(e.s).some(j=>j.nativePending || j.fallbackPending || ["starting","running","fallback"].includes(j.state)))return;
   const j=browserJobs(e.s).find(j=>j.state==="queued");
   if(!j)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Retain queued custody.
   j.state="starting";j.launchAt=now;j.runDeadline=Math.min(j.deadline,now+10*60*1000);saveBrowser(e.s,j);
   const path=join(browserDir(dir,j),"result.json");mkdirSync(browserDir(dir,j),{recursive:true,mode:0o700});
   const brief=browserBrief(j,path,e.s.get<string>(`browser-answer:${j.id}`) ?? undefined);
@@ -222,8 +225,9 @@ function signinQuestion(j:BrowserJob) {
   return `${new URL(j.request.url).hostname.slice(0,45)} needs your help. Can you finish the blocked step in Chrome?`;
 }
 export function resumeBrowser(e:Engine,j:BrowserJob,dir:string,spawn:(id:string)=>void) {
+ return e.s.atomic(()=>{
   const x=e.sessions().find(x=>x.id===j.parent);
-  if(!x || x.status!=="waiting-browser" || !j.result || e.s.get<{child:string}>(`browser-parent:${x.id}`)?.child!==j.id || x.pid!==null || e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return;
+  if(!x || x.status!=="waiting-browser" || !j.result || e.s.get<{child:string}>(`browser-parent:${x.id}`)?.child!==j.id || e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return;
   const workspace=join(dir,"workspaces",x.id);
   const scratch=parentScratch(workspace),target=join(scratch,"browser-result.json");
   try {const existing=lstatSync(target);if(!existing.isFile() || existing.nlink!==1)throw Error("parent receipt link/special file refused");}
@@ -234,14 +238,16 @@ export function resumeBrowser(e:Engine,j:BrowserJob,dir:string,spawn:(id:string)
   e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result,custodyBlocked:!!(j.nativePending || j.fallbackPending)});
   if(!x.native_id || e.s.get("paused")!==false || j.nativePending || j.fallbackPending)return;
   if(e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true || e.budget(x).nextTurnBlocked)return;
-  e.s.atomic(()=>{
-    if(e.s.db.query("UPDATE sessions SET status='starting' WHERE id=? AND status='waiting-browser' AND pid IS NULL").run(x.id).changes!==1)return;
-    const attempt=randomUUID();
-    e.s.set(`continuation:${x.id}`,{attempt,native:x.native_id,receipt:`browser child ${j.id} returned ${j.result!.status}`});
-    e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result});
-    e.s.event(`browser-resume:${j.id}`,"browser-parent-resume",{parent:x.id,child:j.id,attempt},"Preserve original budget, paths and native session",Date.now());
-    spawn(x.id);
-  });
+  const slots=e.slots();
+  if(!slots.dormant.has(x.id) || !slots.free)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Keep waiting parent/result.
+  if(e.s.db.query("UPDATE sessions SET status='starting',pid=NULL WHERE id=? AND status='waiting-browser'").run(x.id).changes!==1)return;
+  const attempt=randomUUID();
+  e.s.set(`continuation:${x.id}`,{attempt,native:x.native_id,receipt:`browser child ${j.id} returned ${j.result!.status}`});
+  e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result});
+  e.s.event(`browser-resume:${j.id}`,"browser-parent-resume",{parent:x.id,child:j.id,attempt},"Preserve original budget, paths and native session",Date.now());
+  spawn(x.id);
+ });
 }
 export function collectBrowserRequest(e:Engine,id:string,workspace:string,now=Date.now()) {
   const path=join(parentScratch(workspace),"browser-needed.json");
