@@ -10,6 +10,17 @@ export type History = z.infer<typeof HistorySchema>;
 export type Features = Pick<History, "area" | "kind" | "provider">;
 const dimensions = ["seconds", "tokens", "elapsed"] as const;
 type Dimension = typeof dimensions[number];
+function chronological(rows: History[]): History[] {
+  return [...rows].sort((a,b) => {
+    // IDs break completion ties; remaining fields also stabilize duplicate-ID direct inputs.
+    for (const key of ["completed", "id", "started", "area", "kind", "provider", ...dimensions] as const) {
+      const left = a[key], right = b[key];
+      if (left === right) continue;
+      return left === null || (right !== null && left < right) ? -1 : 1;
+    }
+    return Number(a.imported)-Number(b.imported);
+  });
+}
 export function history(s: Store): History[] {
   const rows = [...(s.get<unknown[]>("estimate-history") ?? [])];
   for (const x of s.rows("sessions") as {ticket: string; status: string; brief: string; started: number | null; actual_seconds: number; actual_tokens: number}[]) {
@@ -32,14 +43,15 @@ function predict(rows: History[], target: Features, at: number, dimension: Dimen
   const prior = rows.filter(r => !r.imported && r.completed < at && r[dimension] !== null && r.provider === target.provider);
   const comparable = prior.filter(r => r.area === target.area && r.kind === target.kind);
   const pool = comparable.length >= 3 ? comparable : prior;
-  const selected = recent ? pool.slice(-5) : pool;
+  const ordered = chronological(pool);
+  const selected = recent ? ordered.slice(-5) : ordered;
   return selected.length ? selected.reduce((sum,r) => sum+r[dimension]!,0)/selected.length : null;
 }
 export function score(rows: History[]) {
   const errors = Object.fromEntries(dimensions.map(d => [d,{count:0, candidate:0, mean:0}])) as Record<Dimension,{count:number;candidate:number;mean:number}>;
   // Chronological held-out predictions: every training row completed before target launch.
-  for (const row of rows) for (const d of dimensions) {
-    if (row.imported || row[d] === null || rows.filter(r => r.completed < row.started && r.provider === row.provider && r[d] !== null).length < 5) continue;
+  for (const row of chronological(rows)) for (const d of dimensions) {
+    if (row.imported || row[d] === null || rows.filter(r => !r.imported && r.completed < row.started && r.provider === row.provider && r[d] !== null).length < 5) continue;
     const candidate = predict(rows,row,row.started,d,true), mean = predict(rows,row,row.started,d,false);
     if (candidate === null || mean === null) continue;
     errors[d].count++;
