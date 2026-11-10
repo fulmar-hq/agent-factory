@@ -20,4 +20,3 @@ export function observeDisk(s:Store,r:DiskReading,warn:(message:string)=>void=co
  if(state!=='healthy')warn(message);
  });
 }
-
