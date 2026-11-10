@@ -62,3 +62,17 @@ test('native work observation failure leaves every independent valid controller 
   const r=await collectFactoryHealth(f.dir,now,null,()=>{throw Error('fictional ps denied');},async()=>{throw Error('fictional no network');});expect(r.snapshot.work?.state).toBe('unavailable');for(const source of ['controller','qualifications','releases','billing'] as const)expect(r.snapshot[source]?.state).toBe('ok');
  }finally{s.close();f.db.close();}
 });
+
+
+test('unrelated file, empty report and directory cannot verify native qualification',async()=>{
+ const {qualification}=await import('./fixtures'),{qualificationEvidenceVerified}=await import('../launcher/qualification-evidence');const f=bridge();try{
+  for(const evidence of [f.dir,join(f.dir,'unrelated.txt'),join(f.dir,'empty.txt')]){if(evidence!==f.dir)writeFileSync(evidence,evidence.endsWith('empty.txt')?'':'fictional unrelated file');const q={...qualification(),evidence};expect(qualificationEvidenceVerified('codex',q,JSON.stringify({codex:q}))).toBe(false);}
+ }finally{f.db.close();}
+});
+
+test('preflight selects newer actual controller usage over cached import and reverses on recovery',async()=>{
+ const {meter}=await import('./fixtures'),{freshestHealthReadings}=await import('../launcher/factory-health-runtime');const f=bridge(),now=Date.now();try{
+  writeFileSync(join(f.dir,'readings.json'),JSON.stringify({codex:{...meter(.1),observedAt:now-60000}}));expect(freshestHealthReadings(f.dir,{codex:{...meter(.95),observedAt:now}}).codex?.windows[0]?.used).toBe(.95);
+  writeFileSync(join(f.dir,'readings.json'),JSON.stringify({codex:{...meter(.95),observedAt:now-60000}}));expect(freshestHealthReadings(f.dir,{codex:{...meter(.1),observedAt:now}}).codex?.windows[0]?.used).toBe(.1);
+ }finally{f.db.close();}
+});
