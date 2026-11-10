@@ -28,7 +28,10 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
    if(snapshot.labels.some(l=>l.name==='state:review')){
     const url=(JSON.parse(receipt.data) as {url?:string}).url;
     const pr=url?e.s.get<{at:number;review?:string}>(`board-pr:${url}`):null;
-    if(pr){if(pr.review==='CHANGES_REQUESTED')e.s.set(`review-returned:${x.id}:${x.approval_digest}`,{pr:url,at:Date.now()});continue;}
+    if(pr?.review==='CHANGES_REQUESTED')e.s.set(`review-returned:${x.id}:${x.approval_digest}`,{pr:url,at:Date.now()});
+    // Already reviewing work belongs to the shared inventory even when an
+    // open-only read has no entry for its now-closed PR. Never rescan per worker.
+    continue;
    }
   }
   try {

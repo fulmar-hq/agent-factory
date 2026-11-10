@@ -1,4 +1,4 @@
-import {githubBudget,GitHubUnavailable,retryAtFor,recordGithubHttp,githubDiagnostic} from './github-budget';
+import {githubBudget,GitHubUnavailable,retryAtFor,recordGithubHttp,githubDiagnostic,githubTransportFailure} from './github-budget';
 import { githubPages,openIssuePages,restIssue } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
@@ -35,7 +35,7 @@ async function rawCommand(args: string[], cwd?: string, timeoutMs=30000) {
       const error=Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);
       // Classify the raw diagnostic in memory before removing debug bodies.
       // gh's ordinary offline error has no "error:" prefix.
-      if(args[0]==='gh')Object.assign(error,{githubUnavailable:timedOut || /rate limit|error connecting|internet connection|timed out|timeout|connection|network|resolve host|no such host|dial tcp|TLS handshake|EOF|HTTP 5[0-9]{2}|context deadline|temporary failure/i.test(err),rateLimited:/rate limit/i.test(err)});
+      if(args[0]==='gh')Object.assign(error,{githubUnavailable:timedOut || githubTransportFailure(err),rateLimited:/rate limit/i.test(err)});
       throw error;
     }
     return out;
@@ -49,7 +49,7 @@ export async function command(args:string[],cwd?:string,timeoutMs=30000) {
   try{return await rawCommand(args,cwd,timeoutMs);}
   catch(error){
     const failure=error as Error & {githubUnavailable?:boolean;rateLimited?:boolean};
-    if(api && (failure.githubUnavailable || /rate limit|timed out|timeout|connection|network|resolve host|TLS handshake|EOF|HTTP 5[0-9]{2}|context deadline|temporary failure/i.test(String(error)))){
+    if(api && (failure.githubUnavailable || githubTransportFailure(error))){
       let resets:Parameters<typeof retryAtFor>[2];
       if(failure.rateLimited || /rate limit/i.test(String(error)))try{resets=JSON.parse(await rawCommand(['gh','api','rate_limit'],undefined,10000));}catch{}
       const retryAt=retryAtFor(failure.rateLimited?'rate limit':error,Date.now(),resets);githubBudget('failure',args,error,retryAt);

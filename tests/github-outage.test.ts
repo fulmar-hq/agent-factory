@@ -151,3 +151,30 @@ test('physical GitHub usage attributes the actual supervisor entrypoint to build
  expect(githubSource(['bun','/fictional/launcher/tick.ts'])).toBe('tick');
  expect(githubSource(['bun','/fictional/scripts/control.ts'])).toBe('control');
 });
+
+test('legacy DNS transport diagnostics retain unknown native work without archive or recovery wake',()=>{
+ const s=new Store(':memory:'),e=new Engine(s,config());e.pause(false,'owner');
+ try{
+  expect(unavailable('Build failed: Could not resolve local import')).toBe(false);
+  const x=e.admit(ticket(),admission());s.db.query("UPDATE sessions SET status='unknown',native_id='fictional',pid=NULL WHERE id=?").run(x.id);s.set(`cleanup-evidence:${x.id}`,{verified:true});
+  for(const diagnostic of ['Post https://api.github.com/graphql: dialtcp:lookup api.github.com:nosuchhost','Post https://api.github.com/graphql: dial tcp: lookup api.github.com: no such host','lookup api.github.com: temporary failure in name resolution']){
+   const error='Error: gh failed (exit1): '+diagnostic;expect(unavailable(error)).toBe(true);s.event(crypto.randomUUID(),'worker-failure',{id:x.id,error},'retain');recoverWorkers(e);expect(e.sessions()[0].status).toBe('unknown');
+  }
+  expect(s.db.query('SELECT * FROM claims').all()).toHaveLength(1);expect(s.rows('events').filter((r:any)=>['session-archive','owner-wake-queued'].includes(r.kind))).toHaveLength(0);
+ }finally{s.close();}
+});
+test('repeated full ticks never individually poll an already-reviewing publication absent from open PR cache',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-closed-review-cache-')),c=config(),now=Date.now();writeFileSync(join(dir,'config.yaml'),JSON.stringify(c));
+ const t=ticket(3),issue={number:3,title:t.title,body:'```factory\n'+JSON.stringify(t)+'\n```',url:'https://github.com/example/demo/issues/3',state:'OPEN',updatedAt:'2026-11-10',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:review'}]};
+ const s=new Store(join(dir,'controller.sqlite')),e=new Engine(s,c);e.pause(false,'owner');
+ const x=e.admit({...t,approvalDigest:github.intakeLabel('example/demo',issue)},admission());e.finish(x.id,true);s.event('closed-publication','launcher-publish',{id:x.id,repo:t.repo,url:'https://github.com/example/demo/pull/7'},'retain');
+ let individualReads=0;
+ const command=spyOn(github,'command').mockImplementation(async args=>{
+  if(args[1]==='--version')return 'fictional-version';if(args[0]==='sysctl')return '1';
+  if(args.includes('--paginate'))return JSON.stringify([[{...issue,state:'open',html_url:issue.url,updated_at:issue.updatedAt,closed_at:null}]]);
+  if(args.includes('graphql'))return githubPage('pullRequests',[]); // Closed PR is absent.
+  individualReads++;throw Error('must not reread a reviewing issue or its closed PR');
+ });
+ try{for(let pass=0;pass<3;pass++)expect(await tick(dir)).toMatchObject({status:'ok',ready:0,claimed:0});expect(individualReads).toBe(0);expect(e.sessions()[0].status).toBe('finished');expect(s.get('board-pr:https://github.com/example/demo/pull/7')).toBeNull();expect(s.rows('events').filter((r:any)=>r.kind==='github-state')).toHaveLength(0);}
+ finally{command.mockRestore();s.close();rmSync(dir,{recursive:true});}
+});

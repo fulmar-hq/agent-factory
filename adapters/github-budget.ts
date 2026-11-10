@@ -6,7 +6,10 @@ import {join} from 'node:path';
 export class GitHubUnavailable extends Error {
  constructor(message:string,readonly retryAt:number){super(message);this.name='GitHubUnavailable';}
 }
-export const unavailable=(error:unknown)=>error instanceof GitHubUnavailable || /(?:GitHubUnavailable|API rate limit|secondary rate limit|(?:gh|git) (?:failed|timed out).*(?:timeout|connection|network|resolve|EOF|HTTP 5[0-9]{2}|context deadline|temporary failure)|GitHub backoff)/is.test(String(error));
+// Use one transport classifier for raw diagnostics and retained failure text.
+// DNS wording differs between gh/Go, libc and persisted compact receipts.
+export const githubTransportFailure=(error:unknown)=>/rate limit|error connecting|internet connection|timed out|timeout|connection|network|resolv|no\s*such\s*host|dial\s*tcp|TLS handshake|EOF|HTTP 5[0-9]{2}|context deadline|temporary failure|server misbehaving|SERVFAIL|name or service not known|nodename nor servname|EAI_AGAIN|ENOTFOUND/i.test(String(error));
+export const unavailable=(error:unknown)=>error instanceof GitHubUnavailable || /GitHubUnavailable|GitHub backoff|API rate limit|secondary rate limit/i.test(String(error)) || /(?:\bgh(?:\s|:)|\bgit(?:\s|:)|github)/i.test(String(error)) && githubTransportFailure(error);
 export function retryAtFor(error:unknown,now:number,resets?:{resources?:Record<string,{remaining:number;reset:number}>}) {
  const rate=/rate limit/i.test(String(error));
  const exhausted=Object.entries(resets?.resources??{}).filter(([k,v])=>['core','graphql'].includes(k)&&v.remaining===0).map(([,v])=>v.reset*1000+1000);
