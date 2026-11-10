@@ -1,3 +1,4 @@
+import {z} from 'zod';
 import {readFileSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import type {Config} from './config';
@@ -12,6 +13,25 @@ export function reviewChecksGreen(p:BoardPull,repo:string) {
  const success=(c:BoardPull['statusCheckRollup'][number])=>(c.conclusion??c.state)==='SUCCESS'&&(c.status===undefined||c.status==='COMPLETED');
  return checks.some(c=>c.name==='Verify'&&success(c)) && (repo!=='fulmar-hq/alido'||checks.some(c=>/^Secret scan$/i.test(c.name??'')&&success(c))) && checks.every(c=>success(c)||c.status==='COMPLETED'&&['SKIPPED','NEUTRAL'].includes(c.conclusion??''));
 }
+const HistoricalReview=z.object({repo:z.string().regex(/^[\w.-]+\/[\w.-]+$/),pr:z.number().int().positive(),head:z.string().regex(/^[a-f0-9]{40}$/),session:z.string().min(1),native:z.string().min(1),verdict:z.enum(['PASS','CHANGES_REQUESTED','BLOCKED']),verdictUrl:z.string().url(),evidence:z.string().min(20).max(12000)}).strict();
+// Explicit trusted migration input only. Never manufacture a native review,
+// qualification or PASS: require retained successful independent worker custody.
+export function importHistoricalReviews(s:Store,c:Config,dir:string) {
+ const path=join(dir,'historical-review-receipts.json');
+ if(!existsSync(path))return false;
+ const raw=readFileSync(path,'utf8');if(raw.length>2*1024*1024)throw Error('historical review migration exceeds bound');
+ const packet=z.object({complete:z.literal(true),reviews:z.array(HistoricalReview).max(500)}).strict().parse(JSON.parse(raw));
+ for(const r of packet.reviews) {
+  if(!Object.values(c.projects).some(p=>p.repo===r.repo)||!r.verdictUrl.startsWith(`https://github.com/${r.repo}/pull/${r.pr}#`)||!r.evidence.includes(r.head))throw Error('historical exact-head source provenance missing');
+  const session=s.db.query('SELECT native_id,status,brief FROM sessions WHERE id=?').get(r.session) as {native_id:string|null;status:string;brief:string}|null;
+  if(!session||session.native_id!==r.native||!['finished','archived'].includes(session.status)||!s.db.query("SELECT id FROM events WHERE kind='worker-exit' AND json_extract(data,'$.id')=? AND json_extract(data,'$.ok')=1").get(r.session)||s.get<{verified:boolean}>(`cleanup-evidence:${r.session}`)?.verified!==true)throw Error('historical independent native custody unverified');
+  const author=s.db.query("SELECT sessions.native_id FROM sessions JOIN events ON json_extract(events.data,'$.id')=sessions.id WHERE events.kind IN ('launcher-publish','worker-delivery') AND json_extract(events.data,'$.url')=? AND sessions.native_id=?").get(`https://github.com/${r.repo}/pull/${r.pr}`,r.native);if(author)throw Error('historical reviewer wrote the target change');
+  const brief=JSON.parse(session.brief) as {title?:string;kind?:string;repo?:string};
+  if(brief.repo!==r.repo||!(/^(?:Challenge|Accept|Review)\b/i.test(brief.title??'')||['review','challenge','acceptance'].includes(brief.kind??'')))throw Error('historical worker was not a same-repository independent review');
+ }
+ s.atomic(()=>{for(const r of packet.reviews){const key=`code-review:${r.repo}:${r.pr}:${r.head}`;if(!s.get(key)){s.set(key,{state:'done',historical:true,...r});s.event(`historical-${key}`,'historical-review-import',r,'Retain original native, report and PR verdict; withdraw an invalid receipt with a reviewed append-only correction');}}s.set('historical-review-migration',{complete:true,count:packet.reviews.length});});
+ return true;
+}
 export interface CodeReviewPort {
  pulls(repo:string):Promise<BoardPull[]>;
  files(repo:string,number:number):Promise<{filename:string;patch?:string}[]>;
@@ -21,6 +41,8 @@ export interface CodeReviewPort {
 // independent native review and builder-slot/qualification/usage gates remain.
 export async function reviewProductChanges(s:Store,c:Config,dir:string,repositories:Record<string,string>,port:CodeReviewPort,now=Date.now()) {
  if(!c.review_process)return;
+ const imported=importHistoricalReviews(s,c,dir);
+ if(c.review_process.historical_receipts==='pending'&&!imported)return;
  const protectedPRs=new Set<number>();
  const batchPath=join(dir,'release-batch.json');
  if(existsSync(batchPath)) {

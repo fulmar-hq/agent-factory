@@ -56,3 +56,13 @@ test('empty refills report their mix and invalid mixed refills create no issue',
   expect(calls).toBe(0);expect(e.s.get<any>('owner-result:mixed')).toMatchObject({applied:false,mix:{product:0,other:1}});
  }finally{e.s.close();}
 });
+test('pending historical migration defers all automatic resweeps without inventing evidence',async()=>{
+ const e=setup(),dir=mkdtempSync(join(tmpdir(),'historical-reviews-'));try {
+  e.c.review_process!.historical_receipts='pending';let reads=0;
+  const port:CodeReviewPort={pulls:async()=>{reads++;return [p()];},files:async()=>[],review:async()=>undefined};
+  await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);expect(reads).toBe(0);
+  writeFileSync(join(dir,'historical-review-receipts.json'),JSON.stringify({complete:true,reviews:[{repo:'fulmar-hq/alido',pr:1,head:'a'.repeat(40),session:'invented',native:'invented',verdict:'PASS',verdictUrl:'https://github.com/fulmar-hq/alido/pull/1#issuecomment-1',evidence:'Reviewed exact source head '+'a'.repeat(40)}]}));
+  await expect(reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now)).rejects.toThrow('custody');expect(reads).toBe(0);
+  expect(e.s.get('code-review:fulmar-hq/alido:1:'+'a'.repeat(40))).toBeNull();
+ }finally{e.s.close();}
+});

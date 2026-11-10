@@ -19,6 +19,7 @@ export const ConfigSchema = z.object({
   owners: z.record(z.string(), role),
   review_process: z.object({
     rule: z.literal("one independent exact-head review on the same ticket and PR after green checks; never refill work"),
+    historical_receipts: z.enum(["pending","verified"]).optional(),
     standard_minutes: z.literal(15),
     deep_minutes: z.literal(30),
     deep_when: z.literal("tenant separation, consent, sends, bookings, permissions, money or migrations"),

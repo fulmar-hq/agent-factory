@@ -66,3 +66,5 @@ Install config only after source review: archive the previous private config,
 add the fixed `review_process` and `refill` blocks from the fictional example,
 validate it, retain an undo receipt, and let the maintenance job install the
 reviewed signed source. This changes no schedule, wallet, usage or capacity limit.
+
+For an existing review backlog, set `review_process.historical_receipts: pending` while migrating verdicts. Product supplies private `historical-review-receipts.json` as `{complete:true,reviews:[{repo,pr,head,session,native,verdict,verdictUrl,evidence}]}`. Each evidence string must contain the exact reviewed head; the PR verdict retains source provenance. The importer validates enrolled repo, source-PR verdict URL, a retained successful review worker with matching native ID and verified cleanup, and refuses a known target author. It records original provenance without generating a new native result or qualification. No product review sweep starts until the complete migration packet validates. Unknown/stale-head reviews do not grant current-head approval. Preserve the packet and all original reports.
