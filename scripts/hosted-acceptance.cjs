@@ -13,7 +13,7 @@ async function probe(deps = {}) {
     const url = new URL(env.DATABASE_URL);
     if (!check('qaDatabase', url.hostname === 'alido-qa-db.cvceikyc41bm.ca-central-1.rds.amazonaws.com')) return report;
     for (const key of ['sslmode','sslcert','sslkey','sslrootcert','ssl']) url.searchParams.delete(key);
-    client = new Client({connectionString: url.toString(), ssl: {rejectUnauthorized: true, ca: (deps.readFile || require('node:fs').readFileSync)(env.DATABASE_CA_FILE, 'utf8')}});
+    client = new Client({connectionString: url.toString(), connectionTimeoutMillis: 10000, statement_timeout: 5000, query_timeout: 6000, ssl: {rejectUnauthorized: true, ca: (deps.readFile || require('node:fs').readFileSync)(env.DATABASE_CA_FILE, 'utf8')}});
     await client.connect();
     const query = async (sql, values) => (await client.query(sql, values)).rows;
     const [role] = await query('select rolsuper, rolbypassrls from pg_roles where rolname=current_user');
@@ -45,7 +45,7 @@ async function probe(deps = {}) {
     const signature = crypto.createHmac('sha256',env.BETTER_AUTH_SECRET).update(token).digest('base64');
     const cookie = '__Secure-better-auth.session_token=' + encodeURIComponent(token+'.'+signature);
     const request = async (label, path, authenticated = true) => {
-      const response = await (deps.fetch || fetch)('http://127.0.0.1:3000'+path, {method:'GET',redirect:'manual',signal:AbortSignal.timeout(12000),headers:{...(authenticated?{cookie}:{}),'x-forwarded-proto':'https','x-forwarded-host':'qa.goalido.com'}});
+      const response = await (deps.fetch || fetch)('http://127.0.0.1:3000'+path, {method:'GET',redirect:'manual',signal:AbortSignal.timeout(6000),headers:{...(authenticated?{cookie}:{}),'x-forwarded-proto':'https','x-forwarded-host':'qa.goalido.com'}});
       let body;
       const raw = await response.text();
       if (raw.length > 4*1024*1024) throw Error('oversized');
@@ -64,7 +64,7 @@ async function probe(deps = {}) {
     const other = await request('other-business-denial','/api/businesses/qa-synthetic-window-coverings');
     check('tenantDenied',other.status === 403 && other.body?.error === 'forbidden');
     for (const [label,path] of [['inbox',''],['follow-ups','/follow-ups'],['leads','/leads'],['bookings','/bookings'],['learning','/learning'],['settings','/settings']]) {
-      const response = await (deps.fetch || fetch)('http://127.0.0.1:3000/workspaces/qa-synthetic-other-business'+path,{method:'GET',redirect:'manual',signal:AbortSignal.timeout(12000),headers:{cookie,'x-forwarded-proto':'https','x-forwarded-host':'qa.goalido.com'}});
+      const response = await (deps.fetch || fetch)('http://127.0.0.1:3000/workspaces/qa-synthetic-other-business'+path,{method:'GET',redirect:'manual',signal:AbortSignal.timeout(6000),headers:{cookie,'x-forwarded-proto':'https','x-forwarded-host':'qa.goalido.com'}});
       const html = await response.text();
       report.requests.push({label,status:response.status,html:html.includes('<html')});
       check('screen:'+label,response.status === 200 && html.includes('<html') && !html.includes('NEXT_HTTP_ERROR_FALLBACK;500'));
