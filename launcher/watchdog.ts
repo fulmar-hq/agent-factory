@@ -22,7 +22,7 @@ export function checkClaimStall(e:Engine,now:number) {
   if(!p){p={since:now,at:now,free,claimed:0};e.s.set('claim-progress',p);}
   else if(now>p.at){
    const last=e.s.db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation') AND at<=?").get(now) as {at:number|null};
-   p={...p,since:!free||!p.free||(last.at!==null&&last.at>p.at)?now:p.since,at:now,free,claimed:0};e.s.set('claim-progress',p);
+   p={...p,since:!free||!p.free?now:Math.max(p.since,last.at??p.since),at:now,free,claimed:0};e.s.set('claim-progress',p);
   }
   const old=e.s.get<{id:string;state:string}>('watchdog-stall');
   const stalled=p && p.free && e.s.get('paused')===false && e.slots().free>0 && now>=p.since+7200000;
