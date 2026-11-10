@@ -56,7 +56,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(renewalDigest(original)!==claim.qualificationSha256)throw Error('qualification bytes changed before renewal');
   const version=(await command(['codex','--version'])).trim(),fingerprint=renewalFingerprint(checkout,version);
   if(renewalDigest(fingerprint)!==renewalDigest(claim.fingerprint))throw Error('boundary or CLI changed before renewal');
-  const publisher=readPublisherProof(dir,claim.publisher,publisherBoundary(checkout,dir));
+  readPublisherProof(dir,claim.publisher,publisherBoundary(checkout,dir));
   const guard=()=>{if(interrupted)throw Error(`renewal interrupted by ${interrupted}`);clock();if(live.get('paused')!==false)throw Error('factory paused');usageGate(live.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');if(renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('private policy changed during renewal');};
   guard();requireDiskCapacity(()=>diskReading(dir));await verifySubscription('codex');
   const subscription=Bun.spawnSync(['codex','login','status'],{env:Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG'].flatMap(k=>process.env[k]?[[k,process.env[k]!]]:[]))});
@@ -131,8 +131,8 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
   const pub=claim.publisher,publisherProof=readPublisherProof(dir,pub,publisherBoundary(checkout,dir)),testedPath=publisherTestedReceipt(dir,pub),publisherExpiresAt=Math.min(expiresAt,publisherProof.completedAt+86400000);
   const tested=JSON.parse(readFileSync(testedPath,'utf8'));
-  const remote=JSON.parse(await command(['gh','api',`repos/${pub.repo}/commits/${pub.head}`]));if(tested.code!==0||tested.tree!==pub.tree||remote.sha!==pub.head||remote.commit.tree.sha!==pub.tree||remote.commit.verification.verified!==true)throw Error('publisher signed tested-tree readback refused');
-  durable(join(run,'publisher-readback.json'),json({at:Date.now(),pub,testedPath,tested,verification:remote.commit.verification}));
+  const remote=JSON.parse(await command(['gh','api',`repos/${pub.repo}/commits/${pub.head}`]));if(tested.code!==0||tested.tree!==pub.tree||remote.sha!==pub.head||remote.commit.tree.sha!==pub.tree||remote.commit.verification.verified!==true||remote.commit.verification.reason!=='valid')throw Error('publisher signed tested-tree readback refused');
+  durable(join(run,'publisher-readback.json'),json({at:Date.now(),pub,publisherProof,publisherExpiresAt,testedPath,tested,verification:remote.commit.verification}));
   durable(join(run,'source-hashes.json'),json(fingerprint.hashes));
   durable(join(run,'report.md'),`# Automatic Codex renewal\n\nSix new native security/time/token rehearsals verified for medium and high.\n\n${proof.verifiedRuns.map(r=>`${r.effort} ${r.kind}: ${r.nativeId}; ${r.usage.total_tokens} tokens; cleanup ${r.cleanupAt}`).join('\n')}\n\nNative receipts, exact probe hashes, command denials, process snapshots and actual signals are retained in manifest.json. Phone remains explicitly deferred, never verified. Claude is unchanged. Proposed expiry ${new Date(expiresAt).toISOString()}; adoption requires the separate controller receipt. Actual signed tested-tree publisher readback retained separately. Prior restart evidence is retained; no new crash rehearsal claimed.\n`);
   const records=JSON.parse(original);for(const [key,effort] of [['codex','high'],['codex:high','high'],['codex:medium','medium']] as const)records[key]=QualificationSchema.parse({...records[key],qualified:true,subscription:true,policyIsolation:true,liveAccounting:true,stopVerified:true,phoneVerified:false,waiver:{phone:'deferred'},model:'gpt-6.1-sol',effort,version,expiresAt,evidence:join(run,'report.md')});
