@@ -158,12 +158,19 @@ test('19:00 alert uses existing isolated outbox once per day, including crash/re
 test('readiness gates the effective ticket profile while Claude remains expired',async()=>{
  const e=environment();try{
   e.c.model_override='per_ticket_wins_then_per_role';
+  e.s.set('owner-runtime:quality',{workspace:tmpdir(),pid:123,identity:'fictional-ordinary-quality'});
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir()});
   e.files['release-acceptance-ticket.json']={version:1,repo:'fulmar-hq/alido',number:1192,owner:'quality',day:carrier.day,provider:'codex',model:'gpt-6.1-sol',effort:'medium',source:'fictional owner decision',expiresAt:through+1,excludedNatives:['fictional-writer']};
   (e.files['qualifications.json'] as any).claude.expiresAt=through-1;
   delete (e.files['readings.json'] as any).claude;
   e.files['release-quality-path.json']={...(e.files['release-quality-path.json'] as object),provider:'codex',model:'gpt-6.1-sol',effort:'medium'};
   const r=await collectReleaseReadiness(e.options);expect(r.ready).toBe(true);
   expect((r.evidence['owner qualification'] as any).quality.provider).toBe('codex');
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir(),pid:123});
+  expect((await collectReleaseReadiness(e.options)).missing.some(x=>x.input==='Quality runner')).toBe(true);
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir(),pid:123,identity:'fictional-acceptance'});
+  expect((await collectReleaseReadiness({...e.options,identity:()=> 'fictional-acceptance'})).missing.some(x=>x.input==='Quality runner')).toBe(true);
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir()});
   (e.files['qualifications.json'] as any).codex.expiresAt=through;
   expect((await collectReleaseReadiness(e.options)).missing.some(x=>x.input==='quality qualification')).toBe(true);
  }finally{e.s.close();}

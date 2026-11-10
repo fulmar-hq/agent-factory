@@ -160,3 +160,41 @@ proof (`hostedHttp:true`, `receiptIngestion:true`) for the installed factory
 revision and effective profile through the full release margin. CLI qualification
 alone cannot create that proof. Rehearsal records remain isolated from the live
 night's acceptance and immutable claims.
+
+## Cold Production readiness
+
+The21:30 promotion admission remains fixed. After its PR checks pass, the trusted
+local executor waits within the existing22:00 deadline for exact Production
+metadata: the existing read-only `fulmar-production` profile must identify the
+Production account, its named EC2 instance must be running, its named RDS
+instance available, and that EC2 instance's SSM agent Online. Only then may the
+protected main merge trigger normal CI/deployment. Pending recovery keeps the
+same admitted effect; it never starts a late second promotion or extends the
+deadline. Read errors or mismatched identities refuse.
+
+These checks start no resources, issue no SSM command, renew no sign-in and
+supply no alternative deployment credentials. Native metadata observations are
+retained in the private effect journal and promotion receipt. They prove
+readiness only; the normal OIDC deployment, source/health/configuration/rollback
+verification and independent Production readback remain required.
+
+The native receipt's evidence may be one nonempty string or an explicit array of
+nonempty finding strings. The trusted schema preserves every array entry as
+newline-separated wire text, retains the input digest and leaves the native raw
+file untouched. It never changes the tuple or verdict; empty, mixed or object
+findings and extra keys refuse. This representation repair does not rerun a
+model or replace a rejected decision.
+
+
+## Dedicated acceptance custody
+
+The single hosted acceptance task uses `owner-runtime:quality-acceptance`,
+separate from ordinary permanent Quality mail/review turns. Dispatch, native
+identity/PID updates and cleanup use that same key. A live or unresolved
+acceptance runtime retains the pinned wake until its deadline; ordinary Quality
+custody cannot consume it. Per-ticket override readiness checks this dedicated
+workspace; legacy readiness without an override retains the permanent-role
+check. No permanent owner configuration, model qualification, budget, worker
+capacity or independence rule changes. Register the existing read-only acceptance
+workspace through the trusted setup before the release; this source change
+starts no native/model work and does not replay any existing acceptance.

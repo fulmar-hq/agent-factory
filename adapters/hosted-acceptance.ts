@@ -19,7 +19,7 @@ export function hostCommand(context:HostedContext,script=readFileSync(join(impor
  return `python3 -c "import base64;exec(base64.b64decode('${Buffer.from(program).toString('base64')}'))"`;
 }
 export function validHostedResult(raw:any) {
- const expected=['qaSafety','qaDatabase','runtimeRole','syntheticUser','syntheticMembership','ownFixture','otherFixture','health','unsignedDenied','workspace','preferences','tenantDenied','screen:inbox','screen:follow-ups','screen:leads','screen:bookings','screen:learning','screen:settings','sessionExpired','databaseClosed'];
+ const expected=['qaSafety','qaDatabase','runtimeRole','syntheticUser','syntheticMembership','ownFixture','otherFixture','health','unsignedDenied','workspace','preferences','tenantDenied','screen:inbox','screen:business','screen:leads','screen:appointments','screen:learning','screen:settings','sessionExpired','databaseClosed'];
  const hostChecks=['alido-qa-web:source','alido-qa-web:running','alido-qa-web:artifact','alido-qa-web:rollback','alido-qa-worker:source','alido-qa-worker:running','alido-qa-worker:artifact','alido-qa-worker:rollback','webHealthy'];
  return !!raw && hostChecks.every(k=>raw.checks?.[k]===true) && raw.probe?.version===1 && raw.probe?.method==='synthetic-http' && !raw.probe.failure && expected.every(k=>raw.probe.checks?.[k]===true);
 }

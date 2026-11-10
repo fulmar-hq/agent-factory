@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 spec = importlib.util.spec_from_file_location('alido_release', Path(__file__).resolve().parents[1] / 'scripts/alido-release.py')
 f = importlib.util.module_from_spec(spec)
@@ -79,6 +80,71 @@ class TrustedRelease(unittest.TestCase):
         with patch.object(f.time, 'time', return_value=epoch('20:20')), patch.object(f, 'api', return_value=run):
             with self.assertRaisesRegex(RuntimeError, 'attempt'):
                 f.workflow(c, 'ci.yml', c['revision'], ['Deploy QA'], 7, 3)
+
+    def readiness_rows(self, host='running', database='available', ping='Online'):
+        return [{'Account': '329195319812'},
+                {'Reservations': [{'Instances': [{'InstanceId': 'i-07ecd4144f6823c7a', 'State': {'Name': host}}]}]},
+                {'DBInstances': [{'DBInstanceIdentifier': 'alido-production-db', 'DBInstanceStatus': database}]},
+                {'InstanceInformationList': [] if ping is None else [{'InstanceId': 'i-07ecd4144f6823c7a', 'PingStatus': ping}]}]
+
+    def test_cold_production_waits_for_exact_host_database_and_ssm_without_writes(self):
+        c = context('promote')
+        rows = self.readiness_rows('stopped', 'starting', None) + self.readiness_rows('running', 'available', 'ConnectionLost') + self.readiness_rows()
+        with patch.object(f, 'production_readiness_json', side_effect=rows) as read, patch.object(f.time, 'time', return_value=epoch('21:35')), patch.object(f.time, 'sleep') as sleep, patch.object(f, 'journal') as journal:
+            proof = f.production_readiness(c)
+        self.assertEqual(proof['ready'], True)
+        self.assertEqual(proof['ssm'], 'Online')
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(read.call_count, 12)
+        self.assertEqual([call.args[2] for call in read.call_args_list[:4]], ['get-caller-identity', 'describe-instances', 'describe-db-instances', 'describe-instance-information'])
+        self.assertEqual(journal.call_count, 3)
+
+    def test_production_readiness_refuses_foreign_or_ambiguous_metadata(self):
+        for index, value in [(0, {'Account': '000000000000'}), (1, {'Reservations': []}),
+                             (1, {'Reservations': [{'Instances': [{'InstanceId': 'wrong-host'}]}]}),
+                             (2, {'DBInstances': []}), (3, {'InstanceInformationList': [{'InstanceId': 'wrong-host', 'PingStatus': 'Online'}]})]:
+            rows = self.readiness_rows(); rows[index] = value
+            with patch.object(f, 'production_readiness_json', side_effect=rows), patch.object(f.time, 'time', return_value=epoch('21:35')), patch.object(f.time, 'sleep') as sleep:
+                with self.assertRaises(ValueError):
+                    f.production_readiness(context('promote'))
+                sleep.assert_not_called()
+
+    def test_readiness_deadline_is_unchanged_and_never_renews_credentials(self):
+        c = context('promote')
+        with patch.object(f.time, 'time', return_value=epoch('22:00')), patch.object(f.subprocess, 'run') as execute:
+            with self.assertRaises(TimeoutError):
+                f.production_readiness(c)
+            execute.assert_not_called()
+        with patch.object(f.time, 'time', return_value=epoch('21:59:58')), patch.object(f.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='{"Account":"329195319812"}')) as execute:
+            self.assertEqual(f.production_readiness_json(c, 'sts', 'get-caller-identity')['Account'], '329195319812')
+            self.assertEqual(execute.call_args.args[0], ['aws', 'sts', 'get-caller-identity', '--profile', 'fulmar-production', '--region', 'ca-central-1', '--output', 'json'])
+            self.assertEqual(execute.call_args.kwargs['timeout'], 2)
+            with self.assertRaises(ValueError):
+                f.production_readiness_json(c, 'ec2', 'start-instances')
+            self.assertEqual(execute.call_count, 1)
+        with patch.object(f.time, 'time', return_value=epoch('21:35')), patch.object(f.subprocess, 'run', return_value=SimpleNamespace(returncode=255, stdout='')) as execute:
+            with self.assertRaisesRegex(RuntimeError, 'read failed'):
+                f.production_readiness_json(c, 'sts', 'get-caller-identity')
+            self.assertEqual(execute.call_count, 1)
+
+    def test_promotion_checks_precede_readiness_and_readiness_precedes_main_merge(self):
+        c = context('promote'); artifact = 'repo@sha256:' + 'd' * 64
+        c['acceptance'] = {'day': c['day'], 'revision': c['revision'], 'tree': c['tree'], 'verdict': 'ACCEPT', 'artifact': artifact,
+                           'evidence': 'fictional-proof', 'wake': 'fictional-wake', 'native': 'fictional-native', 'at': int(epoch('21:19') * 1000), 'qaRun': 7, 'qaAttempt': 2}
+        order = []
+        def api(path, method='GET', body=None):
+            if path.startswith('pulls?'): return []
+            if path == 'pulls' and method == 'POST': return {'number': 8}
+            if path == 'pulls/8': return {'head': {'sha': c['revision']}, 'merge_commit_sha': 'c' * 40, 'mergeable_state': 'clean'}
+            if path.startswith('commits/'):
+                order.append('checks'); return {'check_runs': [{'name': n, 'status': 'completed', 'conclusion': 'success'} for n in ['Verify', 'Secret scan']]}
+            if path == 'pulls/8/merge' and method == 'PUT': order.append('main-merge'); return {'merged': True, 'sha': 'e' * 40}
+            raise AssertionError(path)
+        def ready(_): order.append('readiness'); return {'ready': True, 'evidence': 'fictional metadata, not deployment'}
+        with patch.object(f.time, 'time', return_value=epoch('21:30')), patch.object(f, 'branch', return_value=c['revision']), patch.object(f, 'tree', return_value=c['tree']), patch.object(f, 'hold', return_value={'id': c['hold_id'], 'held': True}), patch.object(f, 'api', side_effect=api), patch.object(f, 'workflow', return_value={'id': 7}), patch.object(f, 'logs', return_value=artifact), patch.object(f, 'variable'), patch.object(f, 'publish_authority'), patch.object(f, 'production_readiness', side_effect=ready):
+            result = f.run(c)
+        self.assertEqual(order, ['checks', 'readiness', 'main-merge'])
+        self.assertEqual(result['productionReadiness']['ready'], True)
 
     def test_only_explicit_factory_record_bootstraps_and_reads_back(self):
         with patch.object(f, 'api', side_effect=[{'variables': []}, None, {'value': 'fictional'}]) as api:

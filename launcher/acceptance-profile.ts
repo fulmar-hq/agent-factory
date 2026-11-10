@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {join} from 'node:path';
-import {type Config,optionalJSON,QualificationSchema} from './config';
+import {type Config,type Meter,optionalJSON,QualificationSchema} from './config';
 import {usageGate} from './engine';
 import type {Store} from '../tracking/store';
 import {verifySubscription} from '../adapters/workers';
@@ -13,15 +13,20 @@ export async function acceptanceProfile(c:Config,dir:string,day:string,validThro
  if(t.day!==day||t.expiresAt<=validThrough)throw Error('acceptance ticket is expired or for another day');
  return {role:{harness:t.provider,model:t.model,effort:t.effort},ticket:t};
 }
-export async function admitAcceptance(c:Config,dir:string,s:Store,day:string,deadline:number,now=Date.now()){
+export function acceptanceUsage(c:Config,provider:'codex'|'claude',reading:Meter|undefined,deadline:number,clock=Date.now){
+ const checkedAt=clock();
+ if(checkedAt>=deadline)throw Error('Quality acceptance deadline expired during admission');
+ usageGate(reading,false,checkedAt,c,provider);
+}
+export async function admitAcceptance(c:Config,dir:string,s:Store,day:string,deadline:number,clock=Date.now){
  const effective=await acceptanceProfile(c,dir,day,deadline);
  if(!effective.role)throw Error('Quality profile missing');
  const r=effective.role,raw=await optionalJSON(join(dir,'qualifications.json')) as Record<string,unknown>|null;
  const q=QualificationSchema.parse(raw?.[`${r.harness}:${r.effort}`]??raw?.[r.harness]);
- if(q.model!==r.model||q.effort!==r.effort||q.expiresAt<=deadline||now>=deadline)throw Error('effective Quality profile unqualified through acceptance deadline');
+ if(q.model!==r.model||q.effort!==r.effort||q.expiresAt<=deadline||clock()>=deadline)throw Error('effective Quality profile unqualified through acceptance deadline');
  await verifySubscription(r.harness);
  const {localReadings,codexStatus}=await import('../adapters/usage');
- const readings=await localReadings();if(r.harness==='codex'){const fresh=await codexStatus();if(fresh)readings.codex=fresh;}usageGate(readings[r.harness],false,now,c,r.harness);
+ const readings=await localReadings();if(r.harness==='codex'){const fresh=await codexStatus();if(fresh)readings.codex=fresh;}acceptanceUsage(c,r.harness,readings[r.harness],deadline,clock);
  if(s.get('paused')!==false)throw Error('factory paused');
  return effective;
 }

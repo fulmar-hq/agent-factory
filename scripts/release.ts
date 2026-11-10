@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
 import {releaseWindowResult,readQaServerStates} from '../launcher/release-result';
 import {releaseAvailable,observeReleaseBilling} from '../wallet/release';
 import {join} from 'node:path';
@@ -67,7 +68,7 @@ try {
  const executor=new ReleaseExecutor(s,port,brake,Date.now,id=>{
   const now=Date.now();if(awsRefusal(s,c,now,admittedBilling)||funds(now)<100)throw Error('wallet changed before reservation');
   debit(s,id,'aws',100,now);
- },batch);
+ },batch,w=>{dispatchReleaseQuality(s,w,root);});
  if(stage==='reconcile'&&minute>=1140&&minute<1190){
   const pending=s.get<ReleaseReadiness>(`release-preflight-report:${toronto(Date.now()).day}`);
   if(pending&&!pending.ready)try{releasePreflightAlert(s,pending);}

@@ -7,7 +7,7 @@ import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings} from '..
 import {NativeReceipt} from '../adapters/native';
 import {spawnWorker} from './child';
 import {processIdentity} from './process';
-import {type Wake,type OwnerRuntime} from './wake';
+import {ownerRuntimeKey,type Wake,type OwnerRuntime} from './wake';
 import {recordAcceptance} from './release';
 import {admitAcceptance,assertIndependent} from './acceptance-profile';
 import {collectHostedAcceptance,type HostedContext} from '../adapters/hosted-acceptance';
@@ -43,8 +43,8 @@ export async function runOwner(id:string,dir=root) {
  try {
   const claimed=s.atomic(()=>{
    const w=s.get<Wake & {state:string}>(`owner-wake:${id}`);if(w?.state!=='starting')return null;
-   const r=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);if(!r || r.wake!==id || r.pid)return null;
-   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(`owner-runtime:${w.owner}`,{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
+   const r=s.get<OwnerRuntime>(ownerRuntimeKey(w));if(!r || r.wake!==id || r.pid)return null;
+   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(ownerRuntimeKey(w),{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
   });
   if(!claimed)return;
   wake=claimed.w;runtime=claimed.r;
@@ -66,7 +66,7 @@ export async function runOwner(id:string,dir=root) {
   const brief=fullBrief.length>60000 ? fullBrief.slice(0,12000)+'\n[Historical middle retained in owner record]\n'+fullBrief.slice(-48000) : fullBrief;
   const t:Ticket={repo:'owner/review',number:1,title:'Review owner event',owner:wake.owner,creator:'launcher',source:wake.id,outcome:`You are Alido · ${wake.owner}. Review this event and report the required follow-up. This wake is read-only: do not implement changes, publish, merge, release, sign in or send messages. Ticket workers and the trusted launcher perform effects separately. Preserve work.\nOwner record:\n${brief}\nEvent:\n${JSON.stringify(wake)}`,test:'Report source-backed owner decisions',approved:true,benefit:'normal',estimateSeconds:1800,estimateTokens:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:role.harness,model:role.model,effort:role.effort,area:'owner',kind:'review'};
   if(wake.kind==='qa-deployed'){
-   t.outcome=`You are independent Alido Quality. Accept or reject ONLY this hosted frozen QA revision/tree/artifact. Deadline is an absolute epoch milliseconds; finish before it. Read the trusted launcher-fetched native/hosted evidence in ${join(scratch,'qa-evidence.json')}. Inspect additional hosted/browser evidence only if the sandbox has a qualified supported path; do not assume those capabilities exist. Record exactly which feature checks are proven and which are missing. Do not use AWS SSO, change customer settings, send real-person messages or mutate release state. The launcher packet has hosted.passed, bounded synthetic HTTP checks and native source/image evidence. hosted.passed must be true for ACCEPT. A failed or absent hosted check means REJECT. State the limited checks honestly; HTTP screen responses do not prove keyboard interaction or every feature in the batch. Missing hosted evidence means REJECT. Write ${join(scratch,'acceptance.json')} with exactly {day,revision,tree,artifact,verdict: ACCEPT or REJECT,evidence: nonempty source-backed findings}. Do not accept from passing CI alone. Your launcher validates the receipt after verified native completion.\nOwner record:\n${brief}\nQA deployed packet:\n${JSON.stringify(wake.payload)}`;
+   t.outcome=`You are independent Alido Quality. Accept or reject ONLY this hosted frozen QA revision/tree/artifact. Deadline is an absolute epoch milliseconds; finish before it. Read the trusted launcher-fetched native/hosted evidence in ${join(scratch,'qa-evidence.json')}. Inspect additional hosted/browser evidence only if the sandbox has a qualified supported path; do not assume those capabilities exist. Record exactly which feature checks are proven and which are missing. Do not use AWS SSO, change customer settings, send real-person messages or mutate release state. The launcher packet has hosted.passed, bounded synthetic HTTP checks and native source/image evidence. hosted.passed must be true for ACCEPT. A failed or absent hosted check means REJECT. State the limited checks honestly; HTTP screen responses do not prove keyboard interaction or every feature in the batch. Missing hosted evidence means REJECT. Write ${join(scratch,'acceptance.json')} with exactly {day,revision,tree,artifact,verdict: ACCEPT or REJECT,evidence: a single nonempty string containing all source-backed findings}. Do not accept from passing CI alone. Your launcher validates the receipt after verified native completion.\nOwner record:\n${brief}\nQA deployed packet:\n${JSON.stringify(wake.payload)}`;
   }
   if(wake.kind==='product-intake')t.outcome+=`\n${intakeInstructions(c,dir)}\nWrite ${join(scratch,'intake.json')} as {"tickets":[{"repo":"enrolled/repo","title":"Short useful task","brief":{...}}]}. Brief uses the factory Ticket schema, explicit honest estimateSeconds/estimateTokens plus estimateBasis (at least 20 characters of evidence), one area, disjoint exact files, executable test, source-backed useful outcome. Review project AGENTS.md and contracts. Avoid duplicate work and protected files. At most one docs-only proposal in this round. In build mode supply enough useful leaves to reach target; in drain mode staff eligible review, challenge, fix-up and plan work, then stop when those are exhausted; never inflate estimates or invent success. Do not call GitHub writes. The launcher validates and creates drafts then applies policy.`;
   if(wake.kind==='failure-diagnosis')t.outcome+=`\nDiagnose using retained evidence in the event and repository. Write ${join(scratch,'retry.json')} as {"session":"failed session id","diagnosis":"source-backed cause and correction, at least 20 characters","estimateBasis":"honest basis, at least 20 characters","test":"correct executable command","outcome":"corrected bounded outcome"}. Keep original paths, estimates, wallet and provider. The launcher permits one new-digest attempt only with verified custody and no PR. If unsafe, do not write a retry proposal; report a decision.`;
@@ -99,7 +99,7 @@ export async function runOwner(id:string,dir=root) {
   timer=setInterval(sample,500);
   let pending='';for await(const chunk of child.stdout){writeSync(fd,chunk);pending+=new TextDecoder().decode(chunk);let end:number;
    while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);const event=accounting.ingest(t.provider,line);
-    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,Date.now());s.set(`owner-runtime:${wake.owner}`,{...s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`),native});}
+    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,Date.now());s.set(ownerRuntimeKey(wake),{...s.get<OwnerRuntime>(ownerRuntimeKey(wake)),native});}
     if(event.done)done=true;sample();
    }
   }
@@ -121,7 +121,7 @@ export async function runOwner(id:string,dir=root) {
   if(timer)clearInterval(timer);
   if(onSignal){process.off("SIGTERM",onSignal);process.off("SIGINT",onSignal);}
   try{if(child){await child.stop();await child.exited;}}
-  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`);if(r?.wake===id)s.set(`owner-runtime:${wake.owner}`,{...r,pid:undefined,identity:undefined});}s.close();}
+  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(ownerRuntimeKey(wake));if(r?.wake===id)s.set(ownerRuntimeKey(wake),{...r,pid:undefined,identity:undefined});}s.close();}
  }
 }
 if(import.meta.main)await runOwner(process.argv[2]);
