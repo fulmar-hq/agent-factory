@@ -142,7 +142,7 @@ function context(s:Store,id:string):Context {
     !Number.isSafeInteger(supervisorPid) || supervisorPid<1 || (typeof supervisorIdentity!=="string" || !supervisorIdentity) || typeof workspace!=="string" || !isAbsolute(workspace) || session.provider!=="codex" || session.status!=="finished" || session.pid!==null || !session.native_id || s.get("paused")!==false ||
     native?.verified!==true || native.id!==session.native_id || !native.path || cleanup?.verified!==true || !Array.isArray(cleanup.groups) || !cleanup.groups.length || cleanup.groups.some(group=>!Number.isSafeInteger(group) || group<1) ||
     (parent && (parent.state!=="returned" || parent.custodyBlocked)) ||
-    jobs.some(j=>j.parent===id && (j.state!=="returned" || j.nativePending || j.fallbackPending || j.result?.tabClosed!==true || !["done","blocked","not done"].includes(j.result?.status))))
+    jobs.some(j=>j.parent===id && !j.detached && (j.state!=="returned" || j.nativePending || j.fallbackPending || j.result?.tabClosed!==true || !["done","blocked","not done"].includes(j.result?.status))))
     throw Error("terminal native/process/browser custody unresolved or paused");
   return {session,workspace,supervisor:{pid:supervisorPid,identity:supervisorIdentity},paused:false,publication,native,cleanup,browserClear:true};
 }
