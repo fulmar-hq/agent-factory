@@ -1,3 +1,4 @@
+import {githubPage} from './fixtures';
 import {test,expect} from 'bun:test';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -17,7 +18,7 @@ test('ready, returned review, completed CI, release window and renewal deduplica
  expect(pendingWakes(s).filter(w=>w.kind==='qualification-renewal')).toHaveLength(2);
  expect(pendingWakes(s).filter(w=>w.kind==='release-window')).toHaveLength(1);
  let reviews:any[]=[],checks:any[]=[];
- const execute=async()=>JSON.stringify([{number:2,url:'https://github.com/example/demo/pull/2',headRefOid:'a'.repeat(40),reviews,statusCheckRollup:checks}]);
+ const execute=async()=>githubPage('pullRequests',[{number:2,url:'https://github.com/example/demo/pull/2',headRefOid:'a'.repeat(40),reviews,statusCheckRollup:checks}]);
  await githubWakes(s,c,execute,now); // Historical baseline causes no model call.
  reviews=[{id:'review-1',state:'CHANGES_REQUESTED',submittedAt:new Date(now).toISOString()}];checks=[{status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/example/demo/actions/runs/1/job/2'}];
  await githubWakes(s,c,execute,now);await githubWakes(s,c,execute,now+60000);

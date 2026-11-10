@@ -1,3 +1,4 @@
+import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { Engine } from "../launcher/engine";
@@ -189,7 +190,7 @@ test("#5 approval command binds the observed block; refresh and launch refuse la
   const exec = async (args: string[]) => {
     calls.push(args);
     if (args.includes("view")) return JSON.stringify(i);
-    if (args.includes("list")) return JSON.stringify([i]);
+    if (args.includes("graphql")) return githubPage("issues",[i]);
     if (args.includes("edit")) {
       for (let n = 0; n < args.length; n++)
         if (args[n] === "--add-label") i.labels.push({ name: args[n + 1] });

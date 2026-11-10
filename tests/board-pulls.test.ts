@@ -1,3 +1,4 @@
+import {githubPage} from './fixtures';
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
 import {config} from './fixtures';
@@ -7,11 +8,11 @@ test('complete open snapshots replace old PRs; failed or truncated reads retain 
  const pr={number:1,url:'https://github.com/example/demo/pull/1',headRefOid:'abc',reviews:[],statusCheckRollup:[]};
  try{
   recordPulls(s,'example/demo',[pr],now-60001);
-  await refreshPulls(s,c,now,async args=>{expect(args.join(' ')).toContain('closingIssuesReferences');return '[]';});
+  await refreshPulls(s,c,now,async args=>{expect(args.join(' ')).toContain('closingIssuesReferences');return githubPage('pullRequests',[]);});
   expect(s.get<PullSnapshot>('board-pulls:example/demo')!.pulls).toEqual([]);
   await refreshPulls(s,c,now+60001,async()=>{throw Error('offline');});
   expect(s.get<PullSnapshot>('board-pulls:example/demo')!.error).toBe(true);
-  expect(()=>recordPulls(s,'example/demo',Array(100).fill(pr),now)).toThrow('truncated');
+  await refreshPulls(s,c,now+120002,async()=>githubPage('pullRequests',[pr],{total:2}));
   expect(s.get<PullSnapshot>('board-pulls:example/demo')!.pulls).toEqual([]);
   expect(pullState({...pr,statusCheckRollup:[{name:'Release hold',status:'IN_PROGRESS'}]})).toMatchObject({pending:false,releaseHeld:true});
   expect(pullState({...pr,statusCheckRollup:[{name:'Release hold',status:'COMPLETED',conclusion:'SUCCESS'}]}).releaseHeld).toBe(false);
