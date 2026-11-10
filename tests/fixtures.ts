@@ -5,6 +5,20 @@ import {
   type Meter,
   type Billing,
 } from "../launcher/config";
+import {Engine} from '../launcher/engine';
+import type {DiskReading} from '../launcher/disk';
+import {dispatchWake} from '../launcher/wake';
+import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
+// Non-capacity suites use explicit synthetic disk evidence, including child
+// processes. Their behavior must not depend on the CI runner's free disk.
+export const healthyDisk=():DiskReading=>({at:Date.now(),path:'fictional-test-volume',freeGiB:100,usedFraction:0.1});
+export class TestEngine extends Engine {
+ constructor(...args:ConstructorParameters<typeof Engine>) {
+  super(args[0],args[1],args[2],args[3]??healthyDisk);
+ }
+}
+export function testDispatchWake(...a:Parameters<typeof dispatchWake>) {return dispatchWake(a[0],a[1],a[2],a[3],a[4]??healthyDisk);}
+export function testDispatchReleaseQuality(...a:Parameters<typeof dispatchReleaseQuality>) {return dispatchReleaseQuality(a[0],a[1],a[2],a[3],a[4],a[5]??healthyDisk);}
 export const now = Date.parse("2026-11-07T18:00:00-05:00");
 export const config = () =>
   ConfigSchema.parse({
@@ -96,3 +110,9 @@ export const admission = () => ({
   qualification: qualification(),
   billing: billing(),
 });
+// Fictional GraphQL connection, including completeness for nested evidence.
+export function githubPage(kind:'issues'|'pullRequests',rows:any[],options:{total?:number;next?:boolean;cursor?:string|null}={}) {
+ const info={hasNextPage:false,endCursor:null};
+ const nodes=rows.map(r=>kind==='issues'?{...r,closedAt:r.closedAt??null,labels:{nodes:r.labels,pageInfo:info}}:{title:'Fictional pull',headRefName:'fixture',reviewDecision:null,...r,reviews:{nodes:r.reviews??[],pageInfo:info},closingIssuesReferences:{nodes:r.closingIssuesReferences??[],pageInfo:info},commits:{nodes:[{commit:{statusCheckRollup:{contexts:{nodes:r.statusCheckRollup??[],pageInfo:info}}}}]}});
+ return JSON.stringify({data:{repository:{[kind]:{totalCount:options.total??rows.length,nodes,pageInfo:{hasNextPage:options.next??false,endCursor:options.cursor??null}}}}});
+}

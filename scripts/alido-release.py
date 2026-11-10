@@ -1,4 +1,4 @@
-"""Protected factory release operations. Never uses workstation credentials.
+"""Protected factory release operations. Deployments never use workstation credentials.
 
 Every external mutation has a unique workflow run; a failed/unknown mutation is
 not retried. The Mini retains its dispatch claim and reconciles this run only.
@@ -65,7 +65,7 @@ def validate(c, now=None, effect=True):
     start, end = windows[c['step']]
     if effect and not start <= minute < end:
         raise ValueError('Outside fixed release effect window')
-    expected = hashlib.sha256(json.dumps([c['day'], c['step'], c['revision'], c['tree']], separators=(',', ':')).encode()).hexdigest()
+    expected = hashlib.sha256(json.dumps([c['day'], c['step'], c.get('admitted_revision', c['revision']), c['tree']], separators=(',', ':')).encode()).hexdigest()
     if expected != c['key']:
         raise ValueError('Effect identity differs')
 
@@ -79,7 +79,20 @@ def tree(revision):
 
 
 def hold():
-    return json.loads(api('actions/variables/QA_HOLD')['value'])
+    value = json.loads(api('actions/variables/QA_HOLD')['value'])
+    # This installation retains protocol1. Unknown migrations require the
+    # supported captain rollout, never a guessed same-ID success.
+    fields = {'version', 'held', 'reason', 'by', 'at', 'id', 'legacy_issue'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value.get('version')) is not int
+            or value['version'] != 1 or type(value.get('held')) is not bool
+            or any(not isinstance(value[k], str) or not value[k].strip() for k in ('reason', 'by', 'at', 'id'))
+            or len(value['reason']) > 500 or len(value['by']) > 120
+            or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,120}', value['id'])
+            or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z', value['at'])
+            or value['legacy_issue'] is not None and (type(value['legacy_issue']) is not int or value['legacy_issue'] < 1)):
+        raise ValueError('Complete supported QA hold required')
+    datetime.datetime.fromisoformat(value['at'].replace('Z', '+00:00'))
+    return value
 
 
 def guard(c, expected_hold, held=None):
@@ -89,6 +102,69 @@ def guard(c, expected_hold, held=None):
     if current['id'] != expected_hold or (held is not None and current['held'] is not held):
         raise ValueError('Expected hold changed before effect')
     return current
+
+
+def carrier(c):
+    """Read-only exact-head admission. Never update/rebase a frozen carrier."""
+    b = c['batch']
+    if (b.get('version') != 1 or b.get('day') != c['day'] or b.get('revision') != c['revision']
+            or b.get('tree') != c['tree'] or b.get('holdId') != c['hold_id']):
+        raise ValueError('Reviewed batch context differs')
+    pull = api('pulls/' + str(b['pr']))
+    # JSON property order is fixed by the strict controller schema.
+    digest = hashlib.sha256(json.dumps(b, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if (pull.get('state') != 'open' or pull.get('draft') is not False
+            or pull['head']['sha'] != b['revision'] or pull['head']['ref'] != b['ref']
+            or pull['head']['repo']['full_name'] != REPO or pull['base']['ref'] != 'QA'
+            or pull['base']['repo']['full_name'] != REPO or pull['base']['sha'] != b['base']
+            or pull.get('mergeable') is not True or pull.get('mergeable_state') != 'clean'
+            or 'factory-batch-sha256:' + digest not in (pull.get('body') or '')):
+        raise ValueError('Carrier identity/base/merge readiness changed')
+    if branch('QA') != b['base'] or tree(b['revision']) != b['tree']:
+        raise ValueError('Carrier base/tree moved')
+    state = hold()
+    if state.get('held') is not False or state.get('id') != b['holdId'] or state.get('version') not in (1, 2):
+        raise ValueError('Explicit matching OFF hold required')
+    if state['version'] == 2 and {'number': b['pr'], 'head': b['revision'], 'ref': b['ref']} not in state.get('batch', []):
+        raise ValueError('Carrier not admitted by batch hold')
+    for number in {1192, state.get('legacy_issue')} - {None}:
+        labels = api('issues/' + str(number))['labels']
+        if not isinstance(labels, list) or any(x.get('name') in ('QA hold', 'qa-hold') for x in labels):
+            raise ValueError('Release board hold is on or unknown')
+    promotions = api('pulls?state=open&base=main&per_page=100')
+    if not isinstance(promotions, list) or len(promotions) >= 100 or any(p['head']['ref'] == 'QA' for p in promotions):
+        raise ValueError('Existing/unknown promotion owns release')
+    checks = api('commits/' + b['revision'] + '/check-runs?per_page=100')
+    runs = checks.get('check_runs')
+    if not isinstance(runs, list) or checks.get('total_count') != len(runs) or len(runs) >= 100:
+        raise ValueError('Carrier check inventory incomplete')
+    for name in ('Verify', 'Secret scan', 'Release hold'):
+        found = sorted((r for r in runs if r['name'] == name and r.get('app', {}).get('slug') == 'github-actions'), key=lambda r: r['id'], reverse=True)
+        if not found or found[0].get('head_sha') != b['revision'] or found[0]['status'] != 'completed' or found[0]['conclusion'] != 'success':
+            raise ValueError('Exact carrier check failed/missing: ' + name)
+    return pull
+
+
+def merge_carrier(c):
+    carrier(c)
+    # Repeat current clock and branch/hold directly before the single write.
+    validate(c)
+    b = c['batch']
+    current = hold()
+    if branch('QA') != b['base'] or current['id'] != c['hold_id'] or current['held'] is not False:
+        raise ValueError('Carrier admission changed before merge')
+    validate(c)
+    merged = api('pulls/' + str(b['pr']) + '/merge', 'PUT', {'sha': b['revision'], 'merge_method': 'squash'})
+    revision = merged.get('sha')
+    if merged.get('merged') is not True or not isinstance(revision, str) or not SHA.fullmatch(revision):
+        raise RuntimeError('Carrier merge uncertain; never retry')
+    commit = api('commits/' + revision)
+    if (branch('QA') != revision or commit['commit']['tree']['sha'] != c['tree']
+            or commit['commit']['verification']['verified'] is not True
+            or [p['sha'] for p in commit['parents']] != [b['base']]):
+        raise RuntimeError('Merged carrier source/tree/signature differs; retain custody')
+    journal('carrier-merged', {'pr': b['pr'], 'revision': revision, 'tree': c['tree'], 'sources': b['sources']})
+    return {**c, 'revision': revision, 'admitted_revision': c['revision']}
 
 
 def freeze(c):
@@ -106,7 +182,7 @@ def freeze(c):
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, 'xb') as stream:
             stream.write(content)
-    validate(c)
+    validate(c, effect=not bool(c.get('admitted_revision')))
     guard(c, c['hold_id'])
     journal('freeze-intent', {'expectedHold': c['hold_id'], 'tree': c['tree'], 'source': captain_source})
     subprocess.run(['/usr/bin/python3', '-B', str(directory / 'infra/ci/release_captain.py'),
@@ -204,6 +280,75 @@ def deployed(run, revision):
 
 
 
+
+def production_readiness_json(c, service, operation, arguments=()):
+    """Exact existing read-only SSO profile; never renew or deploy with it."""
+    validate(c, effect=False)
+    remaining = c['deadline'] / 1000 - time.time()
+    if remaining <= 0:
+        raise TimeoutError('Release deadline expired before Production readiness read')
+    allowed = {('sts', 'get-caller-identity'), ('ec2', 'describe-instances'),
+               ('rds', 'describe-db-instances'), ('ssm', 'describe-instance-information')}
+    if (service, operation) not in allowed:
+        raise ValueError('Production readiness permits only exact read operations')
+    command = ['aws', service, operation, '--profile', 'fulmar-production',
+               '--region', 'ca-central-1', '--output', 'json', *arguments]
+    result = subprocess.run(command, text=True, capture_output=True,
+                            timeout=min(15, remaining), check=False)
+    if result.returncode:
+        raise RuntimeError('Production readiness read failed: ' + service + '/' + operation)
+    validate(c, effect=False)
+    return json.loads(result.stdout)
+
+
+def production_readiness(c):
+    """Wait only within the admitted promotion deadline for cold-host recovery.
+
+    This is metadata readiness, never deployment/source/health acceptance. No
+    start, SSM command, fallback deployment credential or sign-in is supplied.
+    """
+    account, instance, database = '329195319812', 'i-07ecd4144f6823c7a', 'alido-production-db'
+    def read():
+        identity = production_readiness_json(c, 'sts', 'get-caller-identity')
+        if identity.get('Account') != account:
+            raise ValueError('Production readiness account differs')
+        ec2 = production_readiness_json(c, 'ec2', 'describe-instances',
+                                        ['--instance-ids', instance])
+        reservations = ec2.get('Reservations')
+        if not isinstance(reservations, list) or any(not isinstance(row, dict) or not isinstance(row.get('Instances'), list) for row in reservations):
+            raise ValueError('Production readiness EC2 inventory malformed')
+        hosts = [host for row in reservations for host in row['Instances']]
+        if len(hosts) != 1 or not isinstance(hosts[0], dict) or hosts[0].get('InstanceId') != instance:
+            raise ValueError('Production readiness exact host missing or ambiguous')
+        host_state = hosts[0].get('State', {}).get('Name')
+        if host_state not in ('stopped', 'pending', 'running', 'stopping'):
+            raise ValueError('Production readiness host state invalid')
+        rds = production_readiness_json(c, 'rds', 'describe-db-instances',
+                                        ['--db-instance-identifier', database])
+        databases = rds.get('DBInstances')
+        if not isinstance(databases, list) or len(databases) != 1 or not isinstance(databases[0], dict) or databases[0].get('DBInstanceIdentifier') != database:
+            raise ValueError('Production readiness exact database missing or ambiguous')
+        db_state = databases[0].get('DBInstanceStatus')
+        if db_state not in ('stopped', 'starting', 'available', 'stopping', 'configuring-enhanced-monitoring', 'modifying', 'backing-up', 'maintenance', 'rebooting'):
+            raise ValueError('Production readiness database state invalid')
+        ssm = production_readiness_json(c, 'ssm', 'describe-instance-information',
+                                        ['--filters', json.dumps([{'Key': 'InstanceIds', 'Values': [instance]}])])
+        agents = ssm.get('InstanceInformationList')
+        if not isinstance(agents, list) or len(agents) > 1 or any(not isinstance(row, dict) or row.get('InstanceId') != instance for row in agents):
+            raise ValueError('Production readiness SSM inventory differs')
+        ping = agents[0].get('PingStatus') if agents else 'not-registered'
+        if ping not in ('Online', 'ConnectionLost', 'Inactive', 'not-registered'):
+            raise ValueError('Production readiness SSM state invalid')
+        ready = host_state == 'running' and db_state == 'available' and ping == 'Online'
+        validate(c, effect=False)
+        proof = {'account': account, 'instance': instance, 'database': database,
+                 'ec2': host_state, 'rds': db_state, 'ssm': ping,
+                 'ready': ready, 'observedAt': int(time.time() * 1000)}
+        journal('production-readiness', proof)
+        return proof if ready else None
+    return wait(c, read)
+
+
 def accepted(c):
     a = c['acceptance']
     if not isinstance(a, dict) or any(a.get(k) != c[k] for k in ('day', 'revision', 'tree')) or a.get('verdict') != 'ACCEPT':
@@ -239,6 +384,20 @@ def run(c):
     validate(c)
     if c['step'] not in ('preflight', 'qa', 'promote'):
         raise ValueError('Local executor has no AWS or readback operation')
+    original_revision = c['revision']
+    if c.get('batch') and c['step'] == 'preflight':
+        carrier(c)
+        readiness = c.get('readiness', {})
+        now = int(time.time() * 1000)
+        if (readiness.get('ready') is not True or readiness.get('missing') != []
+                or readiness.get('day') != c['day'] or not isinstance(readiness.get('at'), int)
+                or not 0 <= now - readiness['at'] < 300000):
+            raise ValueError('Complete fresh release readiness required')
+        return {'version': 1, 'key': c['key'], 'day': c['day'], 'step': c['step'],
+                'revision': c['revision'], 'tree': c['tree'], 'status': 'success',
+                'completedAt': now, 'readiness': True, 'inputs': readiness}
+    if c.get('batch') and c['step'] == 'qa':
+        c = merge_carrier(c)
     if branch('QA') != c['revision'] or tree(c['revision']) != c['tree']:
         raise ValueError('Frozen QA source changed')
     state = hold()
@@ -267,26 +426,38 @@ def run(c):
             return {'preflightRun': found[0]['id']}
         result = wait(c, read)
     elif c['step'] == 'qa':
-        validate(c)
+        # A batch admitted at20:00 may finish its freeze/build inside the fixed
+        # QA deadline. A late process cannot claim or merge a new batch.
+        validate({**c, 'revision': original_revision}, effect=not bool(c.get('batch')))
         if not state['held']:
             state = freeze(c)
         frozen_hold_id = state['id']
-        runs = api('actions/workflows/ci.yml/runs?event=push&head_sha=' + c['revision'] + '&branch=QA&per_page=100')['workflow_runs']
-        if not runs or any(r['status'] != 'completed' for r in runs):
-            raise RuntimeError('QA push missing or still active')
-        original = max(runs, key=lambda r: r['id'])
+        # First wait for the automatic light push run; never rerun an active run.
+        def completed_push():
+            runs = api('actions/workflows/ci.yml/runs?event=push&head_sha=' + c['revision'] + '&branch=QA&per_page=100')['workflow_runs']
+            if len(runs) >= 100:
+                raise RuntimeError('QA push inventory incomplete')
+            if not runs:
+                return None
+            latest = max(runs, key=lambda r: r['id'])
+            if latest['status'] != 'completed':
+                return None
+            if latest['conclusion'] != 'success':
+                raise RuntimeError('Initial QA push checks failed; never retry')
+            return latest
+        original = wait(c, completed_push)
         run_id = original['id']
         frozen = {k: c[k] for k in ('day', 'revision', 'tree', 'hold_id')}
         frozen['hold_id'] = frozen_hold_id
         guard(c, frozen_hold_id, True)
         previous = variable('ALIDO_FACTORY_RELEASE', json.dumps(frozen, separators=(',', ':')))
-        validate(c)
+        validate(c, effect=False)
         guard(c, frozen_hold_id, True)
         pin = variable('ALIDO_QA_BATCH_SHA', c['revision'])
-        validate(c)
+        validate(c, effect=False)
         guard(c, frozen_hold_id, True)
         publish_authority({**c, 'hold_id': frozen_hold_id}, 'qa', {'qaRun': run_id, 'qaAttempt': original['run_attempt'] + 1})
-        validate(c)
+        validate(c, effect=False)
         guard(c, frozen_hold_id, True)
         api('actions/runs/' + str(run_id) + '/rerun', 'POST')
         def started():
@@ -306,7 +477,7 @@ def run(c):
                 confirmations.append(json.loads(line[pos:]))
         if len(confirmations) != 1 or confirmations[0].get('source') != c['revision']:
             raise RuntimeError('Unique native hosted QA source confirmation missing')
-        result = {'qaReadback': confirmations[0], 'artifact': candidates[0], 'qaRun': run['id'], 'qaAttempt': run['run_attempt'], 'holdId': frozen_hold_id, 'previousPin': pin, 'previousRelease': previous}
+        result = {'qaRevision': c['revision'], 'qaReadback': confirmations[0], 'artifact': candidates[0], 'qaRun': run['id'], 'qaAttempt': run['run_attempt'], 'holdId': frozen_hold_id, 'previousPin': pin, 'previousRelease': previous}
     elif c['step'] == 'promote':
         a = accepted(c)
         qa = workflow(c, 'ci.yml', c['revision'], ['Full test suite', 'Deploy QA'], a['qaRun'], a['qaAttempt'])
@@ -343,17 +514,19 @@ def run(c):
                 raise RuntimeError('Promotion check failed')
             return current
         wait(c, checks)
+        readiness = production_readiness(c)
         validate(c, effect=False)
         guard(c, c['hold_id'], True)
+        validate(c, effect=False)
         merged = api('pulls/' + str(pull['number']) + '/merge', 'PUT', {'sha': c['revision'], 'merge_method': 'squash'})
         main = merged['sha']
         if not merged['merged'] or tree(main) != c['tree']:
             raise RuntimeError('Protected promotion tree differs')
-        result = {'main': main, 'promotion': pull['number'], 'artifact': a['artifact']}
+        result = {'main': main, 'promotion': pull['number'], 'artifact': a['artifact'], 'productionReadiness': readiness}
     else:
         raise ValueError('Remote readback only')
-    validate(c, effect=False)
-    return {'version': 1, 'key': c['key'], 'day': c['day'], 'step': c['step'], 'revision': c['revision'],
+    validate({**c, 'revision': original_revision}, effect=False)
+    return {'version': 1, 'key': c['key'], 'day': c['day'], 'step': c['step'], 'revision': original_revision,
             'tree': c['tree'], 'status': 'success', 'completedAt': int(time.time() * 1000), **result}
 
 
