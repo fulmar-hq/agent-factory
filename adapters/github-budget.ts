@@ -12,7 +12,7 @@ export function retryAtFor(error:unknown,now:number,resets?:{resources?:Record<s
  const exhausted=Object.entries(resets?.resources??{}).filter(([k,v])=>['core','graphql'].includes(k)&&v.remaining===0).map(([,v])=>v.reset*1000+1000);
  return Math.max(now+60000,...(rate?exhausted:[]),...(rate&&!exhausted.length?[now+15*60000]:[]));
 }
-export const githubSource=(argv=process.argv)=>/maintain-factory/.test(argv.join(' '))?'maintenance':/tick\.ts/.test(argv.join(' '))?'tick':/worker\.ts/.test(argv.join(' '))?'builder':/owner\.ts/.test(argv.join(' '))?'owner':/board/.test(argv.join(' '))?'board':'control';
+export const githubSource=(argv=process.argv)=>/factory-health-watch/.test(argv.join(' '))?'health':/maintain-factory/.test(argv.join(' '))?'maintenance':/tick\.ts/.test(argv.join(' '))?'tick':/worker\.ts/.test(argv.join(' '))?'builder':/owner\.ts/.test(argv.join(' '))?'owner':/board/.test(argv.join(' '))?'board':'control';
 export function githubBudget(action:'before'|'success'|'failure',args:string[],error?:unknown,retryAt?:number,now=Date.now(),directory=githubContext.getStore()??root) {
  const s=new Store(join(directory,'controller.sqlite'));
  try {
@@ -38,4 +38,8 @@ export function githubHttpCounts(debug:string,body:string) {
 export function recordGithubHttp(debug:string,body:string,now=Date.now(),directory=githubContext.getStore()??root) {
  const counts=githubHttpCounts(debug,body),s=new Store(join(directory,'controller.sqlite'));
  try{s.atomic(()=>{const key=`github-calls:${Math.floor(now/3600000)}:${githubSource()}`,v=s.get<Record<string,number>>(key)??{};s.set(key,{...v,requests:(v.requests??0)+counts.requests,graphqlPoints:(v.graphqlPoints??0)+counts.graphqlPoints});});}finally{s.close();}
+}
+
+export function githubDiagnostic(stderr:string) {
+ return stderr.split('\n').filter(line=>/^(?:gh: |GraphQL: |error: |error connecting to |check your internet connection|fatal: |Post |Get |HTTP )/.test(line)).slice(-3).join('\n').slice(-500) || 'GitHub command failed; raw debug omitted';
 }

@@ -54,3 +54,12 @@ test('offset shifts cannot manufacture closure or publish a partial ready queue'
   expect(JSON.parse((s.rows('tickets') as any[])[0].snapshot).state).toBe('OPEN');expect(s.rows('tickets')).toHaveLength(1);
  }finally{s.close();}
 });
+
+test('repository underscores remain literal when finding missing open snapshots',async()=>{
+ const s=new Store(':memory:'),c=config();c.projects.demo.repo='example/foo_bar';
+ s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run('example/fooXbar#1',JSON.stringify(issue(1)),now-1);
+ let calls=0;try{
+  await reconcile(s,c,now,async()=>{calls++;return '[[]]';},'open');
+  expect(calls).toBe(1);expect(s.get<any>('github:example/foo_bar').error).toBeNull();
+ }finally{s.close();}
+});

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import {recordGithubHttp} from '../adapters/github-budget';
+import {recordGithubHttp,githubDiagnostic} from '../adapters/github-budget';
 import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
@@ -39,7 +39,7 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge):Mainte
   recordGithubHttp(stderr,raw);
   const framed=raw.match(/^HTTP\/[^\s]+\s+(\d{3})[^\r\n]*\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/);const status=framed?Number(framed[1]):undefined;
   if(!timedOut&&status!==undefined&&[405,409,422].includes(status)){let body:unknown;try{body=JSON.parse(framed![2]);}catch{}if(body&&typeof body==='object'&&typeof (body as {message?:unknown}).message==='string')throw new FactoryMergeRejected(status,(body as {message:string}).message.slice(0,500));}
-  if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':stderr.slice(0,300)})`);
+  if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':githubDiagnostic(stderr)})`);
   const merged=JSON.parse(framed[2]);if(merged.merged!==true)throw Error('protected squash was not accepted');const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
  install:async target=>{
   if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');

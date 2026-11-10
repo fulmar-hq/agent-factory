@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
 import {TestEngine as Engine,config,ticket,admission} from './fixtures';
-import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext} from '../adapters/github-budget';
+import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext,githubDiagnostic} from '../adapters/github-budget';
 import {githubHealth} from '../launcher/github-health';
 import {recordWorkerFailure} from '../launcher/worker';
 import {recoverWorkers} from '../launcher/wake';
@@ -75,4 +75,10 @@ test('the actual gh connectivity diagnostic is classified before debug sanitizin
   expect(readFileSync(calls,'utf8').trim().split('\n')).toHaveLength(1);
   const s=new Store(join(dir,'controller.sqlite'));try{expect(s.get<any>('github-backoff').retryAt).toBeGreaterThan(Date.now());}finally{s.close();}
  }finally{process.env.PATH=old;rmSync(dir,{recursive:true});}
+});
+
+test('merge diagnostics retain the actual failure without raw headers or body',()=>{
+ const raw='* Request at fictional time\n> Authorization: token fictional-secret\n> PUT /repos/example/demo/pulls/1 HTTP/1.1\n{"fictionalBody":"private"}\ngh: HTTP 503 service unavailable';
+ expect(githubDiagnostic(raw)).toBe('gh: HTTP 503 service unavailable');
+ expect(githubDiagnostic('error connecting to api.github.com\ncheck your internet connection')).toContain('error connecting');
 });
