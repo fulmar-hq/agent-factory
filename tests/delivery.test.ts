@@ -146,6 +146,15 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  expect(readFileSync(join(dir,'archive',preserved,'result.log'),'utf8')).toBe('retained evidence');
  expect(readFileSync(join(work,'fixture'),'utf8')).toBe('preserved edit');
  expect(existsSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'))).toBe(false);
+ // Upgrade a dormant parent that already committed before a browser handoff:
+ // the incremental bundle must retain those commits after its original base.
+ await command(['git','-C',work,'add','fixture']);
+ await command(['git','-C',work,'-c','commit.gpgsign=false','commit','-m','retained parent commit']);
+ await command(['git','-C',work,'update-ref','-d','refs/factory/base']);
+ await prepareDelivery(work,source,join(dir,'archive'),id,head);
+ expect((await command(['git','-C',work,'rev-parse','refs/factory/base'])).trim()).toBe(head);
+ await command(['git','-C',work,'bundle','create',join(dir,'incremental.bundle'),'HEAD','^refs/factory/base']);
+
 
 });
 

@@ -81,13 +81,13 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
     );
     const attempt = continuation?.attempt ?? "initial";
     const archive = join(root,"runs","delivery",id,attempt);
+    const baselineKey=`publish-base:${id}`;
     if (delivery) {
       const qualified=s.get<{expiresAt:number;version:number}>("delivery-qualified");
       if(!qualified || qualified.version!==2 || qualified.expiresAt<=Date.now())throw Error("publisher blocked: isolation unproven");
-      await prepareDelivery(workspace,source,archive,id);
+      await prepareDelivery(workspace,source,archive,id,s.get<string>(baselineKey)??undefined);
     }
     mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
-    const baselineKey=`publish-base:${id}`;
     if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());
     await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery || continuation ? {native:continuation?.native} : undefined);
     if(e.sessions().find(x=>x.id===id)?.status==="finished")collectBrowserRequest(e,id,workspace);

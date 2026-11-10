@@ -185,7 +185,7 @@ export function prepareTestScratch(checkout:string) {
 }
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
-export async function prepareDelivery(workspace:string, source:string, archive:string, id:string) {
+export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string) {
   mkdirSync(archive,{recursive:true,mode:0o700});
   workspace=realpathSync(workspace);
   const git = (...args:string[]) => command(["git","-C",workspace,...args]);
@@ -204,7 +204,9 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     renameSync(join(clone,".git"),join(workspace,".git"));
   }
   // A trusted immutable expected base also bounds the worker delivery bundle.
-  if(!(await git("show-ref","--verify","--hash","refs/factory/base").catch(()=>"" )).trim())await git("update-ref","refs/factory/base",(await git("rev-parse","HEAD")).trim());
+  const bundleBase=expectedBase ?? ((await git("show-ref","--verify","--hash","refs/factory/base").catch(()=>"" )).trim() || (await git("rev-parse","HEAD")).trim());
+  if(!/^[a-f0-9]{40}$/.test(bundleBase))throw Error("immutable bundle base required");
+  await git("update-ref","refs/factory/base",bundleBase);
   const eviction=join(workspace,".factory-tmp/dependencies-evicted.jsonl");
   if(existsSync(eviction)) {
     if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
