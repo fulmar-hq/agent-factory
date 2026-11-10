@@ -130,3 +130,33 @@ controller receipt. Missing bridge access throws without recording delivery;
 the next observer retries. Queued is not delivered: the normal bridge owns
 Telegram delivery. Keep the private observations, result and outbox receipts;
 undo with a signed revert after reconciling custody, without deleting history.
+
+## Independent acceptance ticket
+
+The explicit private `release-acceptance-ticket.json` can select the qualified
+Codex provider/model/effort for one day's Quality acceptance under the existing
+`model_override: per_ticket_wins_then_per_role` policy. It never changes permanent
+owners. The strict ticket names repository1192, Quality, day, expiry, source
+authority and excluded writer/helper native IDs. Readiness and the actual owner
+run resolve the same ticket. Native qualification must cover the deadline;
+subscription route, usage, pause and unchanged ticket are rechecked just before
+the new independent session starts. The accepting native may not reuse Release
+or helper custody. Normal native identity/model/effort and descendant-cleanup
+verification precede receipt ingestion.
+
+The trusted launcher fetches a bounded synthetic HTTP packet through the existing
+QA SSM route before starting Quality. It verifies exact deployed source/digest,
+web health, worker running, stopped rollback, dedicated synthetic fixture
+membership, authenticated workspace/preferences and screen responses, unsigned
+and cross-tenant denial, then expires the retained short session and closes the
+database. Tokens and response bodies remain on the host. Public HTTPS redirects
+prove reachability only. This path does not claim browser, keyboard or feature
+interaction coverage. Quality must state missing required checks honestly. A
+failed or absent affirmative hosted packet cannot become ACCEPT, even if the
+model writes it. No dry-run invokes the collector or starts an AWS resource.
+
+`release-quality-path.json` records actual hosted HTTP and native receipt-ingestion
+proof (`hostedHttp:true`, `receiptIngestion:true`) for the installed factory
+revision and effective profile through the full release margin. CLI qualification
+alone cannot create that proof. Rehearsal records remain isolated from the live
+night's acceptance and immutable claims.

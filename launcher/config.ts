@@ -17,6 +17,7 @@ export const ConfigSchema = z.object({
     missed_window: z.literal("next_day"),
   }),
   owners: z.record(z.string(), role),
+  model_override: z.literal("per_ticket_wins_then_per_role").optional(),
   usage_gates: z.object({
     admit_below: z.literal(0.7),
     high_benefit_only_below: z.literal(0.9),
