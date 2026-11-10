@@ -76,7 +76,9 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
   if(project.repo==='fulmar-hq/agent-factory'||!repositories[project.repo])continue;
   if(project.repo==='fulmar-hq/alido'&&!protectedBatch){s.event(`code-review-frozen-refused:${createHash('sha256').update(batchError).digest('hex')}`,'code-review-frozen-refused',{repo:project.repo,reason:batchError},'Restore the authentic frozen release packet before any Alido PR sweep; never infer an empty exclusion list');continue;}
   const snapshot=s.get<PullSnapshot>(`board-pulls:${project.repo}`);
-  const pulls=snapshot&&!snapshot.error&&snapshot.at<=now&&now-snapshot.at<120000&&snapshot.pulls.every(p=>typeof p.baseRefName==='string')?snapshot.pulls:await port.pulls(project.repo);
+  let pulls:BoardPull[];
+  try {pulls=snapshot&&!snapshot.error&&snapshot.at<=now&&now-snapshot.at<120000&&snapshot.pulls.every(p=>typeof p.baseRefName==='string')?snapshot.pulls:await port.pulls(project.repo);}
+  catch(error){const reason=String(error);s.event(`code-review-source-refused:${createHash('sha256').update(project.repo+reason).digest('hex')}`,'code-review-source-refused',{repo:project.repo,reason},'Retain source failure; independent repositories may still use the unused review claim');if(/rate limit|GitHubUnavailable|GitHub backoff|timed out|timeout|network|connection|HTTP 50[234]/i.test(reason))return;continue;}
   for(const p of [...pulls].sort((a,b)=>a.number-b.number)) {
    if(claimed)return;
    if(project.repo==='fulmar-hq/alido'&&protectedPRs.has(p.number))continue;

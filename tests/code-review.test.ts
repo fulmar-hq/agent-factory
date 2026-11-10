@@ -190,3 +190,11 @@ test('unavailable frozen Alido evidence does not block another enrolled product 
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake','example/demo':'/fake'},port,now);expect(actual).toBe(1);
  }finally{e.s.close();}
 });
+
+test('email verification is a product feature while review execution remains excluded',async()=>{
+ const e=setup();try{const raw={...ticket(),category:'product',kind:'feature',title:'Confirm email during onboarding',outcome:'Show confirmation after the email token is validated',paths:['src/features/onboarding/email-confirmation.tsx'],intakeEvidence:{kind:'issue',number:42}};await enforceIntakeMode(e,'fulmar-hq/alido',raw,'/unused',async()=>JSON.stringify({number:42,state:'OPEN',title:'Verify email address',labels:[{name:'kind:feature'}]}));for(const title of ['Run hosted acceptance','Review the booking change','Verify source changes'])await expect(enforceIntakeMode(e,'fulmar-hq/alido',{...raw,title},'/unused',async()=>JSON.stringify({number:42,state:'OPEN',title:'Verify email address',labels:[{name:'kind:feature'}]}))).rejects.toThrow();}finally{e.s.close();}
+});
+
+test('a deterministic first-project inventory failure does not starve another repository',async()=>{
+ const e=setup(),dir=reviewDir('repo-review-isolation-');e.c.projects.demo={repo:'example/demo',owners:['builder'],tests:'bun test'};let reviews=0;try{const port:CodeReviewPort={pulls:async repo=>{if(repo==='fulmar-hq/alido')throw Error('GitHub PR evidence truncated');return [{...p(7),url:'https://github.com/example/demo/pull/7',baseRefName:'main'}];},files:async()=>[{filename:'src/widget.ts'}],review:async(pr,source,target,claim)=>{reviews++;claim();return undefined;}};await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake','example/demo':'/fake'},port,now);expect(reviews).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='code-review-source-refused'").all()).toHaveLength(1);}finally{e.s.close();}
+});

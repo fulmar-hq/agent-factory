@@ -19,13 +19,14 @@ export async function publishRetainedReview(s:Store,repo:string,baseRef:string,e
  const content=`Independent review ${verdict} at ${result.head}${result.depth?` (${result.depth})`:''}: ${verdict==='PASS'?'no actionable defect found.':findings.length?'actionable findings follow.':'review evidence needs reconciliation.'}\n${details.join('\n\n')}\nDefects return to the same ticket and PR. Hosted acceptance and release gates remain required.`;
  const publication=createHash('sha256').update(JSON.stringify({repo,pr:result.pr,head:result.head,eventId,content})).digest('hex');
  const key=`review-publication:${repo}:${result.pr}:${result.head}:${eventId}:${publication}`;
- if(s.get<{state:string}>(key)?.state==='published')return true;
+ if(result.baseRef!==baseRef||!/^[a-f0-9]{40}$/.test(result.baseHead??'')){s.event(`review-base-reconciliation:${publication}`,'review-base-reconciliation',{repo,pr:result.pr,head:result.head,eventId,reviewedBase:result.baseRef,reviewedBaseHead:result.baseHead,currentBase:baseRef},'Preserve original result; missing or changed reviewed base requires explicit evidence reconciliation');return false;}
  const marker=`<!-- factory-review:${publication} -->`,body=marker+'\n'+content;
  const record=(state:string,extra:Record<string,unknown>={})=>{s.set(key,{state,repo,pr:result.pr,head:result.head,eventId,marker,at:Date.now(),...extra});s.event(`review-publication:${crypto.randomUUID()}`,'review-publication',{state,repo,pr:result.pr,head:result.head,eventId,...extra},'Retain native result and publication intent; reconcile exact marker before retrying an unknown response');};
  try {
   if(result.review.head!==result.head)throw Error('retained review result head mismatch');
   const current=JSON.parse(await execute(['gh','api',`repos/${repo}/pulls/${result.pr}`]));
-  if(current.head?.sha!==result.head||current.base?.ref!==baseRef||current.base?.repo?.full_name!==repo||current.head?.repo?.full_name!==repo||current.state!=='open'){record('superseded',{reason:'current PR head/base/state is different; original result retained'});return false;}
+  if(current.head?.sha!==result.head||current.base?.ref!==baseRef||current.base?.sha!==result.baseHead||current.base?.repo?.full_name!==repo||current.head?.repo?.full_name!==repo||current.state!=='open'){record('superseded',{reason:'current PR head/base/state is different; original result retained'});return false;}
+  if(s.get<{state:string}>(key)?.state==='published')return true;
   const login=JSON.parse(await execute(['gh','api','user'])).login;if(typeof login!=='string'||!login)throw Error('authenticated review author unavailable');
   const readback=async()=>{
    let found:number|undefined;const deadline=Date.now()+120000;

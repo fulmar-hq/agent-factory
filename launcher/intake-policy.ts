@@ -28,7 +28,9 @@ export function intakeInstructions(c:Config,dir:string) {
 // Review workflow words are classified in their task context. Product copy
 // about accepting consent or a customer's own review remains ordinary source.
 function reviewWork(text:string) {
- return (/^(?:independently\s+)?(?:review|challenge|accept|audit|verify)\b/i.test(text.trim())&&!/\b(?:button|control|label|checkbox|toggle)\b/i.test(text)) ||
+ return /^independently\s+(?:review|challenge|accept|audit|verify)\b|^challenge\b/i.test(text.trim()) ||
+  /^(?:review|accept|audit|verify)\s+(?:the\s+)?(?:[\w-]+\s+){0,2}(?:change|changes|fix|fixes|implementation|pull request|PR\s*#?\d)\b/i.test(text.trim()) ||
+  /^(?:independently\s+)?(?:review|challenge|accept|audit|verify)\s+(?:the\s+)?(?:source|code|change|changes|feature|pull request|PR\s*#?\d)\b/i.test(text.trim()) ||
   /\b(?:hosted|source|independent|qa|production)\s+(?:(?:booking|calendar|product|change|feature)\s+)?(?:review|challenge|acceptance)\b/i.test(text) ||
   /\b(?:review|challenge|acceptance)\s+(?:result|verdict|report|execution|evidence|check|pass|task)\b/i.test(text) ||
   /\b(?:run|perform|conduct|complete|execute|record|write)\s+(?:(?:the|an?|independent|hosted|source|final|qa)\s+)*(?:review|challenge|acceptance|audit|verification)\b/i.test(text) ||
