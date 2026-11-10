@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { deliveryRequest } from "../adapters/delivery";
 import { turnTokens } from "../launcher/budgets";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
 
 test("publisher refuses retained macOS abort fixtures without changing the snapshot",async()=>{
@@ -216,4 +216,25 @@ test("worker refuses hardlinked dependency objects and shared standalone Git alt
  const alternate=join(work,".git/objects/info/alternates");writeFileSync(alternate,join(source,".git/objects"));
  await expect(prepareDelivery(work,source,join(dir,"archive"),id)).rejects.toThrow("standalone worker Git");
  expect(readFileSync(alternate,"utf8")).toBe(join(source,".git/objects"));
+});
+
+test('standalone copy-on-write clone has no live alternates and mutations never change source objects',async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,existsSync,lstatSync,chmodSync,realpathSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {cloneStandalone}=await import('../adapters/delivery'),{command}=await import('../adapters/github');
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),'factory-object-copy-'))),source=join(dir,'source'),target=join(dir,'copy');mkdirSync(source);
+ const git=(...args:string[])=>command(['git','-C',source,...args]);
+ await git('init');writeFileSync(join(source,'fixture'),'retained');await git('add','fixture');
+ await git('-c','user.name=Fictional','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-m','fixture');
+ const sha=(await git('rev-parse','HEAD')).trim();
+ await cloneStandalone(source,target);
+ expect(existsSync(join(target,'.git/objects/info/alternates'))).toBe(false);
+ expect((await command(['git','-C',target,'rev-parse','HEAD'])).trim()).toBe(sha);
+ const object=join(sha.slice(0,2),sha.slice(2)),original=join(source,'.git/objects',object),copied=join(target,'.git/objects',object);
+ const before=readFileSync(original);expect(lstatSync(copied).nlink).toBe(1);expect(lstatSync(copied).ino).not.toBe(lstatSync(original).ino);
+ chmodSync(copied,0o600);writeFileSync(copied,'changed only in disposable test clone');expect(readFileSync(original)).toEqual(before);
+ expect((await git('cat-file','-t',sha)).trim()).toBe('commit');
+ // A source that itself depends on external objects is never copied as standalone.
+ writeFileSync(join(source,'.git/objects/info/alternates'),'/fictional/other/objects');
+ if(process.platform==='darwin')await expect(cloneStandalone(source,join(dir,'refused'))).rejects.toThrow('standalone source');
 });

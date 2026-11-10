@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { config, ticket, admission, now } from "./fixtures";
 import { BrowserNeeded, BrowserResult, queueBrowser, browserJobs, browserDir, reconcileBrowsers, readBrowserJSON, resumeBrowser, type BrowserPorts, type BrowserJob } from "../launcher/browser";
@@ -29,6 +29,25 @@ function setup() {
   };
   return {dir,s,e,parent,j,calls,ports,current,result,close:()=>{s.close();rmSync(dir,{recursive:true});}};
 }
+
+test('low disk retains queued browser and returned parent until fresh capacity recovers',async()=>{
+ const f=setup();
+ try {
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:29,usedFraction:0.9});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now);
+  expect(f.current().state).toBe('queued');expect(f.calls).toEqual([]);
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:30,usedFraction:0.8});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+1);expect(f.current().state).toBe('running');
+  f.result(f.current());f.ports.observe=async()=>'done';
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:29,usedFraction:0.9});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+2);
+  expect(f.e.sessions()[0].status).toBe('waiting-browser');
+  expect(f.current().result?.status).toBe('done');expect(f.calls.some(c=>c.startsWith('resume:'))).toBe(false);
+  f.e.diskProbe=()=>({at:now,path:'fictional',freeGiB:30,usedFraction:0.8});
+  await reconcileBrowsers(f.e,f.dir,f.ports,now+3);
+  expect(f.e.sessions()[0].status).toBe('starting');expect(f.calls.filter(c=>c.startsWith('resume:'))).toHaveLength(1);
+ }finally{f.close();}
+});
 test("structured request is strict; handoff keeps parent claims, RW deadline and default",()=>{
   const f=setup();try {
     expect(f.e.sessions()[0].status).toBe("waiting-browser");

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
 import { Store } from "../tracking/store";
 for (const mode of ["slot", "dollar", "duplicate", "retry", "usage"])

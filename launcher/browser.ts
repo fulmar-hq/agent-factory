@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, openSync, closeSync, fstatSync, readFileSync, writeFileSync, mkdirSync, renameSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "./engine";
+import {requireDiskCapacity} from './disk';
 import type { Store } from "../tracking/store";
 import type { Ticket } from "./config";
 
@@ -209,6 +210,7 @@ export async function reconcileBrowsers(e:Engine, dir:string, p:BrowserPorts, no
   if(e.s.get("paused")!==false || browserJobs(e.s).some(j=>j.nativePending || j.fallbackPending || ["starting","running","fallback"].includes(j.state)))return;
   const j=browserJobs(e.s).find(j=>j.state==="queued");
   if(!j)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Retain queued custody.
   j.state="starting";j.launchAt=now;j.runDeadline=Math.min(j.deadline,now+10*60*1000);saveBrowser(e.s,j);
   const path=join(browserDir(dir,j),"result.json");mkdirSync(browserDir(dir,j),{recursive:true,mode:0o700});
   const brief=browserBrief(j,path,e.s.get<string>(`browser-answer:${j.id}`) ?? undefined);
@@ -238,6 +240,7 @@ export function resumeBrowser(e:Engine,j:BrowserJob,dir:string,spawn:(id:string)
   if(e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true || e.budget(x).nextTurnBlocked)return;
   const slots=e.slots();
   if(!slots.dormant.has(x.id) || !slots.free)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Keep waiting parent/result.
   if(e.s.db.query("UPDATE sessions SET status='starting',pid=NULL WHERE id=? AND status='waiting-browser'").run(x.id).changes!==1)return;
   const attempt=randomUUID();
   e.s.set(`continuation:${x.id}`,{attempt,native:x.native_id,receipt:`browser child ${j.id} returned ${j.result!.status}`});

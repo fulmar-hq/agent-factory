@@ -35,7 +35,7 @@ test("GitHub timings are elapsed only, imported issues excluded, refresh preserv
   } finally {s.close();}
 });
 
-import {Engine} from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import {ticket, admission, config} from "./fixtures";
 test("reservation freezes pre-start forecast; completion stores native actuals, never resetting original bounds", () => {
   const s = new Store(":memory:"), e = new Engine(s,config()), t = ticket();

@@ -4,9 +4,10 @@ import {mkdtempSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {config,ticket,admission,qualification} from './fixtures';
-import {queueWake,pendingWakes,dispatchWake,localWakes,githubWakes,recoverWorkers} from '../launcher/wake';
+import {queueWake,pendingWakes,localWakes,githubWakes,recoverWorkers} from '../launcher/wake';
+import {testDispatchWake as dispatchWake} from './fixtures';
 import {ownerSpec,runOwner} from '../launcher/owner';
 import {claimSupervisor,superviseSession} from '../launcher/worker';
 

@@ -1,4 +1,6 @@
 import { builderSlots, type SlotProcessEvidence } from "./capacity";
+import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
+import {dirname} from 'node:path';
 import { processIdentity } from "./process";
 import { estimate, history } from "../estimator/predict";
 import { randomUUID, createHash } from "node:crypto";
@@ -87,6 +89,7 @@ export class Engine {
     public s: Store,
     public c: Config,
     public slotEvidence?: SlotProcessEvidence,
+    public diskProbe:()=>DiskReading=()=>diskReading(s.db.filename===":memory:" ? undefined : dirname(s.db.filename)),
   ) {}
   sessions(): Session[] {
     return this.s.rows("sessions") as Session[];
@@ -180,6 +183,7 @@ export class Engine {
     const t = { ...original, estimateSeconds:defaults ? Math.max(proposedSeconds,meanSeconds ?? defaults.estimate_minutes*60) : original.estimateSeconds, estimateTokens: Math.max(proposedTokens, floor) };
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) blocked("factory paused");
+      requireDiskCapacity(this.diskProbe);
       const prior = this.retryPrior(t);
       const autoRetry=this.s.get<{session:string}>(`automatic-retry:${ticketId(t)}`);
       const failure=autoRetry && this.s.get<{repo:string;provider:string;cause:string}>(`failure-class:${autoRetry.session}`);
@@ -287,6 +291,7 @@ export class Engine {
   claimStart(id: string, now = Date.now()) {
     return this.s.atomic(() => {
       if (this.s.get("paused") !== false) return false;
+      requireDiskCapacity(this.diskProbe);
       const changed =
         this.s.db
           .query(
@@ -399,6 +404,7 @@ export class Engine {
       const x = this.sessions().find(x => x.id === id);
       if (!x || x.status !== "paused" || !x.native_id || x.provider !== "codex") blocked("stopped paused Codex custody required");
       if (!receipt?.trim() || this.s.get("paused") !== false) blocked("receipt and unpaused factory required");
+      requireDiskCapacity(this.diskProbe);
       const cleanup = this.s.db.query("SELECT data FROM events WHERE id=?").get(`cleanup:${id}`) as {data:string}|null;
       if (!cleanup || (this.s.get<{verified:boolean}>(`cleanup-evidence:${id}`) ?? JSON.parse(cleanup.data)).verified !== true) blocked("verified cleanup required");
       const t = JSON.parse(x.brief) as Ticket;

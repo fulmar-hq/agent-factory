@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../tracking/store';
-import { Engine } from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import { builderSlots, reconcileCapacity, slotLimit, type SlotProcessEvidence } from '../launcher/capacity';
 import { ConfigSchema } from '../launcher/config';
 import { boardModel } from '../board/model';
@@ -214,7 +214,7 @@ for(const modes of [['paused','new'],['browser','new'],['paused','browser']] as 
  const children=modes.map(mode=>{
   const script=`
    import {existsSync,writeFileSync} from 'node:fs';
-   import {Engine} from ${module('../launcher/engine.ts')};
+   import {TestEngine as Engine} from ${module('./fixtures.ts')};
    import {Store} from ${module('../tracking/store.ts')};
    import {config,ticket,admission} from ${module('./fixtures.ts')};
    import {browserJobs,resumeBrowser} from ${module('../launcher/browser.ts')};

@@ -179,6 +179,22 @@ Undo with a signed revert after stopping/reconciling all browser and parent cust
 
 ## Mac mini disk capacity — Platform
 
+Nov 10 disk admission: every helper reservation/start and retained continuation
+reads the installation filesystem synchronously. Below 30 GiB (32.2 decimal GB),
+or if capacity is unknown, no additional claim starts. Owner wakes stay queued.
+Existing running/paused/browser custody is preserved. The tick records critical,
+unknown and recovery episodes before GitHub reconciliation and queues one alarm
+per critical/unknown episode through the existing Telegram bridge; failed sends
+retry that same ID. Restoring capacity rearms admission without clearing any
+other gate or a manual pause. No launchd or customer setting changes are needed.
+
+Both worker setup and trusted publisher setup use independent APFS copy-on-write
+Git objects on macOS, with no active alternates or shared writable files before
+handoff. The temporary reference setup remains small retained metadata; other
+platforms retain independent ordinary clones. Dependencies use the existing
+clone-aware copy path. Copy/validation failure retains setup artifacts and never
+hands a partially shared clone to model tools.
+
 Platform owns local disk headroom and cleanup; Coordinator owns launcher enablement. On November 9, 2026 at 23:30 America/Toronto, Vincent authorized thoughtful proactive removal of regenerable junk through verified Telegram, relayed by Coordinator. Incident evidence is [Alido #2480](https://github.com/fulmar-hq/alido/issues/2480); recurring implementation and acceptance are tracked in [factory #138](https://github.com/fulmar-hq/agent-factory/issues/138).
 
 Keep at least 60 GiB available on the Data volume. At 80% used, warn owners with measured free space and a bounded cleanup action, before the launcher can fail on disk exhaustion. Do not change a wallet, qualification, concurrency or unrelated pause to work around disk pressure. Print `df -h /System/Volumes/Data` before and after cleanup. Use the owner-authorized `bun scripts/control.ts resume` only after capacity is restored; pass the existing owner token through the environment without printing it. Confirm a fresh `status: "ok"`, `paused: false`, `claimed > 0` record in the installed `tick.log`; a successful resume command alone is not resumed claims. Report other admission refusals separately.

@@ -7,7 +7,9 @@ export function observeClaimProgress(e:Engine,h:{at:number;claimed:number;paused
  return e.s.atomic(()=>{
   const free=!h.paused && e.slots().free>0;
   const prior=e.s.get<ClaimProgress>('claim-progress');
-  const p={since:free && h.claimed===0 && prior?.free ? prior.since : h.at,at:h.at,free,claimed:h.claimed};
+  const last=e.s.db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') AND at<=?").get(h.at) as {at:number|null};
+  const since=free&&h.claimed===0&&prior?.free ? (last.at!==null&&last.at>prior.at?last.at:prior.since) : h.at;
+  const p={since,at:h.at,free,claimed:h.claimed};
   e.s.set('claim-progress',p);
   checkClaimStall(e,h.at);
   return p;
