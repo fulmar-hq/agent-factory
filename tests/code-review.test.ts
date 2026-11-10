@@ -81,7 +81,7 @@ test('historical verdicts require the retained native result for that exact targ
   writeFileSync(join(dir,'historical-review-receipts.json'),JSON.stringify({complete:true,reviews:[record]}));
   const key='code-review:fulmar-hq/alido:99:'+'b'.repeat(40);
   importHistoricalReviews(e.s,e.c,dir);expect(e.s.get(key)).toBeNull();
-  const result={repo:'fulmar-hq/alido',pr:7,head:'a'.repeat(40),ok:true,native:{id:native,verified:true},cleanup:{verified:true},review:{head:'a'.repeat(40),verdict:'PASS',findings:[],installedGaps:[]}};
+  const result={repo:'fulmar-hq/alido',pr:7,head:'a'.repeat(40),baseRef:'QA',baseHead:'b'.repeat(40),ok:true,native:{id:native,verified:true},cleanup:{verified:true},review:{head:'a'.repeat(40),verdict:'PASS',findings:[],installedGaps:[]}};
   e.s.event('actual-result','code-review-verdict',result,'fixture');importHistoricalReviews(e.s,e.c,dir);expect(e.s.get(key)).toBeNull();
   e.s.event('wrong-verdict','code-review-verdict',{...result,pr:99,head:record.head,review:{...result.review,head:record.head,verdict:'CHANGES_REQUESTED'}},'fixture');importHistoricalReviews(e.s,e.c,dir);expect(e.s.get(key)).toBeNull();
   e.s.event('bound-result','code-review-verdict',{...result,pr:99,head:record.head,review:{...result.review,head:record.head}},'fixture');importHistoricalReviews(e.s,e.c,dir);expect(e.s.get(key)).toMatchObject({state:'done',retainedResult:'bound-result'});
@@ -197,4 +197,29 @@ test('email verification is a product feature while review execution remains exc
 
 test('a deterministic first-project inventory failure does not starve another repository',async()=>{
  const e=setup(),dir=reviewDir('repo-review-isolation-');e.c.projects.demo={repo:'example/demo',owners:['builder'],tests:'bun test'};let reviews=0;try{const port:CodeReviewPort={pulls:async repo=>{if(repo==='fulmar-hq/alido')throw Error('GitHub PR evidence truncated');return [{...p(7),url:'https://github.com/example/demo/pull/7',baseRefName:'main'}];},files:async()=>[{filename:'src/widget.ts'}],review:async(pr,source,target,claim)=>{reviews++;claim();return undefined;}};await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake','example/demo':'/fake'},port,now);expect(reviews).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='code-review-source-refused'").all()).toHaveLength(1);}finally{e.s.close();}
+});
+
+for(const variant of ['missing-base','retargeted-base'] as const)test(`historical reviews reconcile base identity: ${variant}`,async()=>{
+ const {runFactoryChallenge}=await import('../adapters/factory-challenge');
+ const e=setup(),dir=reviewDir('historical-base-regression-'),repo='example/demo',head='a'.repeat(40),native='fictional-historical-native';
+ e.c.projects={demo:{repo,owners:['builder'],tests:'bun test'}};
+ try{
+  e.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief,native_id) VALUES(?,?,?,?,?,?,?)').run('review-worker',repo+'#8','builder','codex','finished',JSON.stringify({repo,kind:'review',title:'Review PR7'}),native);
+  e.s.event('historical-exit','worker-exit',{id:'review-worker',ok:true},'fixture');e.s.set('cleanup-evidence:review-worker',{verified:true});
+  const result={repo,pr:7,head,ok:true,native:{id:native,verified:true},cleanup:{verified:true},review:{head,verdict:'PASS',findings:[],installedGaps:[]},...(variant==='retargeted-base'?{baseRef:'QA',baseHead:'b'.repeat(40)}:{})};
+  e.s.event('historical-result','code-review-verdict',result,'fixture');
+  writeFileSync(join(dir,'historical-review-receipts.json'),JSON.stringify({complete:true,reviews:[{repo,pr:7,head,session:'review-worker',native,verdict:'PASS',verdictUrl:`https://github.com/${repo}/pull/7#pullrequestreview-1`,evidence:'Reviewed exact head '+head}]}));
+  const key=`code-review:${repo}:7:${head}`;
+  if(variant==='missing-base'){
+   importHistoricalReviews(e.s,e.c,dir);expect(e.s.get(key)).toBeNull();expect(e.s.get('historical-review-migration')).toMatchObject({complete:false,pending:1});
+  }else{
+   let reconciliations=0;
+   await reviewProductChanges(e.s,e.c,dir,{[repo]:'/unused'},{pulls:async()=>[{...p(7),url:`https://github.com/${repo}/pull/7`,baseRefName:'main'}],files:async()=>{throw Error('retained review must not start again');},review:async(pull,source,target,claim)=>{
+    reconciliations++;
+    expect(await runFactoryChallenge(e.s,pull,dir,source,claim,target,{execute:async()=>{throw Error('base mismatch must refuse before remote effects');}})).toBeUndefined();
+    return undefined;
+   }},now);
+   expect(reconciliations).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='review-base-reconciliation'").all()).toHaveLength(1);expect(e.s.get('factory-challenge-slot')).toBeNull();
+  }
+ }finally{e.s.close();}
 });

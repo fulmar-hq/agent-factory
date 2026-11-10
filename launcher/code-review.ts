@@ -37,7 +37,7 @@ export function importHistoricalReviews(s:Store,c:Config,dir:string) {
   // native-review executor's retained result can bind the reviewed identity
   // and actual verdict to this successful native session.
   const results=s.db.query("SELECT id,data FROM events WHERE kind='code-review-verdict' AND json_extract(data,'$.native.id')=?").all(r.native) as {id:string;data:string}[];
-  const bound=results.find(row=>{const result=JSON.parse(row.data);return result.repo===r.repo&&result.pr===r.pr&&result.head===r.head&&result.review?.head===r.head&&result.review?.verdict===r.verdict&&result.ok===true&&result.native?.verified===true&&result.cleanup?.verified===true&&(r.verdict!=='PASS'||Array.isArray(result.review.findings)&&result.review.findings.length===0&&Array.isArray(result.review.installedGaps)&&result.review.installedGaps.length===0);});
+  const bound=results.find(row=>{const result=JSON.parse(row.data);return result.repo===r.repo&&result.pr===r.pr&&result.head===r.head&&['main','QA'].includes(result.baseRef)&&/^[a-f0-9]{40}$/.test(result.baseHead??'')&&result.review?.head===r.head&&result.review?.verdict===r.verdict&&result.ok===true&&result.native?.verified===true&&result.cleanup?.verified===true&&(r.verdict!=='PASS'||Array.isArray(result.review.findings)&&result.review.findings.length===0&&Array.isArray(result.review.installedGaps)&&result.review.installedGaps.length===0);});
   if(!bound)throw Error('historical independently retained exact-head review result missing or mismatched');
   accepted.push({...r,retainedResult:bound.id});
   }catch(error){pending.push({repo:r.repo,pr:r.pr,head:r.head,session:r.session,reason:String(error)});}
@@ -87,7 +87,8 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
    const key=`code-review:${project.repo}:${p.number}:${p.headRefOid}`,prior=s.get<{historical?:boolean;retainedResult?:string}>(key);
    if(prior?.historical&&!prior.retainedResult){s.event(`historical-review-invalidated:${key}`,'historical-review-invalidated',{key,prior},'Retain prior import evidence; only actual bound native results can suppress a review');s.set(key,null);}
    const retained=s.get<{historical?:boolean;state?:string}>(key);
-   if(retained?.historical)continue;
+   // Historical results must reconcile the current PR base through the same
+   // retained-result adapter as every other exact-head review.
    if(retained&&retained.state!=='preparation-pending'){await port.review({number:p.number,head:p.headRefOid,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'UNKNOWN',verify:false},repositories[project.repo],{repo:project.repo,baseRef:p.baseRefName!,depth:'standard',authorNatives:[]},()=>{pass.claims++;claimed=true;});continue;}
    if(!reviewChecksGreen(p,project.repo))continue;
    const files=await port.files(project.repo,p.number);
