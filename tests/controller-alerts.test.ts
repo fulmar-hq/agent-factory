@@ -34,3 +34,14 @@ test('tick error alert survives controller write lock, bridge outage, restart an
  expect(()=>recordTickResult(f.dir,join(f.dir,'absent.sqlite'),{at:f.now+3,status:'error'})).toThrow('bridge unavailable');
  flushControllerAlerts(f.dir,f.mail,f.now+4);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(2);
 }finally{f.s.db.exec('ROLLBACK');f.s.close();f.db.close();}});
+
+test('bridge failure cannot conceal a new pause incident, including when resume precedes recovery',()=>{const f=fixture();try{
+ const absent=join(f.dir,'absent.sqlite');
+ expect(()=>recordTickResult(f.dir,absent,{at:f.now-1,status:'error'})).toThrow('bridge unavailable');
+ f.s.set('paused',true);f.s.set('heartbeat',{at:f.now,status:'ok',ready:31});f.s.event('outage-pause','pause',{},'retain',f.now-6*60000);
+ expect(()=>watchControllerAlerts(f.dir,absent,f.now)).toThrow('bridge unavailable');
+ const state=new Database(join(f.dir,'health/controller-alerts.sqlite'));expect(state.query('SELECT id FROM incidents').all()).toHaveLength(2);state.close();
+ f.s.set('paused',false);watchControllerAlerts(f.dir,f.mail,f.now+1);
+ expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(2);
+ expect(f.db.query("SELECT id FROM messages WHERE id LIKE 'factory-paused-ready:%'").all()).toHaveLength(1);
+}finally{f.s.close();f.db.close();}});

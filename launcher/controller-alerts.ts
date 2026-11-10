@@ -41,7 +41,11 @@ export function recordTickResult(dir:string,mail:string,result:{at:number;status
 }
 export function watchControllerAlerts(dir:string,mail:string,now=Date.now()){
  // Retry retained tick incidents before opening the controller, even if it fails.
- flushControllerAlerts(dir,mail,now);
+ try{flushControllerAlerts(dir,mail,now);}catch(error){
+  // Delivery and observation are independent: a bridge outage must not erase
+  // a new pause incident that disappears before the bridge recovers.
+  console.error('controller alert delivery retained for retry: '+String(error));
+ }
  const controller=new Database(join(dir,'controller.sqlite'),{readonly:true,strict:true});
  let pause:{id:string;at:number}|null=null;
  try{controller.exec('PRAGMA busy_timeout=1000; BEGIN');
