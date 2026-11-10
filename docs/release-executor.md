@@ -160,3 +160,20 @@ proof (`hostedHttp:true`, `receiptIngestion:true`) for the installed factory
 revision and effective profile through the full release margin. CLI qualification
 alone cannot create that proof. Rehearsal records remain isolated from the live
 night's acceptance and immutable claims.
+
+## Cold Production readiness
+
+The21:30 promotion admission remains fixed. After its PR checks pass, the trusted
+local executor waits within the existing22:00 deadline for exact Production
+metadata: the existing read-only `fulmar-production` profile must identify the
+Production account, its named EC2 instance must be running, its named RDS
+instance available, and that EC2 instance's SSM agent Online. Only then may the
+protected main merge trigger normal CI/deployment. Pending recovery keeps the
+same admitted effect; it never starts a late second promotion or extends the
+deadline. Read errors or mismatched identities refuse.
+
+These checks start no resources, issue no SSM command, renew no sign-in and
+supply no alternative deployment credentials. Native metadata observations are
+retained in the private effect journal and promotion receipt. They prove
+readiness only; the normal OIDC deployment, source/health/configuration/rollback
+verification and independent Production readback remain required.
