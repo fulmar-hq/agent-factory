@@ -219,7 +219,13 @@ cannot race deletion because the final checks and removal hold the SQLite writer
 transaction. Other run/review clones require repository/metadata directories at least one
 hour old, fresh idle process evidence, and no maintenance custody. Unknown probes, linked roots, tracked/index/HEAD content and nested Git
 refuse cleanup. Native history, bundles, Git objects, dirty source, scratch,
-logs, receipts and evidence remain. Receipts append exact intents/results and df
+logs, receipts and evidence remain. Only unchanged objects from the trusted
+pre-worker dependency inventory can be removed. Inventories are shared by
+installation fingerprint instead of copied into every session. New, modified or unclassified
+objects stay in place, including XML/JSON/HTML test reports. Legacy sessions
+without that private baseline and build caches (`.next`/`.turbo`) without trusted
+provenance remain untouched; a cache directory name is never deletion proof.
+Receipts append exact intents/results and df
 readings under `receipts/cache-retention`; failed paths remain visible.
 
 Waiting-browser eviction records a private scratch receipt. Trusted worker setup

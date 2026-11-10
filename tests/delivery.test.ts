@@ -126,7 +126,9 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  await git("worktree","add","-b",branchFor(id),work,"HEAD");
  writeFileSync(join(work,"fixture"),"preserved edit");writeFileSync(join(work,"untracked"),"preserved new file");
  const before=await command(["git","-C",work,"diff","--binary"]),head=(await git("rev-parse","HEAD")).trim();
- const pinnedFingerprint=await prepareDelivery(work,source,join(dir,"archive"),id);
+ let baseline:unknown;
+ const pinnedFingerprint=await prepareDelivery(work,source,join(dir,"archive"),id,undefined,undefined,manifest=>{baseline=manifest;});
+ expect(baseline).toMatchObject({version:1,fingerprint:pinnedFingerprint,entries:{fixture:{kind:"file",executable:false}}});
  expect(await command(["git","-C",work,"diff","--binary"])).toBe(before);
  expect(readFileSync(join(work,"untracked"),"utf8")).toBe("preserved new file");
  expect((await command(["git","-C",work,"rev-parse","HEAD"])).trim()).toBe(head);

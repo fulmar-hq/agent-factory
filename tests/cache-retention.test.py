@@ -13,7 +13,8 @@ class Safety(unittest.TestCase):
   self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer,provider text,brief text);create table kv(key text,value text);')
   self.db.execute("insert into sessions values(?,?,?,?,?)",('a','waiting-browser',None,'codex',json.dumps({'repo':'fulmar-hq/alido'})));self.db.execute('insert into kv values(?,?)',('cleanup-evidence:a',json.dumps({'verified':True})));self.db.commit()
   self.cache=self.repo/'node_modules';self.cache.mkdir();(self.cache/'generated.js').write_text('regenerable');(self.cache/'result.jsonl').write_text('evidence')
-  self.db.execute('insert into kv values(?,?)',('dependency-installation:a',json.dumps(m.dependency_identity(self.cache))));self.db.commit()
+  self.db.execute('insert into kv values(?,?)',('dependency-installation:a',json.dumps(m.dependency_identity(self.cache))))
+  self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+m.dependency_identity(self.cache),json.dumps(m.dependency_identity(self.cache,True))));self.db.commit()
  def git(self,*args):
   return subprocess.check_output(['git','-C',str(self.repo),*args],stderr=subprocess.STDOUT)
  def test_waiting_browser_preserves_evidence_source_and_git(self):
@@ -21,6 +22,28 @@ class Safety(unittest.TestCase):
   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
   self.assertFalse((self.cache/'generated.js').exists());self.assertEqual((self.cache/'result.jsonl').read_text(),'evidence')
   self.assertTrue((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists());self.assertEqual((self.repo/'dirty.txt').read_text(),'uncommitted');self.git('cat-file','-e','HEAD')
+ def test_reports_and_unknown_or_modified_material_survive(self):
+  reports={'junit.xml':'<testsuite failures="1"/>','results.json':'{"failed":true}', 'report.html':'failure', 'custom-receipt.js':'failed isolation probe'}
+  for name,value in reports.items():(self.cache/name).write_text(value)
+  nested=self.cache/'generated-package';nested.mkdir();(nested/'unknown.bin').write_bytes(b'\x00private evidence')
+  (self.cache/'modified.js').write_text('original dependency')
+  # Even a report present in a trusted installation is protected evidence.
+  manifest=m.dependency_identity(self.cache,True)
+  self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+manifest['fingerprint'],json.dumps(manifest)))
+  self.db.execute("update kv set value=? where key='dependency-installation:a'",(json.dumps(manifest['fingerprint']),));self.db.commit()
+  (self.cache/'modified.js').write_text('failure details written by worker')
+  (self.cache/'new-module.js').write_text('unclassified source/evidence')
+  (nested/'unknown.bin').write_bytes(b'changed failure evidence')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertFalse((self.cache/'generated.js').exists())
+  for name,value in reports.items():self.assertEqual((self.cache/name).read_text(),value)
+  self.assertEqual((self.cache/'modified.js').read_text(),'failure details written by worker')
+  self.assertTrue((self.cache/'new-module.js').exists());self.assertEqual((nested/'unknown.bin').read_bytes(),b'changed failure evidence')
+ def test_missing_manifest_and_build_caches_remain_unknown(self):
+  build=self.repo/'.next';build.mkdir();(build/'output.js').write_text('unproven')
+  self.db.execute("delete from kv where key like 'dependency-cache-manifest:%'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertTrue((self.cache/'generated.js').exists());self.assertTrue((build/'output.js').exists())
  def test_live_or_unknown_cleanup_and_process_references_refuse(self):
   for status,proof in [('running',True),('finished',False)]:
    self.db.execute('update sessions set status=?',(status,));self.db.execute('update kv set value=?',(json.dumps({'verified':proof}),));self.db.commit()
@@ -89,7 +112,7 @@ class Safety(unittest.TestCase):
   os.mkfifo(self.cache/'unknown-pipe');self.assertFalse(m.eligible(self.repo,self.cache))
  def test_nested_git_refuses_and_links_never_follow(self):
   target=self.repo/'outside';target.write_text('keep');(self.cache/'link').symlink_to(target)
-  self.assertTrue(m.eligible(self.repo,self.cache));m.remove(self.cache);self.assertEqual(target.read_text(),'keep')
+  self.assertTrue(m.eligible(self.repo,self.cache));m.remove(self.cache);self.assertTrue((self.cache/'link').is_symlink());self.assertEqual(target.read_text(),'keep')
   (self.cache/'.git').mkdir();self.assertFalse(m.eligible(self.repo,self.cache))
 
 if __name__=='__main__':unittest.main()

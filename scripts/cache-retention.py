@@ -32,8 +32,8 @@ def real(p):
 def evidence(name):
     n = name.lower()
     return (n in PROTECTED or n in {'log', 'trace', 'traces'} or
-            n.endswith(('.log', '.jsonl', '.bundle', '.receipt', '.sqlite', '.sqlite3', '.db', '.db3', '.sqlitedb', '-wal', '-shm', '-journal')) or
-            any(s in n for s in ('receipt', 'transcript', 'evidence', '.log.', 'trace')))
+            n.endswith(('.json', '.xml', '.html', '.htm', '.csv', '.tsv', '.tap', '.lcov', '.log', '.jsonl', '.bundle', '.receipt', '.sqlite', '.sqlite3', '.db', '.db3', '.sqlitedb', '-wal', '-shm', '-journal')) or
+            any(s in n for s in ('receipt', 'transcript', 'evidence', '.log.', 'trace', 'junit', 'report', 'result')))
 
 
 def quiet(paths):
@@ -151,48 +151,78 @@ def eligible(repo, cache):
     return True
 
 
-def retained_entry(p):
+def retained_entry(p, cache=None, manifest=None):
     if evidence(p.name):
         return True
     if p.is_file() and not p.is_symlink():
         with p.open('rb') as data:
-            return data.read(16) == b'SQLite format 3\x00'
-    return False
+            if data.read(16) == b'SQLite format 3\x00':
+                return True
+    # Only byte-identical objects in the trusted pre-worker installation are
+    # regenerable. Unknown, newly written or modified content is evidence.
+    if cache is None or manifest is None:
+        return True
+    expected = manifest['entries'].get(str(p.relative_to(cache)))
+    if expected is None:
+        return True
+    try:
+        before = p.lstat()
+        if p.is_symlink():
+            return expected != {'kind': 'link', 'target': str(p.resolve(strict=True).relative_to(cache))}
+        if not stat.S_ISREG(before.st_mode) or expected.get('kind') != 'file':
+            return True
+        digest = hashlib.sha256()
+        with p.open('rb') as data:
+            for chunk in iter(lambda: data.read(1024*1024), b''):
+                digest.update(chunk)
+        after = p.lstat()
+        return ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode) or
+                expected != {'kind': 'file', 'sha256': digest.hexdigest(), 'executable': bool(before.st_mode & 0o100)})
+    except (OSError, ValueError):
+        return True
 
 
-def has_generated(cache):
+def has_generated(cache, manifest=None, base=None):
+    base = base or cache
     with os.scandir(cache) as entries:
         for item in entries:
-            if retained_entry(pathlib.Path(item.path)):
+            p = pathlib.Path(item.path)
+            if evidence(p.name):
                 continue
             if item.is_dir(follow_symlinks=False):
-                if has_generated(pathlib.Path(item.path)):
+                if has_generated(p, manifest, base):
                     return True
-            else:
+            elif not retained_entry(p, base, manifest):
                 return True
     return False
 
 
-def remove(cache):
+def remove(cache, manifest=None, base=None):
+    base = base or cache
     # Preserve in-cache evidence at its exact location; never follow links.
     for item in os.scandir(cache):
         p = pathlib.Path(item.path)
-        if retained_entry(p):
+        if evidence(p.name):
             continue
         if item.is_dir(follow_symlinks=False):
-            remove(p)
-        else:
+            remove(p, manifest, base)
+        elif not retained_entry(p, base, manifest):
             p.unlink()
-    try:
-        cache.rmdir()
-    except OSError:
-        pass
+    # Unknown empty directories may carry evidence too. Remove only directories
+    # known to the original installation (or the root once it is empty).
+    if manifest is not None and (cache == base or manifest['entries'].get(str(cache.relative_to(base))) == {'kind': 'dir'}):
+        try:
+            cache.rmdir()
+        except OSError:
+            pass
 
 
-def dependency_identity(root):
+def dependency_identity(root, inventory=False):
     if not root.is_dir() or not real(root):
         raise RuntimeError('local dependency installation required')
     digest = hashlib.sha256()
+    entries = {}
     def visit(directory):
         for p in sorted(directory.iterdir(), key=lambda q: q.name):
             relative = str(p.relative_to(root)).encode()
@@ -201,14 +231,17 @@ def dependency_identity(root):
                 if not target.is_relative_to(root):
                     raise RuntimeError('external dependency link refused')
                 digest.update(b'link\0' + relative + b'\0' + str(target.relative_to(root)).encode() + b'\0')
+                entries[relative.decode()] = {'kind': 'link', 'target': str(target.relative_to(root))}
             elif p.is_dir():
-                digest.update(b'dir\0' + relative + b'\0');visit(p)
+                digest.update(b'dir\0' + relative + b'\0');entries[relative.decode()] = {'kind': 'dir'};visit(p)
             elif p.is_file():
                 before = p.stat()
                 digest.update(b'file\0' + relative + b'\0' + str(before.st_size).encode() + b':' + str(before.st_mode & 0o100).encode() + b'\0')
+                content = hashlib.sha256()
                 with p.open('rb') as data:
                     for chunk in iter(lambda: data.read(1024*1024), b''):
-                        digest.update(chunk)
+                        digest.update(chunk);content.update(chunk)
+                entries[relative.decode()] = {'kind': 'file', 'sha256': content.hexdigest(), 'executable': bool(before.st_mode & 0o100)}
                 digest.update(b'\0')
                 after = p.stat()
                 if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode):
@@ -216,7 +249,30 @@ def dependency_identity(root):
             else:
                 raise RuntimeError('special dependency object refused')
     visit(root)
-    return digest.hexdigest()
+    fingerprint = digest.hexdigest()
+    return {'version': 1, 'fingerprint': fingerprint, 'entries': entries} if inventory else fingerprint
+
+
+def cache_manifest(db, root, repo, name):
+    # Only node_modules has a trusted before-native baseline. Build outputs and
+    # legacy/rehearsal clones without provenance remain untouched.
+    sid = session_for(root, repo)
+    if name != 'node_modules' or repo != root / 'workspaces' / str(sid):
+        return None
+    binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
+    if binding is None:
+        return None
+    fingerprint = json.loads(binding[0])
+    if not isinstance(fingerprint, str) or not re.fullmatch(r'[a-f0-9]{64}', fingerprint):
+        return None
+    row = db.execute('select value from kv where key=?', ('dependency-cache-manifest:' + fingerprint,)).fetchone()
+    if row is None:
+        return None
+    manifest = json.loads(row[0])
+    if (not isinstance(manifest, dict) or manifest.get('version') != 1 or
+        manifest.get('fingerprint') != json.loads(binding[0]) or not isinstance(manifest.get('entries'), dict)):
+        return None
+    return manifest
 
 
 def repositories(root):
@@ -302,14 +358,15 @@ def sweep(root, apply=False):
                         try:
                             if not custody(db, root, repo) or not eligible(repo, cache):
                                 continue
-                            if not has_generated(cache):
+                            manifest = cache_manifest(db, root, repo, name)
+                            if not manifest or not has_generated(cache, manifest):
                                 continue
                             # Serialize against launcher reservation/continuation and
                             # reread custody + process/path evidence immediately before I/O.
                             db.execute('BEGIN IMMEDIATE')
                             try:
                                 paths = custody(db, root, repo)
-                                if not paths or not quiet(paths) or not eligible(repo, cache):
+                                if not paths or not quiet(paths) or not eligible(repo, cache) or cache_manifest(db, root, repo, name) != manifest:
                                     continue
                                 record({'state': 'intent', 'path': str(cache), 'apply': apply})
                                 if apply:
@@ -328,7 +385,7 @@ def sweep(root, apply=False):
                                             identity = json.loads(binding[0])
                                             with marker.open('x') as pending:
                                                 pending.write(json.dumps({'at': time.time(), 'receipt': str(output), 'dependencyFingerprint': identity}) + '\n')
-                                    remove(cache)
+                                    remove(cache, manifest)
                                 record({'state': 'removed' if apply else 'planned', 'path': str(cache)})
                             finally:
                                 db.rollback()
@@ -346,8 +403,10 @@ if __name__ == '__main__':
     group.add_argument('--root', type=pathlib.Path)
     group.add_argument('--fingerprint', type=pathlib.Path)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--inventory', action='store_true')
     args = parser.parse_args()
     if args.fingerprint:
-        print(dependency_identity(args.fingerprint))
+        result = dependency_identity(args.fingerprint, args.inventory)
+        print(json.dumps(result) if args.inventory else result)
     else:
         print(json.dumps(sweep(args.root, args.apply)))

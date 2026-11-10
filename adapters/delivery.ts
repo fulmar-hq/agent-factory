@@ -186,7 +186,7 @@ export function prepareTestScratch(checkout:string) {
 }
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
-export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string, pinnedDependencies?:string|null) {
+export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string, pinnedDependencies?:string|null, recordDependencies?:(manifest:unknown,fingerprint:string)=>void) {
   mkdirSync(archive,{recursive:true,mode:0o700});
   workspace=realpathSync(workspace);
   const git = (...args:string[]) => command(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",workspace,...args]);
@@ -229,6 +229,11 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
   const installedDependencies=await dependencyFingerprint(join(workspace,"node_modules"));
+  if(!expectedDependencies && recordDependencies) {
+    const manifest=JSON.parse(await command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",join(workspace,"node_modules"),"--inventory"],undefined,120000));
+    if(manifest.version!==1 || manifest.fingerprint!==installedDependencies || !manifest.entries || typeof manifest.entries!=="object")throw Error("dependency cache provenance changed during setup");
+    recordDependencies(manifest,installedDependencies);
+  }
   if(expectedDependencies && installedDependencies!==expectedDependencies)throw Error("restored dependency installation differs; retain parent and receipt");
   if(existsSync(eviction))renameSync(eviction,join(archive,`dependency-restored-${crypto.randomUUID()}.jsonl`));
   const metadata=join(workspace,".git");
