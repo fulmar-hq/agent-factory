@@ -48,6 +48,7 @@ export function importHistoricalReviews(s:Store,c:Config,dir:string) {
  s.set('historical-review-migration',{complete:pending.length===0,count:accepted.length,pending:pending.length});});
  return true;
 }
+export type ReviewPass={claims:number};
 export interface CodeReviewPort {
  pulls(repo:string):Promise<BoardPull[]>;
  files(repo:string,number:number):Promise<{filename:string;patch?:string}[]>;
@@ -55,8 +56,8 @@ export interface CodeReviewPort {
 }
 // This executor never creates issues or merges. The existing maintenance lease,
 // independent native review and builder-slot/qualification/usage gates remain.
-export async function reviewProductChanges(s:Store,c:Config,dir:string,repositories:Record<string,string>,port:CodeReviewPort,now=Date.now()) {
- if(!c.review_process)return;
+export async function reviewProductChanges(s:Store,c:Config,dir:string,repositories:Record<string,string>,port:CodeReviewPort,now=Date.now(),pass:ReviewPass={claims:0}) {
+ if(!c.review_process||pass.claims>0)return;
  try{if(!importHistoricalReviews(s,c,dir))s.set('historical-review-migration',{complete:false,count:0,reason:'historical result packet unavailable'});}
  catch(error){s.set('historical-review-migration',{complete:false,count:0,reason:String(error)});}
  // Missing legacy provenance grants no approval and must not prevent an actual
@@ -89,7 +90,7 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
    if(files.every(f=>/^docs\/work\/.*-challenge\.md$/.test(f.filename)))continue;
    const authorNatives=(s.db.query("SELECT sessions.native_id FROM sessions JOIN events ON json_extract(events.data,'$.id')=sessions.id WHERE events.kind IN ('launcher-publish','worker-delivery') AND json_extract(events.data,'$.url')=?").all(p.url) as {native_id:string|null}[]).flatMap(x=>x.native_id?[x.native_id]:[]);
    const depth=reviewDepth(files),target:ReviewTarget={repo:project.repo,baseRef:p.baseRefName!,depth,authorNatives};
-   await port.review({number:p.number,head:p.headRefOid,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'UNKNOWN',verify:true},repositories[project.repo],target,()=>{claimed=true;});
+   await port.review({number:p.number,head:p.headRefOid,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'UNKNOWN',verify:true},repositories[project.repo],target,()=>{pass.claims++;claimed=true;});
   }
  }
 }

@@ -104,3 +104,33 @@ test('unbound old historical keys retain evidence and cannot suppress a real rev
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);expect(reviews).toBe(1);expect(e.s.db.query("SELECT data FROM events WHERE kind='historical-review-invalidated'").all()).toHaveLength(1);
  }finally{e.s.close();}
 });
+
+test('product-only result application cannot create disguised acceptance or scratch tickets',async()=>{
+ const {applyOwnerResults}=await import('../launcher/autonomy');const e=setup(),dir=mkdtempSync(join(tmpdir(),'product-only-application-'));
+ e.c.autonomy={intake_mode:'build',intake_owner:'builder',idle_wake_minutes:10,ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['.github']},restart:{max_retries:1,causes_per_hour:3}};e.pause(false,'owner');
+ try {
+  const raw={...ticket(),category:'product',kind:'fix',area:'booking',outcome:'Show the selected booking time',intakeEvidence:{kind:'issue',number:42}};
+  const cases=[{title:'Booking acceptance result',brief:{...raw,paths:['.factory-tmp'],outcome:'Run hosted acceptance of the booking change and record the verdict.'}}, {title:'Show selected booking time',brief:{...raw,paths:['.factory-tmp']}}, {title:'Show selected booking time',brief:{...raw,paths:['src/calendar.test.ts']}}];
+  let creates=0;
+  const execute=async(args:string[])=>{if(args.includes('create'))creates++;if(args[1]==='issue'&&args[2]==='view')return JSON.stringify({number:42,state:'OPEN',title:'Hosted booking acceptance',labels:[{name:'kind:accept'}]});return '[]';};
+  for(const [n,c] of cases.entries()){
+   writeFileSync(join(dir,'intake.json'),JSON.stringify({tickets:[{repo:'fulmar-hq/alido',...c}],mix:{product:1,other:0}}));
+   const id='disguised-'+n;e.s.set('owner-wake:'+id,{id,owner:'builder',kind:'product-intake',payload:{round:'r'},state:'done',cleanupVerified:true,scratch:dir});
+   await applyOwnerResults(e,dir,undefined,now,execute);expect(e.s.get('owner-result:'+id)).toMatchObject({applied:false});
+  }
+  expect(creates).toBe(0);
+  for(const source of [{title:'Hosted booking acceptance',labels:[]},{title:'Booking outcome',labels:[{name:'kind:accept'}]}])await expect(enforceIntakeMode(e,'fulmar-hq/alido',{...raw,title:'Fix booking display'},dir,async()=>JSON.stringify({number:42,state:'OPEN',...source}))).rejects.toThrow('source');
+  for(const copy of ['Change consent accept control copy','Show the Accept button label','Accept button copy','Review progress label','Show website review progress'])await enforceIntakeMode(e,'fulmar-hq/alido',{...raw,title:copy,outcome:copy},dir,async()=>JSON.stringify({number:42,state:'OPEN',title:copy,labels:[{name:'kind:fix'}]}));
+ }finally{e.s.close();}
+});
+
+test('factory preparation failure consumes the same new-review allowance as the product lane',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');const e=setup(),dir=mkdtempSync(join(tmpdir(),'one-review-pass-')),pass={claims:0};let preparations=0,productCalls=0;
+ const run:typeof import('../adapters/factory-challenge').runFactoryChallenge=async(store,pull,root,source,claimed)=>{claimed?.();preparations++;store.set(`factory-challenge:${pull.number}:${pull.head}`,{state:'blocked',error:'fictional fetch failed before native spawn'});return undefined;};
+ try {
+  const factory=maintenancePort(e.s,run,pass);await factory.challenge({number:7,head:'c'.repeat(40),tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'CLEAN',verify:true});
+  expect(pass.claims).toBe(1);expect(e.s.db.query("SELECT id FROM events WHERE kind='factory-challenge-started'").all()).toHaveLength(0);
+  const product:CodeReviewPort={pulls:async()=>{productCalls++;return [p()];},files:async()=>[{filename:'src/widget.ts'}],review:async()=>{productCalls++;return undefined;}};
+  await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},product,now,pass);expect(preparations).toBe(1);expect(productCalls).toBe(0);
+ }finally{e.s.close();}
+});
