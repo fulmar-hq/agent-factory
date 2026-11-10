@@ -152,3 +152,9 @@ test('persistent reader replays after restart without writes or mutable snapshot
     expect(new AutonomyMetricsReader(s).read({ from: 0, to: 31 }).failureResponses[0].latencyMs).toBe(20);
   } finally { s.close(); }
 });
+
+
+test('ordinary board answers never count as autonomy owner decisions',()=>{
+ const rows=[event('ordinary','owner-answer',1,{id:'ordinary-question',answer:'yes'}),event('autonomy','owner-answer',2,{id:'autonomy:bounded-question',answer:'hold'})];
+ const m=autonomyMetrics(rows,{from:0,to:3});expect(m.decisions.owner).toEqual({observed:1,eventIds:['autonomy']});expect(m.rejectedEventIds).toEqual([]);
+});

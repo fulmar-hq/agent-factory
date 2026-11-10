@@ -94,7 +94,8 @@ export function autonomyMetrics(rows: readonly ControllerEvent[], window: Metric
     d.url.startsWith(`https://github.com/${d.repo}/pull/`) &&
     /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/[1-9]\d*$/.test(d.url));
   const rule = valid('intake-auto-approved', d => nonempty(d.repo) && Number.isInteger(d.number) && nonempty(d.digest));
-  const owner = valid('owner-answer', d => nonempty(d.id) && nonempty(d.answer));
+  const owner = valid('owner-answer', d => nonempty(d.id) && nonempty(d.answer))
+    .filter(e => (e.data.id as string).startsWith('autonomy:'));
   const defaults = valid('autonomy-decision-default', d => nonempty(d.id) && nonempty(d.default));
 
   // Prefer the first actual failure receipt, not the later classification time.
