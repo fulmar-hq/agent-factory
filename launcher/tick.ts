@@ -20,6 +20,7 @@ import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import { qualificationAlerts } from "./alerts";
+import {healthOwnsAlerts} from "./factory-health-runtime";
 import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
 import { qualificationFor } from "./usage-push-policy";
@@ -69,7 +70,7 @@ export async function tick(dir = root) {
     observeDisk(s,diskReading(undefined,now));
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
-    qualificationAlerts(s, qualifications, now);
+    if(!healthOwnsAlerts(dir,now))qualificationAlerts(s, qualifications, now);
     localWakes(s,c,[],qualifications,now);
     recoverWorkers(e,now);
     const versions: Record<string, string> = { bun: Bun.version };
@@ -161,6 +162,7 @@ export async function tick(dir = root) {
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
     s.set("heartbeat", heartbeat);
+    s.set("last-successful-heartbeat",heartbeat);
     return heartbeat;
   } finally {
     s.close();
