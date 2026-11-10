@@ -3,13 +3,13 @@ import { command } from "../adapters/github";
 import type { Config } from "../launcher/config";
 import type { Store } from "../tracking/store";
 export type BoardPull = {
-  number: number; url: string; title?: string; headRefOid: string; headRefName?: string;
+  number: number; url: string; title?: string; headRefOid: string; headRefName?: string; baseRefName?: string;
   reviewDecision?: string; closingIssuesReferences?: {number:number;url:string}[];
   reviews: {id:string;state:string;submittedAt:string}[];
   statusCheckRollup: {status?:string;conclusion?:string;detailsUrl?:string;targetUrl?:string;state?:string;name?:string}[];
 };
 export type PullSnapshot = {at:number; pulls:BoardPull[]; error?:boolean};
-export const pullFields = 'number,title,headRefOid,headRefName,reviews,reviewDecision,statusCheckRollup,url,closingIssuesReferences';
+export const pullFields = 'number,title,headRefOid,headRefName,baseRefName,reviews,reviewDecision,statusCheckRollup,url,closingIssuesReferences';
 export function pullState(pr: BoardPull) {
   // A release hold is a release dependency, not a broken build or a running check.
   const checks = (pr.statusCheckRollup ?? []).filter(c=>!/release[ -]hold/i.test(c.name ?? ''));

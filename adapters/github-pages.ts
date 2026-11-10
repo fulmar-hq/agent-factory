@@ -6,9 +6,9 @@ const labels = z.object({nodes:z.array(z.object({name:z.string()})),pageInfo});
 const issue = z.object({number:z.number().int().positive(),title:z.string(),body:z.string(),url:z.string(),updatedAt:z.string(),closedAt:z.string().nullable(),state:z.enum(['OPEN','CLOSED']),labels});
 const review = z.object({id:z.string(),state:z.string(),submittedAt:z.string().nullable()});
 const check = z.object({name:z.string().optional(),status:z.string().optional(),conclusion:z.string().nullable().optional(),detailsUrl:z.string().nullable().optional(),targetUrl:z.string().nullable().optional(),state:z.string().optional()});
-const pull = z.object({number:z.number().int().positive(),title:z.string(),url:z.string(),headRefOid:z.string(),headRefName:z.string(),reviewDecision:z.string().nullable(),reviews:z.object({nodes:z.array(review),pageInfo}),closingIssuesReferences:z.object({nodes:z.array(z.object({number:z.number().int(),url:z.string()})),pageInfo}),commits:z.object({nodes:z.array(z.object({commit:z.object({statusCheckRollup:z.object({contexts:z.object({nodes:z.array(check),pageInfo})}).nullable()})}))})});
+const pull = z.object({number:z.number().int().positive(),title:z.string(),url:z.string(),headRefOid:z.string(),headRefName:z.string(),baseRefName:z.string(),reviewDecision:z.string().nullable(),reviews:z.object({nodes:z.array(review),pageInfo}),closingIssuesReferences:z.object({nodes:z.array(z.object({number:z.number().int(),url:z.string()})),pageInfo}),commits:z.object({nodes:z.array(z.object({commit:z.object({statusCheckRollup:z.object({contexts:z.object({nodes:z.array(check),pageInfo})}).nullable()})}))})});
 const issueFields = 'number title body url updatedAt closedAt state labels(first:100){nodes{name} pageInfo{hasNextPage endCursor}}';
-const pullFields = `number title url headRefOid headRefName reviewDecision
+const pullFields = `number title url headRefOid headRefName baseRefName reviewDecision
  reviews(first:100){nodes{id state submittedAt} pageInfo{hasNextPage endCursor}}
  closingIssuesReferences(first:100){nodes{number url} pageInfo{hasNextPage endCursor}}
  commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}`;
