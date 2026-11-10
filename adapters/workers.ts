@@ -93,7 +93,7 @@ export function workerSpec(
     files[join(workspace,"node_modules")]="read";
     if (delivery) files[join(workspace,".git")]="write"; // trusted setup supplied standalone metadata
     const sockets: string[] = [];
-    const deliveryPrompt = delivery ? "\nLeave an unsigned commit and .factory-delivery.bundle (git bundle create .factory-delivery.bundle HEAD). The launcher tests the snapshot and signs/publishes after worker cleanup. Never sign or push. Use .factory-tmp for scratch." : "";
+    const deliveryPrompt = delivery && t.kind!=='qualification' ? "\nLeave an unsigned commit and .factory-delivery.bundle (git bundle create .factory-delivery.bundle HEAD). The launcher tests the snapshot and signs/publishes after worker cleanup. Never sign or push. Use .factory-tmp for scratch." : "";
     const filesystem = Object.entries(files).map(([p,a])=>`${JSON.stringify(p)}=${JSON.stringify(a)}`).join(", ");
     return {
       argv: [
