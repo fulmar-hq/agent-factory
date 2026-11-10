@@ -2,6 +2,7 @@ import { githubPages } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
+import { routedLabels } from "../launcher/routing";
 export type Issue = {
   number: number;
   title: string;
@@ -63,13 +64,14 @@ export function issueTicket(repo: string, i: Issue): Ticket | null {
   if (approvals.length !== 1 || approvals[0].name !== intakeLabel(repo, i))
     throw Error("approved intake changed or approval missing");
   // Only repository triage+ can attach the content-bound approval label.
-  return TicketSchema.parse({
+  const ticket = TicketSchema.parse({
     ...JSON.parse(match[1]),
     repo,
     number: i.number,
     title: i.title,
     approvalDigest: intakeLabel(repo, i),
   });
+  return { ...ticket, ...routedLabels(ticket, i.labels) };
 }
 export async function reconcile(
   s: Store,

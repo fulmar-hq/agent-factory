@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { ExecutionRequirements } from "./routing";
 const finite = z.number().finite().nonnegative();
 const ratio = finite.max(1);
 const role = z.object({
@@ -58,6 +59,13 @@ export const ConfigSchema = z.object({
     heavy_test_slots: z.number().int().nonnegative(),
     controller: z.object({start: z.literal(6), max: z.literal(12), interval_minutes: z.literal(60), busy_above: z.literal(0.8), failure_below: z.literal(0.3)}).optional(),
   }),
+  // Separate from local capacity. Missing/zero cap closes cloud admission;
+  // a cap alone never qualifies an executor or authorizes paid overflow.
+  cloud: z.object({
+    max_parallel: z.literal(0),
+    environments: z.record(z.string(), z.string().min(1)),
+    billing: z.literal("subscription_only"),
+  }).optional(),
   wallet: z.object({
     aws: z.object({
       ceiling_usd_month: finite,
@@ -101,6 +109,9 @@ export const TicketSchema = z.object({
   repo: z.string(),
   number: z.number().int().positive(),
   title: z.string(),
+  runs: z.enum(["cloud", "local"]).optional(),
+  execution: ExecutionRequirements.optional(),
+  needs_browser: z.boolean().optional(),
   area: z.string().default("unknown"),
   kind: z.string().default("unknown"),
   owner: z.string(),

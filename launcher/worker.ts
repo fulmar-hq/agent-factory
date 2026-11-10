@@ -1,4 +1,5 @@
 import type {PublisherBoundary} from './publisher-evidence';
+import { requireHeadlessLocal } from "./routing";
 import {reviewPublished} from './queue';
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { planDeliveryRetention } from "./delivery-retention";
@@ -41,6 +42,7 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
   if (!x) { s.close(); return; }
   const t = JSON.parse(x.brief) as Ticket;
   try {
+    requireHeadlessLocal(t);
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;

@@ -1,3 +1,4 @@
+import { newTicketRoute } from './routing';
 import {z} from 'zod';
 import {claimableReady} from './queue';
 import {enforceIntakeMode} from './intake-policy';
@@ -187,6 +188,7 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
      const proposal=data.tickets[n],key=`proposal:${w.id}:${n}`;
      const project=Object.values(e.c.projects).find(p=>p.repo===proposal.repo && p.owners.includes(w.owner));if(!project)throw Error('proposal project/owner not enrolled');
      const brief:Record<string,unknown>={...proposal.brief,owner:w.owner,creator:`launcher:${w.id}`,source:`factory-event:${w.id}`,approved:true};
+     Object.assign(brief,newTicketRoute(brief));
      const fake:Issue={number:1,title:proposal.title,body:'```factory\n'+JSON.stringify(brief,null,2)+'\n```',url:'',updatedAt:'',state:'OPEN',labels:[{name:`kind:${String(brief.kind)}`},{name:`area:${String(brief.area)}`} ]};
      const t=prospective(proposal.repo,fake);executableTest(t.test);
      await enforceIntakeMode(e,proposal.repo,brief,dir,execute);
@@ -198,8 +200,8 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
       const exact=matches.filter(i=>i.body.includes(marker));if(matches.length>=100 || exact.length>1)throw Error('proposal create custody ambiguous');
       if(exact.length)number=exact[0].number;
       else {
-       for(const name of [`kind:${t.kind}`,`area:${t.area}`,'state:ready','state:building'])await execute(['gh','label','create',name,'--repo',t.repo,'--color','6F42C1','--description','Factory intake category','--force']);
-       const url=(await execute(['gh','issue','create','--repo',t.repo,'--title',proposal.title,'--body',`${marker}\n${fake.body}`,'--label',`kind:${t.kind}`,'--label',`area:${t.area}`,'--label','state:ready'])).trim();
+       for(const name of [`kind:${t.kind}`,`area:${t.area}`,'state:ready','state:building',`runs:${t.runs}`])await execute(['gh','label','create',name,'--repo',t.repo,'--color','6F42C1','--description','Factory intake category','--force']);
+       const url=(await execute(['gh','issue','create','--repo',t.repo,'--title',proposal.title,'--body',`${marker}\n${fake.body}`,'--label',`kind:${t.kind}`,'--label',`area:${t.area}`,'--label','state:ready','--label',`runs:${t.runs}`])).trim();
        const match=url.match(/\/issues\/(\d+)$/);if(!match)throw Error('created issue identity unknown');number=Number(match[1]);
       }
       e.s.set(key,number);
