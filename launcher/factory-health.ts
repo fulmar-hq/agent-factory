@@ -146,6 +146,7 @@ type HealthSource = typeof HEALTH_SOURCES[number];
 const observationSchema = z.object({ observedAt: timestamp, fingerprint: z.string().regex(/^[a-f0-9]{64}$/), conflicted: z.boolean() });
 export const HealthMemorySchema = z.object({
   releaseObligations: z.array(windowSchema),
+  releaseEvaluatedAt: timestamp.optional(),
   observations: z.partialRecord(z.enum(HEALTH_SOURCES), observationSchema),
 });
 export type HealthMemory = z.infer<typeof HealthMemorySchema>;
@@ -261,7 +262,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
     new Set(work.value.running.map(p => p.sessionId)).size !== work.value.running.length ||
     new Set(work.value.running.map(p => p.pid)).size !== work.value.running.length ||
     new Set(work.value.running.map(p => p.nativeSessionId)).size !== work.value.running.length ||
-    work.value.running.some(p => !live(p, now, work.observedAt)) ||
+    work.value.running.some(p => p.purpose !== "work" || !live(p, now, work.observedAt)) ||
     (work.value.inactiveSince !== null && (work.value.inactiveSince > work.observedAt || work.value.claims.length > 0 || work.value.running.length > 0))) {
     workIssues.push(unavailable("work activity"));
   } else if (work.value.ready + work.value.building > 0 && !work.value.claims.length && !work.value.running.length) {
@@ -331,7 +332,12 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
     return issues;
   }
   const candidates = new Map<string, HealthReleaseWindow>();
-  for (const w of [...healthReleaseWindows(now, -1), ...tonight, ...memory.releaseObligations]) {
+  if (memory.releaseEvaluatedAt !== undefined && memory.releaseEvaluatedAt > now) throw Error("Health evaluation clock regressed");
+  const gapDays = memory.releaseEvaluatedAt === undefined ? 1 : Math.ceil((now - memory.releaseEvaluatedAt) / (24 * 60 * MINUTE)) + 1;
+  // Refuse an unbounded gap rather than silently forgetting release obligations.
+  if (gapDays > 366) throw Error("Release coverage gap needs retained-history reconciliation");
+  const intervening = Array.from({length: gapDays}, (_, i) => healthReleaseWindows(now, -i - 1)).flat().filter(w => memory.releaseEvaluatedAt !== undefined && w.startAt > memory.releaseEvaluatedAt);
+  for (const w of [...healthReleaseWindows(now, -1), ...intervening, ...tonight, ...memory.releaseObligations]) {
     // Validate retained obligations against civil time, never trust edited timestamps.
     const canonical = healthReleaseWindows(w.startAt).find(c => c.id === w.id);
     if (!canonical || canonical.day !== w.day || canonical.stage !== w.stage || canonical.startAt !== w.startAt || canonical.endAt !== w.endAt) throw Error("Invalid retained release obligation");
@@ -368,7 +374,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
     const times = proof[f.condition].map(r => r.ok ? r.observedAt : null);
     f.evidenceAt = times.every((at): at is number => at !== null) ? Math.min(...times) : null;
   }
-  return { at: now, findings, memory: { releaseObligations: unresolved, observations: memory.observations } };
+  return { at: now, findings, memory: { releaseObligations: unresolved, releaseEvaluatedAt: now, observations: memory.observations } };
 }
 
 const recipientSchema = z.enum(["Vincent", "Coordinator"]);

@@ -562,3 +562,23 @@ describe("durable incident and notification transitions", () => {
     expect(() => advance(wrongId, fixture(AT + 1))).toThrow("Contradictory");
   });
 });
+
+
+test("renewal process cannot clear a work stall", () => {
+  const stalled = fixture(); stalled.work.value.ready = 1; stalled.work.value.inactiveSince = AT - 20 * M; stalled.work.value.refusal = "qualification";
+  const state = advance(initialFactoryHealthState(), stalled);
+  const newer = fixture(AT + 1); newer.work.value.ready = 1;
+  const renewal = process(AT + 1); renewal.purpose = "qualification-renewal";
+  newer.work.value.running = [renewal];
+  const result = transitionFactoryHealth(state, newer, () => AT + 1);
+  expect(result.evaluation.findings.find(f => f.condition === "work")!.status).toBe("unknown");
+  expect(result.state.outbox.filter(n => n.condition === "work" && n.kind === "recovery")).toHaveLength(0);
+});
+test("multi-day watchdog outage retains every intervening release obligation", () => {
+  const first = fixture(AT), state = advance(initialFactoryHealthState(), first);
+  const resumed = fixture(AT + 2 * 24 * H);
+  const result = transitionFactoryHealth(JSON.parse(JSON.stringify(state)), resumed, () => resumed.capturedAt);
+  const missed = healthReleaseWindows(AT);
+  expect(result.evaluation.findings.find(f => f.condition === "release")!.status).toBe("incident");
+  for (const w of missed) expect(result.state.memory.releaseObligations.some(r => r.id === w.id)).toBe(true);
+});
