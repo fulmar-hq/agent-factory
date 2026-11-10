@@ -106,3 +106,27 @@ Then fast-forward the clean pinned release checkout to the delivered revision;
 changing only another checkout does not activate the scheduled jobs. Retain the
 before/after revisions and undo via a signed revert. Do not load launchd or run a
 release while installing source. Platform owns resuming a disk-paused launcher.
+
+## Plain nightly result
+
+The existing observer calls `releaseWindowResult` after reconciliation, including
+its failure path, from22:00 Toronto onward. It queues one result per day in the
+existing Alido Mail Telegram outbox whether the release shipped or was refused.
+Before22:00 it performs no result observation or messaging. Rehearsals and
+`dry-run` do not call it. The19:00 missing-input alert remains separate and quiet
+on success.
+
+“Shipped” requires the successful QA operation, matching independent ACCEPT,
+protected promotion and successful Production readback for the same accepted
+revision/tree/artifact. Unconfirmed effects report not shipped and retain their
+custody. QA server status comes from fresh exact-target EC2 and RDS description
+reads supplied by the private installation. It says stopped only when both
+reads say `stopped`; missing, stale, failed, stopping or running observations
+cannot become stopped evidence. The observer never starts/stops resources or
+renews credentials. Resource cleanup remains the release owner's responsibility.
+
+The stable daily outbox ID survives a crash between the bridge insert and the
+controller receipt. Missing bridge access throws without recording delivery;
+the next observer retries. Queued is not delivered: the normal bridge owns
+Telegram delivery. Keep the private observations, result and outbox receipts;
+undo with a signed revert after reconciling custody, without deleting history.
