@@ -232,7 +232,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     });
     requireThat(matching.length === 1 && outputs.has(matching[0][0]), "actual native security invocation missing");
     securityOutput(outputs.get(matching[0][0])!);
-    const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution" && x.item.command === r.command);
+    const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution" && probeInvocation(x.item.command ?? "", r.workspace, m.probe.path));
     requireThat(executed.length === 1 && executed[0].item?.exit_code === 0, "native command exit unverified");
     securityOutput(text.parse(executed[0].item?.aggregated_output));
   } else {
