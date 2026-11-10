@@ -188,7 +188,7 @@ export function prepareTestScratch(checkout:string) {
 export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string) {
   mkdirSync(archive,{recursive:true,mode:0o700});
   workspace=realpathSync(workspace);
-  const git = (...args:string[]) => command(["git","-C",workspace,...args]);
+  const git = (...args:string[]) => command(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",workspace,...args]);
   if (!existsSync(join(workspace,".git/HEAD"))) {
     const head=(await git("rev-parse","HEAD")).trim();
     const branch=(await git("branch","--show-current")).trim();
@@ -207,7 +207,9 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   const bundleBase=expectedBase ?? ((await git("show-ref","--verify","--hash","refs/factory/base").catch(()=>"" )).trim() || (await git("rev-parse","HEAD")).trim());
   if(!/^[a-f0-9]{40}$/.test(bundleBase))throw Error("immutable bundle base required");
   await git("update-ref","refs/factory/base",bundleBase);
-  const eviction=join(workspace,".factory-tmp/dependencies-evicted.jsonl");
+  const scratch=join(workspace,".factory-tmp");
+  if(existsSync(scratch) && (lstatSync(scratch).isSymbolicLink() || !lstatSync(scratch).isDirectory() || realpathSync(scratch)!==scratch))throw Error("linked dependency receipt root refused");
+  const eviction=join(scratch,"dependencies-evicted.jsonl");
   if(existsSync(eviction)) {
     if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
     // Keep in-cache logs/receipts and the eviction receipt. Resume gets a

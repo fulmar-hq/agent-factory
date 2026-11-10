@@ -151,6 +151,11 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  await command(['git','-C',work,'add','fixture']);
  await command(['git','-C',work,'-c','commit.gpgsign=false','commit','-m','retained parent commit']);
  await command(['git','-C',work,'update-ref','-d','refs/factory/base']);
+ const {chmodSync}=await import('node:fs');
+ const hooks=join(work,'.git/hooks');mkdirSync(hooks,{recursive:true});
+ writeFileSync(join(hooks,'reference-transaction'),'#!/bin/sh\nexit 91\n');chmodSync(join(hooks,'reference-transaction'),0o755);
+ await command(['git','-C',work,'config','core.hooksPath',hooks]);
+
  await prepareDelivery(work,source,join(dir,'archive'),id,head);
  expect((await command(['git','-C',work,'rev-parse','refs/factory/base'])).trim()).toBe(head);
  await command(['git','-C',work,'bundle','create',join(dir,'incremental.bundle'),'HEAD','^refs/factory/base']);

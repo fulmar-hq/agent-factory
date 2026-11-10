@@ -193,7 +193,7 @@ def sweep(root, apply=False):
                                             raise RuntimeError('linked scratch refused')
                                         scratch.mkdir(exist_ok=True)
                                         marker = scratch / 'dependencies-evicted.jsonl'
-                                        if marker.is_symlink():
+                                        if marker.is_symlink() or (marker.exists() and (not marker.is_file() or marker.stat().st_nlink != 1)):
                                             raise RuntimeError('linked restoration marker refused')
                                         with marker.open('a') as pending:
                                             pending.write(json.dumps({'at': time.time(), 'receipt': str(output)}) + '\n')

@@ -36,6 +36,11 @@ class Safety(unittest.TestCase):
   with patch.object(m,'quiet',side_effect=RuntimeError('unknown process evidence')):m.sweep(self.root,True)
   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,False)
   self.assertTrue((self.cache/'generated.js').exists())
+ def test_hardlinked_marker_cannot_modify_source(self):
+  scratch=self.repo/'.factory-tmp';scratch.mkdir();source=self.repo/'dirty-source';source.write_text('preserve')
+  os.link(source,scratch/'dependencies-evicted.jsonl')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertEqual(source.read_text(),'preserve');self.assertTrue((self.cache/'generated.js').exists())
  def test_special_cache_files_refuse(self):
   os.mkfifo(self.cache/'unknown-pipe');self.assertFalse(m.eligible(self.repo,self.cache))
  def test_nested_git_refuses_and_links_never_follow(self):
