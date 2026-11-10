@@ -88,7 +88,8 @@ const nativeEvent = z.object({
     call_id: z.string().optional(), name: z.string().optional(), arguments: z.string().optional(), output: z.unknown().optional(),
   }).passthrough().optional(),
   usage: z.unknown().optional(),
-  item: z.object({ type: text, command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
+  status: z.string().optional(),
+  item: z.object({ type: text, status:z.string().optional(), command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
 }).passthrough();
 type NativeEvent = z.infer<typeof nativeEvent>;
 function lines(bytes: Uint8Array, banners = false): NativeEvent[] {
@@ -104,7 +105,9 @@ function lines(bytes: Uint8Array, banners = false): NativeEvent[] {
 function securityOutput(output: string) {
   // exec_command's retained output can have timing/chunk headers. Exactly one
   // JSON result line is required; prose and assistant claims cannot satisfy it.
-  const rows = output.split("\n").filter(s => s.trimStart().startsWith("{"));
+  const parts = output.split("\n").map(s => s.trim()).filter(Boolean);
+  requireThat(parts.every(s => s.startsWith("{") || /^(?:Chunk ID: [A-Za-z0-9_-]+|Wall time: [0-9.]+ seconds|Process exited with code 0|Exit code: 0|Final output:|Output:)$/.test(s)), "failed or unsupported native tool termination output");
+  const rows = parts.filter(s => s.startsWith("{"));
   requireThat(rows.length === 1, "one 12-check security result required");
   return securityResult.parse(JSON.parse(rows[0]));
 }
@@ -155,12 +158,13 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
   requireThat(s.runId === m.runId && s.nativeId === r.nativeId && s.workspace === r.workspace && s.startedAt === r.startedAt && s.endedAt === r.endedAt, "supervisor custody mismatch");
   requireThat(stream.filter(x => x.type === "thread.started").length === 1 && stream.find(x => x.type === "thread.started")?.thread_id === r.nativeId, "stream native identity mismatch");
-  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type)), "native stream failed");
+  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type) || x.item?.type === "error" || x.status === "failed" || x.item?.status === "failed" || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.status !== undefined && x.item.status !== "completed")), "native stream failed");
   requireThat(stream.every(x => (x.thread_id === undefined || x.thread_id === r.nativeId) && (x.model === undefined || x.model === m.model) && (x.effort === undefined || x.effort === r.effort)), "conflicting stream identity/model/effort");
   const meta = rollout.filter(x => x.type === "session_meta");
   requireThat(meta.length === 1 && rollout[0] === meta[0] && meta[0].payload?.id === r.nativeId && meta[0].payload?.cwd === r.workspace, "rollout native custody mismatch");
   const counters: { at: number; usage: Usage }[] = [];
   let contexts = 0, completed = 0, previousAt = r.startedAt;
+  const aborts:number[]=[];
   const calls = new Map<string, { name: string; arguments: string }>();
   const outputs = new Map<string, string>();
   for (const row of rollout) {
@@ -179,7 +183,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       counters.push({ at: timestamp, usage: u });
     }
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) completed++;
-    if (row.type === "event_msg" && ["error", "turn_aborted"].includes(p?.type ?? "") && (r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)) throw Error("native turn failed before controlled stop");
+    if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
+    if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
     if (row.type === "response_item" && p?.type === "function_call") {
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
@@ -242,6 +247,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
+    requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
     requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS && s.final.at - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {
       requireThat(s.timeBudget !== null && s.tokenBudget === null && s.stopAt! - r.startedAt >= 50000 && s.stopAt! - r.startedAt <= 50000 + STOP_POLL_GRACE_MS, "original 25s estimate/50s stop required");
