@@ -158,3 +158,11 @@ test('ordinary board answers never count as autonomy owner decisions',()=>{
  const rows=[event('ordinary','owner-answer',1,{id:'ordinary-question',answer:'yes'}),event('autonomy','owner-answer',2,{id:'autonomy:bounded-question',answer:'hold'})];
  const m=autonomyMetrics(rows,{from:0,to:3});expect(m.decisions.owner).toEqual({observed:1,eventIds:['autonomy']});expect(m.rejectedEventIds).toEqual([]);
 });
+
+
+test('continuations retain separate failure episodes and bound each response to its attempt',()=>{
+ const rows=[event('halt:first','worker-halt',10,{id:'s'}),event('diagnosis:first','failure-classified',11,{session:'s'}),event('escalated:first','autonomy-owner-decision',20,{payload:{session:'s'}}),event('continued','session-continuation',30,{id:'s'}),event('halt:second','worker-halt',40,{id:'s'}),event('duplicate:second','worker-exit',41,{id:'s',ok:false})];
+ expect(autonomyMetrics(rows,{from:35,to:50}).failureResponses).toEqual([{session:'s',failedAt:40,failureEventId:'halt:second',response:null,responseEventId:null,respondedAt:null,latencyMs:null}]);
+ expect(autonomyMetrics(rows,{from:0,to:50}).failureResponses).toHaveLength(2);
+ const later=[...rows,event('escalated:second','autonomy-owner-decision',45,{payload:{session:'s'}})];const episodes=autonomyMetrics(later,{from:0,to:50}).failureResponses;expect(episodes.map(e=>e.responseEventId)).toEqual(['escalated:first','escalated:second']);expect(episodes.map(e=>e.latencyMs)).toEqual([10,5]);
+});

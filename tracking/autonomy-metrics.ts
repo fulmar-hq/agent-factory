@@ -100,18 +100,20 @@ export function autonomyMetrics(rows: readonly ControllerEvent[], window: Metric
 
   // Prefer the first actual failure receipt, not the later classification time.
   // Retain unresolved failures and never turn elapsed waiting into a response.
-  const failures = new Map<string, Decoded>();
+  const failures = new Map<string, {session:string;failure:Decoded;until?:number}>();
+  const current = new Map<string,string>();
   for (const e of events) {
+    const session = sessionOf(e);
+    if(e.kind==='session-continuation'&&session){const key=current.get(session);if(key)failures.get(key)!.until=e.at;current.delete(session);continue;}
     const isFailure = e.kind === 'worker-failure' || e.kind === 'worker-halt' ||
       e.kind === 'failure-classified' || (e.kind === 'worker-exit' && e.data.ok === false);
     if (!isFailure) continue;
-    const session = sessionOf(e);
     if (!session) { rejected.add(e.id); continue; }
-    if (!failures.has(session)) failures.set(session, e);
+    if(!current.has(session)){current.set(session,e.id);failures.set(e.id,{session,failure:e});}
   }
   const failureResponses: FailureLatency[] = [];
-  for (const [session, failure] of failures) {
-    const response = events.find(e => e.at >= failure.at && (
+  for (const {session,failure,until} of failures.values()) {
+    const response = events.find(e => e.at >= failure.at && (until===undefined||e.at<until) && (
       (e.kind === 'automatic-retry-approved' && e.data.session === session) ||
       (e.kind === 'autonomy-owner-decision' && object(e.data.payload) &&
         (e.data.payload.session === session ||
@@ -131,7 +133,7 @@ export function autonomyMetrics(rows: readonly ControllerEvent[], window: Metric
   }
   const reservations = valid('reservation', d => nonempty(d.repo) && Number.isInteger(d.number));
   const progress = inside.filter(e => reservations.includes(e) ||
-    (e.kind === 'start-attempt' && nonempty(e.data.id)) ||
+    (['start-attempt','session-continuation'].includes(e.kind) && nonempty(e.data.id)) ||
     (e.kind === 'worker-exit' && e.data.ok === true && nonempty(e.data.id)) || publications.includes(e));
   // Sparse UTC hour buckets bound output by evidence, even for long windows.
   const buckets = new Map<number, ProgressHour>();
