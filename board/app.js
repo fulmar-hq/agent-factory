@@ -157,15 +157,20 @@
       return '<div class="meter"><div class="meter-label">' + esc(t(label)) + '</div><div class="meter-value num">' + value + '</div>' +
         (pct === null ? '' : bar(pct, tone)) + '<div class="meter-sub num">' + sub + '</div></div>';
     }
+    function readingStatus(reading) {
+      var label = reading.freshness === 'stale' ? '<span class="pill quiet">' + esc(t('staleReading')) + '</span>' : reading.freshness === 'unknown' ? esc(t('unknownReading')) : '';
+      return label + (reading.ageSeconds === null || reading.ageSeconds === undefined ? '' : (label ? ' · ' : '') + esc(t('observedAgo', {d: reading.ageSeconds < 60 ? t('underMinute') : dur(Math.floor(reading.ageSeconds / 60))})));
+    }
     var meters = data.usage.map(function (u) {
       var reset = u.resetsAt ? new Intl.DateTimeFormat(S.lang === 'fr' ? 'fr-CA' : 'en-CA', { weekday: 'short' }).format(u.resetsAt) : '';
-      return meter(u.provider, u.percent === null ? '—' : u.percent + ' %', u.percent === null ? 0 : u.percent,
-        (u.tone === 'warn' || u.tone === 'bad' ? '<span class="pill ' + pillTone(u.tone) + '">' + esc(t(u.tone === 'bad' ? 'atLimit' : 'high')) + '</span>' : '') + esc(u.percent === null ? t('notAvailable') : t('resets', { d: reset, t: localTime(u.resetsAt) })), u.tone);
+      return meter(u.provider, u.percent === null ? '—' : u.percent + ' %', u.percent,
+        (u.tone === 'warn' || u.tone === 'bad' ? '<span class="pill ' + pillTone(u.tone) + '">' + esc(t(u.tone === 'bad' ? 'atLimit' : 'high')) + '</span>' : '') + readingStatus(u) +
+        (u.percent !== null && u.freshness === 'fresh' ? ' · ' + esc(t('resets', { d: reset, t: localTime(u.resetsAt) })) : ''), u.tone);
     }).join('');
     return '<section class="band"><div class="status" aria-live="polite"><h1><span class="dot ' + dot + '" aria-hidden="true"></span>' + esc(data.hero.title) +
       ' <span class="soft">' + esc(data.hero.soft) + '</span></h1><div class="status-line"><p class="lede">' + esc(data.questions.length ? data.hero.lede : t('nothingNeeds')) + '</p></div></div><div class="meters">' + meters +
-      meter('aws', (data.aws.dollars === null ? '—' : money(data.aws.dollars.toFixed(2))) + ' <span class="unit">' + esc(t('of')) + ' ' + money(data.aws.ceiling) + '</span>', data.aws.dollars === null ? 0 : Math.round(data.aws.dollars / data.aws.ceiling * 100),
-        data.aws.stopped ? '<span class="pill bad">' + esc(t('awsStopped')) + '</span>' : esc(data.aws.dollars === null ? t('notAvailable') : t('today')), data.aws.tone) +
+      meter('aws', (data.aws.dollars === null ? '—' : money(data.aws.dollars.toFixed(2))) + ' <span class="unit">' + esc(t('of')) + ' ' + money(data.aws.ceiling) + (data.aws.percent === null ? '' : ' · ' + data.aws.percent + ' %') + '</span>', data.aws.percent,
+        (data.aws.stopped ? '<span class="pill bad">' + esc(t('awsStopped')) + '</span> · ' : '') + readingStatus(data.aws), data.aws.tone) +
       meter('nextRelease', localTime(data.nextRelease.at) + ' <span class="unit">' + esc(t(data.nextRelease.name === 'QA' ? 'test' : 'live')) + '</span>', null,
         localTime(data.nextLiveAt) + ' ' + esc(t('live'))) + '</div></section>';
   }
@@ -388,6 +393,10 @@
   });
 
   STR.en.notAvailable = 'not available'; STR.fr.notAvailable = 'non disponible';
+  STR.en.staleReading = 'Stale'; STR.fr.staleReading = 'Périmé';
+  STR.en.unknownReading = 'Unknown'; STR.fr.unknownReading = 'Inconnu';
+  STR.en.observedAgo = 'Observed {d} ago'; STR.fr.observedAgo = 'Relevé il y a {d}';
+  STR.en.underMinute = 'less than 1 min'; STR.fr.underMinute = 'moins de 1 min';
   STR.en.gReview = 'Needs a reviewer'; STR.fr.gReview = 'À réviser';
   STR.en.noEstimate = 'no estimate'; STR.fr.noEstimate = 'aucune estimation';
   STR.en.usedUnknown = '{u} · no estimate'; STR.fr.usedUnknown = '{u} · aucune estimation';
