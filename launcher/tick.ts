@@ -107,10 +107,11 @@ export async function tick(dir = root) {
     }
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
-    try {const renewal=scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
+    const evaluateRenewal=()=>{try {const renewal=scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
       mkdirSync(join(dir,"logs"),{recursive:true,mode:0o700});const fd=openSync(join(dir,"logs",`codex-renewal-${id}.log`),"ax",0o600);
       try{const child=Bun.spawn([process.execPath,join(import.meta.dir,"../scripts/renew-codex.ts"),id],{env:{...process.env,FACTORY_PRIVATE_DIR:dir},detached:true,stdin:"ignore",stdout:fd,stderr:fd});child.unref();}finally{closeSync(fd);}
-    });s.set("codex-renewal-evaluation",renewal);}catch(error){s.set("codex-renewal-evaluation",{state:"refused",at:Date.now(),nextCheckAt:Date.now()+60000,error:String(error)});s.event(crypto.randomUUID(),"codex-renewal-scheduler-refusal",{error:String(error)},"Retain refusal; qualification and capacity gates remain closed");}
+    });s.set("codex-renewal-evaluation",renewal);}catch(error){s.set("codex-renewal-evaluation",{state:"refused",at:Date.now(),nextCheckAt:Date.now()+60000,error:String(error)});s.event(crypto.randomUUID(),"codex-renewal-scheduler-refusal",{error:String(error)},"Retain refusal; qualification and capacity gates remain closed");}};
+    evaluateRenewal();
 
     observeBilling(s, c, r.billing, now);
     await autonomyEffects(s,()=>reconcileBrowsers(e,dir,nativeBrowserPorts(e,dir,id=>spawnSupervisor(id,dir)),Date.now()));
@@ -140,6 +141,9 @@ export async function tick(dir = root) {
       join(dir, "repositories.json"),
     )) ?? {}) as Record<string, string>;
     const refusals: { ticket: string; reason: string }[] = [];
+    // Reconciliation may outlive a worker cohort. Reserve renewal before new
+    // ordinary claims consume the slots that became free during those reads.
+    evaluateRenewal();
     let claimed = 0;
     for (const t of ready) {
       try {
