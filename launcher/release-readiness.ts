@@ -6,6 +6,7 @@ import {command} from '../adapters/github';
 import {mailPath} from './alerts';
 import {type Config,type Meter,QualificationSchema,optionalJSON} from './config';
 import {usageGate} from './engine';
+import {acceptanceProfile} from './acceptance-profile';
 import {deadlineAt,toronto} from './release';
 import {processIdentity} from './process';
 import type {Store} from '../tracking/store';
@@ -45,6 +46,8 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
  const now=o.now??Date.now(),day=toronto(now).day,validThrough=deadlineAt(now,1350);
  const report:ReleaseReadiness={day,at:now,validThrough,ready:false,missing:[],evidence:{}};
  const execute=o.execute??command,readJSON=o.readJSON??optionalJSON;
+ let effectiveQuality=o.config.owners.quality;
+ try{effectiveQuality=(await acceptanceProfile(o.config,o.dir,day,validThrough,readJSON)).role;}catch(error){report.missing.push({input:'quality qualification',reason:String(error)});}
  const missing=(input:string,reason:string)=>report.missing.push({input,reason});
  const check=async(input:string,f:()=>unknown|Promise<unknown>)=>{try{report.evidence[input]=await f();}catch(error){missing(input,String(error));}};
  const api=async(path:string)=>JSON.parse(await execute(['gh','api','--method','GET',`repos/${repo}/${path}`]));
@@ -67,7 +70,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
    const raw=await readJSON(join(o.dir,'qualifications.json'));
    const receipts:Record<string,unknown>={};
    for(const owner of ['release','quality']){
-    const role=o.config.owners[owner];
+    const role=owner==='quality'?effectiveQuality:o.config.owners[owner];
     if(!role){missing(`${owner} qualification`,'owner is not configured');continue;}
     const data=record(raw)?raw[`${role.harness}:${role.effort}`]??raw[role.harness]:undefined;
     const q=QualificationSchema.safeParse(data);
@@ -79,7 +82,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
   check('owner usage',async()=>{
    const raw=await readJSON(join(o.dir,'readings.json'));
    for(const owner of ['release','quality']){
-    const role=o.config.owners[owner];if(!role)continue;
+    const role=owner==='quality'?effectiveQuality:o.config.owners[owner];if(!role)continue;
     try{usageGate(o.readings?.[role.harness]??(record(raw)?raw[role.harness]:undefined),false,now,o.config,role.harness);}
     catch(error){missing(`${owner} usage`,String(error));}
    }
@@ -101,9 +104,9 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
   check('hosted acceptance path',async()=>{
    // A qualified CLI owner is not proof that it can inspect the hosted app
    // and return a receipt through this release's trusted ingestion path.
-   const p=await readJSON(join(o.dir,'release-quality-path.json')),role=o.config.owners.quality;
-   if(!role||!record(p)||p.version!==1||p.qualified!==true||p.provider!==role.harness||p.model!==role.model||p.effort!==role.effort||!Number.isSafeInteger(p.expiresAt)||Number(p.expiresAt)<=validThrough||typeof p.source!=='string'||!/^[a-f0-9]{40}$/.test(p.source)||p.source!==o.factorySource||typeof p.evidence!=='string'||!p.evidence.trim()||p.browser!==true||p.receiptIngestion!==true)throw Error('current configured Quality hosted browser and receipt path has no valid qualification through 22:30');
-   return {provider:p.provider,model:p.model,effort:p.effort,source:p.source,expiresAt:p.expiresAt,evidence:p.evidence,browser:true,receiptIngestion:true};
+   const p=await readJSON(join(o.dir,'release-quality-path.json')),role=effectiveQuality;
+   if(!role||!record(p)||p.version!==1||p.qualified!==true||p.provider!==role.harness||p.model!==role.model||p.effort!==role.effort||!Number.isSafeInteger(p.expiresAt)||Number(p.expiresAt)<=validThrough||typeof p.source!=='string'||!/^[a-f0-9]{40}$/.test(p.source)||p.source!==o.factorySource||typeof p.evidence!=='string'||!p.evidence.trim()||p.hostedHttp!==true||p.receiptIngestion!==true)throw Error('current configured Quality hosted HTTP and receipt path has no valid qualification through 22:30');
+   return {provider:p.provider,model:p.model,effort:p.effort,source:p.source,expiresAt:p.expiresAt,evidence:p.evidence,hostedHttp:true,receiptIngestion:true};
   }),
   check('release holds',async()=>{
    const [variable,issue]=await Promise.all([api('actions/variables/QA_HOLD'),api('issues/1192')]);
@@ -154,7 +157,7 @@ export function releasePreflightAlert(s:Store,r:ReleaseReadiness,now=Date.now(),
   'factory state':'the factory to be ready','AWS sign-in':'an AWS sign-in lasting past 10:30 PM',
   'disk space':'enough disk space','quality qualification':'a qualified independent tester',
   'release qualification':'a qualified release runner','quality usage':'a fresh usage reading for the tester',
-  'release usage':'a fresh usage reading for the release runner','hosted acceptance path':'working browser tests and acceptance',
+  'release usage':'a fresh usage reading for the release runner','hosted acceptance path':'working hosted tests and acceptance',
   'Quality runner':'an available independent tester','release holds':'the release holds resolved',
   'PR checks':"passing checks for tonight's changes",'preflight checks':'working release checks',
   'release configuration':'a working release setup',

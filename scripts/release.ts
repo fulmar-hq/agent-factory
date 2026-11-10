@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import {releaseWindowResult,readQaServerStates} from '../launcher/release-result';
 import {releaseAvailable,observeReleaseBilling} from '../wallet/release';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
@@ -90,4 +91,9 @@ try {
   catch(alertError){s.event(`executor-alert-failed:${day}`,'release-preflight-alert-failure',{error:String(alertError)},'Restore existing Alido Mail outbox; retain failed delivery evidence');}
  }
  console.error(String(error));process.exitCode=1;
-}finally{s.close();}
+}finally{
+ if(stage==='reconcile')try{
+  await releaseWindowResult(s,{observeServers:()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'})});
+ }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
+ s.close();
+}
