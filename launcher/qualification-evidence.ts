@@ -6,7 +6,7 @@ import {z} from 'zod';
 import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
 import {QualificationSchema,type Qualification} from './config';
-import {collectCodexRenewalEvidence} from './codex-renewal-evidence';
+import {collectCodexRenewalEvidence,nativeFailure,probeInvocation,securityChecks} from './codex-renewal-evidence';
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 function regular(path:string){const fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);try{const s=fstatSync(fd);if(!s.isFile()||s.size===0||s.size>16*1024*1024)throw Error('bounded nonempty regular evidence required');return readFileSync(fd,'utf8');}finally{closeSync(fd);}}
 const adoptionSchema=z.object({expiresAt:z.number().int().positive(),report:z.string(),rows:z.array(z.object({effort:z.enum(['medium','high']),mode:z.enum(['security','time','token']),native:z.string().uuid(),receipt:z.string()})).length(6)});
@@ -38,6 +38,15 @@ export function qualificationEvidenceVerified(provider:string,q:Qualification,qu
    }
    const receipt=new NativeReceipt('codex',row.native,join(dir,row.effort,row.mode,'workspace'),homedir(),r.session.started),accounting=new WorkerAccounting();for(let i=0;i<64;i++){receipt.poll(accounting);if(receipt.caughtUp)break;}
    const evidence=receipt.evidence(q.model,row.effort);if(!evidence.verified||evidence.path!==r.native.path||accounting.tokens<=0)return false;
+   const rollout=regular(evidence.path!).trim().split('\n').map(line=>JSON.parse(line) as Record<string,unknown>);
+   const stream=regular(join(dir,row.effort,row.mode,'native.jsonl')).trim().split('\n').filter(line=>line.trim().startsWith('{')).map(line=>JSON.parse(line) as {type?:string;item?:{type?:string;command?:string;exit_code?:number;aggregated_output?:string};usage?:unknown});
+   if(rollout.some(nativeFailure)||stream.some(nativeFailure))return false;
+   if(row.mode==='security'){
+    if(stream.filter(x=>x.type==='turn.completed').length!==1||rollout.filter(x=>x.type==='event_msg'&&(x.payload as {type?:string})?.type==='task_complete').length!==1)return false;
+    const successes=stream.filter(x=>x.type==='item.completed'&&x.item?.type==='command_execution'&&x.item.exit_code===0&&probeInvocation(x.item.command??'',join(dir,row.effort,row.mode,'workspace'),join(dir,row.effort,row.mode,'workspace/probe.py'))).filter(x=>{try{const result=JSON.parse(x.item!.aggregated_output!.trim().split('\n').at(-1)!);return securityChecks.every(key=>result[key]===true);}catch{return false;}});
+    if(successes.length!==1)return false;
+   }else if(stream.some(x=>x.type==='turn.completed'))return false;
+
   }
   return true;
  }catch{return false;}
