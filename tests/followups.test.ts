@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { launchReady } from "../launcher/tick";
 import { TicketSchema } from "../launcher/config";

@@ -1,3 +1,7 @@
+import {diskReading,observeDisk} from "./disk";
+import { resolveQuestions } from "./questions";
+import {claimableReady,reviewPublished} from './queue';
+import {observeClaimProgress} from './watchdog';
 import { memoryPressure, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
@@ -17,8 +21,11 @@ import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
-import { qualificationAlerts } from "./alerts";
-export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id: string) => void, execute = command, clock = Date.now) {
+import {qualificationAlerts,watchdogAlert,diskCapacityAlert,healthOwnsAlerts} from "./alerts";
+import { reconcileBrowsers } from "./browser";
+import { nativeBrowserPorts } from "../adapters/browser";
+import { qualificationFor } from "./usage-push-policy";
+export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifications?: unknown }, spawn: (id: string) => void, execute = command, clock = Date.now) {
   if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
   const retryNoPr: string[] = [];
@@ -30,7 +37,9 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission, spawn: (id
   await validateIntake(t, execute);
   // No await between fresh validation and the atomic reservation/spawn attempt.
   const session = e.s.atomic(() => {
-    const session = e.admit(t, { ...a, retryNoPr, now: clock() });
+    const now = clock();
+    const qualification = Object.hasOwn(a, "qualifications") ? qualificationFor(a.qualifications, e.c, t, now) : a.qualification;
+    const session = e.admit(t, { ...a, qualification, retryNoPr, now });
     if (!e.claimStart(session.id)) throw Error("start refused");
     spawn(session.id);
     return session;
@@ -59,9 +68,11 @@ export async function tick(dir = root) {
   try {
     const e = new Engine(s, c),
       now = Date.now();
+    observeDisk(s,diskReading(dir,now));
+    diskCapacityAlert(s,now);
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
-    qualificationAlerts(s, qualifications, now);
+    if(!healthOwnsAlerts(dir,now))qualificationAlerts(s, qualifications, now);
     localWakes(s,c,[],qualifications,now);
     recoverWorkers(e,now);
     const versions: Record<string, string> = { bun: Bun.version };
@@ -94,23 +105,25 @@ export async function tick(dir = root) {
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     observeBilling(s, c, r.billing, now);
+    await autonomyEffects(s,()=>reconcileBrowsers(e,dir,nativeBrowserPorts(e,dir,id=>spawnSupervisor(id,dir)),Date.now()));
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
     expireDecisions(s,now);
     failures(e,now);
-    let ready = await reconcile(s, c, now);
+    let autoResolved = resolveQuestions(e,now);
+    let observed = await reconcile(s,c,now);
+    if(await reviewPublished(e))observed=await reconcile(s,c,now);
+    let ready = claimableReady(e,observed);
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
-      ready=await reconcile(s,c,now);
-      const count=await autoApprove(e,ready,r.billing,now);
-      if(count)ready=await reconcile(s,c,now);
-      supply(e,ready,now);
+      ready=claimableReady(e,await reconcile(s,c,now));
+      const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
+      if(count)ready=claimableReady(e,await reconcile(s,c,now));
       return count;
     }) ?? 0 : 0;
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
     catch(error){ownerReconciled=false;s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
-    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
     if(ownerReconciled && Object.values(c.projects).every(p=>{
       const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
     }))s.set("last-successful-reconciliation",Date.now());
@@ -132,7 +145,7 @@ export async function tick(dir = root) {
           now: Date.now(),
           meter: r[t.provider],
           billing: r.billing,
-          qualification: qualifications[t.provider],
+          qualifications,
           recoverUsage: true,
         }, (id) => spawnSupervisor(id, dir));
         s.db
@@ -146,9 +159,16 @@ export async function tick(dir = root) {
           .run(String(error), `${t.repo}#${t.number}`);
       }
     }
+    // Observe actual admission outcomes: refused ready labels cannot conceal idle.
+    await autonomyEffects(s,async()=>supply(e,ready,Date.now(),{claimed,refusals}));
+    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
+    autoResolved += resolveQuestions(e);
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
-      paused: s.get("paused") === true, autoApproved, claimed, refusals };
+      paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
+    observeClaimProgress(e,heartbeat);
+    watchdogAlert(s,heartbeat.at);
     s.set("heartbeat", heartbeat);
+    s.set("last-successful-heartbeat",heartbeat);
     return heartbeat;
   } finally {
     s.close();
