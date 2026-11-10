@@ -25,3 +25,16 @@ test('late-page failure publishes neither partial tickets nor owner events',asyn
 test('malformed, repeated and missing cursors, GraphQL errors and changed totals refuse',async()=>{
  for(const scenario of ['missing','repeated','total','duplicate','errors','nested']){let n=0;await expect(githubPages('example/demo','issues',async()=>{n++;const raw=JSON.parse(githubPage('issues',[issue(scenario==='duplicate'?1:n)],{total:scenario==='total'?n+2:3,next:true,cursor:scenario==='missing'?null:'same'}));if(scenario==='errors')raw.errors=[{message:'partial'}];if(scenario==='nested')raw.data.repository.issues.nodes[0].labels.pageInfo.hasNextPage=true;return JSON.stringify(raw);})).rejects.toThrow();expect(n).toBeLessThanOrEqual(2);}
 });
+
+test('issue and PR URL identities must exactly match node number before any effects',async()=>{
+ for(const kind of ['issues','pullRequests'] as const){
+  const s=new Store(':memory:');s.set('owner-github-primed:example/demo',true);
+  const rows=kind==='issues'?[issue(1),{...issue(2),url:issue(1).url}]:[pr(1),{...pr(2),url:pr(1).url}];
+  const execute=async()=>githubPage(kind,rows);
+  try{
+   await expect(githubPages('example/demo',kind,execute)).rejects.toThrow('identity mismatch');
+   if(kind==='issues'){expect(await reconcile(s,config(),now,execute)).toEqual([]);expect(s.rows('tickets')).toEqual([]);}
+   else {await expect(githubWakes(s,config(),execute,now)).rejects.toThrow('identity mismatch');expect(s.get('board-pulls:example/demo')).toBeNull();expect(pendingWakes(s)).toEqual([]);}
+  }finally{s.close();}
+ }
+});

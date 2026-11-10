@@ -32,7 +32,7 @@ export async function githubPages(repo:string,kind:'issues'|'pullRequests',execu
   if(total!==undefined && total!==page.totalCount)throw Error('GitHub pagination total changed');
   total=page.totalCount;
   for(const node of page.nodes) {
-   if(numbers.has(node.number) || !node.url.startsWith(`https://github.com/${repo}/${kind==='issues'?'issues':'pull'}/`))throw Error('GitHub pagination identity mismatch');
+   if(numbers.has(node.number) || node.url!==`https://github.com/${repo}/${kind==='issues'?'issues':'pull'}/${node.number}`)throw Error('GitHub pagination identity mismatch');
    numbers.add(node.number);
    if('labels' in node) {
     if(node.labels.pageInfo.hasNextPage)throw Error('GitHub issue labels truncated');
