@@ -9,6 +9,7 @@ import {Engine,claimPath} from './engine';
 import {Store} from '../tracking/store';
 import {queueWake,type Wake} from './wake';
 import {slotLimit} from './capacity';
+import {readyBuffer} from './usage-push-policy';
 import {observeSupplyIdle,type SupplyObservation} from './supply-idle';
 import {command,approveIntake,intakeLabel,issueTicket,type Issue} from '../adapters/github';
 import {branchFor,executableTest} from '../adapters/delivery';
@@ -70,7 +71,7 @@ export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObs
  const unclaimed=ready.filter(t=>!refused.has(`${t.repo}#${t.number}`) && !sessions.some(x=>x.ticket===`${t.repo}#${t.number}` && x.approval_digest===t.approvalDigest));
  const idle=observation ? observeSupplyIdle(e,unclaimed.length,now,observation,alertPath) : null;
  const idleDue=!!idle && !idle.wake && now-idle.since>=p.idle_wake_minutes*60000;
- const target=slotLimit(e.s,e.c)+p.ready_buffer;
+ const target=slotLimit(e.s,e.c)+readyBuffer(e.c,now);
  let round=e.s.get<IntakeRound>('intake-round');
  const markIdleWake=(wake:string)=>{
   if(!idleDue)return;
