@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync, cpSync, lstatSync } from "node:fs";
 import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -27,6 +27,36 @@ export function localizeDependencies(workspace:string, source:string, archive:st
     }
   };
   visit(deps);
+  const verify=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const path=join(dir,entry.name);
+    if(entry.isSymbolicLink()) {
+      const tail=relative(deps,realpathSync(path));
+      if(tail.startsWith("..") || isAbsolute(tail))throw Error("dependency link resolves outside copied install");
+    } else if(entry.isDirectory())verify(path);
+  }};verify(deps);
+}
+
+// Native macOS cp requests APFS copy-on-write; portable COPYFILE_FICLONE
+// falls back to an ordinary independent copy on other filesystems. Never use hardlinks/shared Git objects.
+export async function copyDependencies(source:string, target:string, io = {cpSync,lstatSync,readdirSync,realpathSync,existsSync}, execute=command, platform:NodeJS.Platform=process.platform) {
+  if(io.realpathSync(source)!==resolve(source) || io.lstatSync(source).isSymbolicLink())throw Error("dependency root must be local");
+  if(io.existsSync(target))throw Error("dependency copy target already exists");
+  if(platform==="darwin")await execute(["cp","-cR",source,target]);
+  else io.cpSync(source,target,{recursive:true,mode:constants.COPYFILE_FICLONE,
+    dereference:false,verbatimSymlinks:true,force:false,errorOnExist:true});
+  verifyDependencyObjects(target,io);
+}
+export function verifyDependencyObjects(target:string, io = {lstatSync,readdirSync,realpathSync}) {
+  if(!io.lstatSync(target).isDirectory() || io.realpathSync(target)!==resolve(target))throw Error("shared dependency root refused");
+  const visit=(dir:string)=>{
+    for(const entry of io.readdirSync(dir,{withFileTypes:true})) {
+      const path=join(dir,entry.name),stat=io.lstatSync(path);
+      if(stat.isDirectory())visit(path);
+      else if(stat.isFile() && stat.nlink!==1)throw Error("shared writable dependency object refused");
+      else if(!stat.isFile() && !stat.isSymbolicLink())throw Error("special dependency object refused");
+    }
+  };
+  visit(target);
 }
 
 export const deliveryRepo = "fulmar-hq/alido";
@@ -105,9 +135,18 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   }
   if (!existsSync(join(workspace,"node_modules"))) {
     if (!existsSync(join(source,"node_modules"))) throw Error("installed dependencies missing");
-    await command(process.platform === "darwin" ? ["cp","-cR",join(source,"node_modules"),join(workspace,"node_modules")] : ["cp","-R",join(source,"node_modules"),join(workspace,"node_modules")]);
+    await copyDependencies(join(source,"node_modules"),join(workspace,"node_modules"));
   }
+  verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
+  const metadata=join(workspace,".git");
+  if(realpathSync(metadata)!==metadata || existsSync(join(metadata,"commondir")) || existsSync(join(metadata,"objects/info/alternates")))throw Error("standalone worker Git required");
+  const checkGit=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const path=join(dir,entry.name),stat=lstatSync(path);
+    if(stat.isSymbolicLink() || (stat.isFile() && stat.nlink!==1))throw Error("shared writable worker Git object refused");
+    if(stat.isDirectory())checkGit(path);
+  }};checkGit(metadata);
+  if((await git("branch","--show-current")).trim()!==branchFor(id))throw Error("worker branch mismatch");
   const exclude=join(workspace,".git/info/exclude");
   const {appendFileSync}=await import("node:fs");
   appendFileSync(exclude,"\n.factory-tmp/\n.factory-delivery.bundle\n");
@@ -194,7 +233,10 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   const base=t.repo===deliveryRepo ? "QA" : "main";
   const existing=JSON.parse(await execute(["gh","pr","list","--repo",t.repo,"--head",branch,"--base",base,"--json","url"]));
   const url=existing[0]?.url ?? (await execute(["gh","pr","create","--repo",t.repo,"--base",base,"--head",branch,"--title",t.title,"--body",`refs #${t.number}\nLauncher tested tree: ${tree}\nLauncher signed commit: ${signed}`])).trim();
-  return {head:signed,tree,url,branch,repo:t.repo};
+  const result={head:signed,tree,url,branch,repo:t.repo};
+  const {verifyPublished}=await import("../launcher/delivery-retention");
+  await verifyPublished(result,execute);
+  return result;
 }
 
 // Tests run in the worker boundary, never with launcher credentials. The caller
@@ -204,7 +246,7 @@ export async function testSnapshot(t:Ticket, checkout:string, tree:string, sourc
   assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
-    await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);
+    await copyDependencies(join(source,"node_modules"),join(checkout,"node_modules"));
     localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
   }
   // Tests retain scratch receipts (including Vitest's local token). They are
