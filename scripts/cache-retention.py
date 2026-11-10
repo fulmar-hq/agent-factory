@@ -46,13 +46,14 @@ def quiet(paths):
     before = processes()
     if before is None:
         return False
-    files = command(['/usr/sbin/lsof', '-nP', '-a', '-u', str(os.getuid()), '-Fpcfn'])
+    files = command(['/usr/sbin/lsof', '-nP', '-a', '-u', str(os.getuid()), '-Fpcftn'])
     if not files.startswith('p') or not files.endswith('\n'):
         raise RuntimeError('empty or truncated file inventory')
     seen = set()
     pid = None
     cmd = False
     descriptor = None
+    kind = None
     named = False
     cwd = False
     def finish_file():
@@ -69,7 +70,7 @@ def quiet(paths):
             finish_process()
             if not re.fullmatch(r'p[1-9][0-9]*', line):
                 raise RuntimeError('partial file process identity')
-            pid, cmd, descriptor, named, cwd = int(line[1:]), False, None, False, False
+            pid, cmd, descriptor, kind, named, cwd = int(line[1:]), False, None, None, False, False
         elif line.startswith('c'):
             if pid is None or cmd or descriptor is not None or len(line) < 2:
                 raise RuntimeError('partial file command')
@@ -78,9 +79,17 @@ def quiet(paths):
             finish_file()
             if not cmd or not re.fullmatch(r'f(?:cwd|rtd|txt|mem|DEL|[0-9]+[a-z]*)', line):
                 raise RuntimeError('unavailable descriptor inventory')
-            descriptor, named = line[1:], False
+            descriptor, kind, named = line[1:], None, False
+        elif line.startswith('t'):
+            if descriptor is None or kind is not None or len(line) < 2:
+                raise RuntimeError('partial descriptor type')
+            kind = line[1:]
         elif line.startswith('n'):
-            if descriptor is None or len(line) < 2 or re.search(r'\([^)]*(?:Permission denied|Operation not permitted|opendir:|readlink:|stat:|error:)', line, re.I):
+            # Darwin proc_info.h distinguishes PIPE/NETPOLICY/NEXUS from
+            # VNODE. lsof emits an explicit empty name for these kernel handles;
+            # they cannot be cache files. Unknown/vnode/cwd names still refuse.
+            unnamed_kernel = line == 'n' and descriptor is not None and descriptor.isdigit() and kind in {'PIPE', 'NPOLICY', 'NEXUS'}
+            if descriptor is None or (len(line) < 2 and not unnamed_kernel) or re.search(r'\([^)]*(?:Permission denied|Operation not permitted|opendir:|readlink:|stat:|error:)', line, re.I):
                 raise RuntimeError('unavailable descriptor name')
             named = True
             cwd = cwd or descriptor == 'cwd'

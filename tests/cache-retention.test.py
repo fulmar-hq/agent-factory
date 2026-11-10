@@ -42,6 +42,10 @@ class Safety(unittest.TestCase):
   def run(files,process=ps):
    with patch.object(m,'command',side_effect=[process,files,process]):return m.quiet([self.repo])
   self.assertTrue(run(complete))
+  for kind in ['PIPE','NPOLICY','NEXUS']:
+   self.assertTrue(run(complete+f'f9\nt{kind}\nn\n'))
+  for kind in ['REG','DIR','unknown']:
+   with self.assertRaises(RuntimeError):run(complete+f'f9\nt{kind}\nn\n')
   for files in ['p4242\nn/proc/4242/fd (opendir: Permission denied)\n','p4242\ncpython3\nf0\nn/dev/null\n',complete[:-1],complete.replace('n/dev/null','n/proc/fd (stat: Permission denied)'),complete.replace('fcwd\nn/other\n','')]:
    with self.assertRaises(RuntimeError):run(files)
   with patch.object(m,'command',side_effect=['partial\n']):
