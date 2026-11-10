@@ -17,7 +17,7 @@ export function checkClaimStall(e:Engine,now:number) {
  return e.s.atomic(()=>{
   const p=e.s.get<ClaimProgress>('claim-progress');
   const old=e.s.get<{id:string;state:string}>('watchdog-stall');
-  const stalled=p && p.free && p.claimed===0 && e.s.get('paused')===false && e.slots().free>0 && now>=p.since+7200000;
+  const stalled=p && p.free && e.s.get('paused')===false && e.slots().free>0 && now>=p.since+7200000;
   if(stalled){
    if(old?.state==='open')return old;
    const incident={id:`claim-stall:${p.since}`,state:'open',since:p.since,at:now,summary:'Factory claimed no work for two hours while capacity was free. Intake and queue reconciliation have not restored starts; inspect refusals and the intake round.',heartbeat:e.s.get('heartbeat'),intake:e.s.get('intake-round')};

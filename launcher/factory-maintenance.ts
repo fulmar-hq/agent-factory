@@ -8,6 +8,7 @@ export type Challenge={pr:number;head:string;ok:boolean;native:{id:string;path:s
 export interface MaintenancePort {
  pulls():Promise<FactoryPull[]>;
  pull(number:number):Promise<FactoryPull>;
+ update?(pull:FactoryPull):Promise<void>;
  challenge(pull:FactoryPull):Promise<Challenge|undefined>;
  verifyChallenge(challenge:Challenge):boolean;
  signed(head:string,tree:string):Promise<boolean>;
@@ -41,8 +42,14 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
   try {
    if(initial.draft){record(initial.number,'draft');continue;}
    const p=await port.pull(initial.number);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
-   const c=await port.challenge(p);if(!acceptedChallenge(c,p)||!port.verifyChallenge(c)){record(p.number,'challenge-needed',undefined,p.head);continue;}
+   if(p.mergeState==='BEHIND'&&p.verify&&port.update){
+    const key=`factory-branch-update:${p.number}:${p.head}`;
+    if(s.get(key)){record(p.number,'branch-update-pending',undefined,p.head);continue;}
+    if(!await port.signed(p.head,p.tree))throw Error('head signature/tree unverified before branch update');
+    s.set(key,{pr:p.number,head:p.head,at:Date.now()});await port.update(p);record(p.number,'branch-update-requested',undefined,p.head);return result;
+   }
    if(p.mergeState!=='CLEAN'||!p.verify){record(p.number,'checks-or-base-blocked',p.mergeState,p.head);continue;}
+   const c=await port.challenge(p);if(!acceptedChallenge(c,p)||!port.verifyChallenge(c)){record(p.number,'challenge-needed',undefined,p.head);continue;}
    if(!await port.signed(p.head,p.tree))throw Error('head signature/tree unverified');
    const fresh=await port.pull(p.number);
    if(fresh.head!==p.head||fresh.tree!==p.tree||fresh.state!=='OPEN'||!fresh.verify||fresh.mergeState!=='CLEAN')throw Error('head/check/base changed before merge');

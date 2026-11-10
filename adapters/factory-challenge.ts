@@ -1,0 +1,63 @@
+import {readFileSync,mkdirSync,writeFileSync,openSync,closeSync,writeSync,existsSync,lstatSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {homedir} from 'node:os';
+import {z} from 'zod';
+import {Store} from '../tracking/store';
+import {configAt,type Ticket} from '../launcher/config';
+import {ownerSpec} from '../launcher/owner';
+import {usageGate} from '../launcher/engine';
+import {builderSlots} from '../launcher/capacity';
+import {qualificationFor} from '../launcher/usage-push-policy';
+import {processIdentity} from '../launcher/process';
+import {spawnWorker} from '../launcher/child';
+import {NativeReceipt} from './native';
+import {WorkerAccounting,verifySubscription} from './workers';
+import {localizeDependencies} from './delivery';
+import {command} from './github';
+import type {FactoryPull,Challenge} from '../launcher/factory-maintenance';
+const reviewSchema=z.object({head:z.string().regex(/^[a-f0-9]{40}$/),verdict:z.enum(['PASS','CHANGES_REQUESTED']),findings:z.array(z.object({severity:z.enum(['P0','P1','P2','P3']),title:z.string().min(1).max(200),file:z.string().min(1).max(300),line:z.number().int().positive(),detail:z.string().min(1).max(6000)}).strict()).max(50),installedGaps:z.array(z.string().max(6000)).max(50),tests:z.array(z.string().max(6000)).max(100)}).strict();
+async function git(args:string[],cwd:string){
+ const env:Record<string,string>={GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_TERMINAL_PROMPT:'0'};
+ for(const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','LANG'])if(process.env[key])env[key]=process.env[key]!;
+ const p=Bun.spawn(['git','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false',...args],{cwd,env,stdin:'ignore',stdout:'pipe',stderr:'pipe'}),timer=setTimeout(()=>p.kill('SIGTERM'),60000);
+ try{const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code!==0)throw Error(`challenge Git operation failed: ${err.slice(0,500)}`);return out;}finally{clearTimeout(timer);}
+}
+// One immutable, credential-free, read-only native reviewer. This is trusted
+// launcher custody, not a worker's self-asserted review or a different GitHub login.
+export async function runFactoryChallenge(s:Store,p:FactoryPull,dir:string,checkout=resolve(import.meta.dir,'..')):Promise<Challenge|undefined>{
+ if(!Number.isSafeInteger(p.number)||p.number<1||!/^[a-f0-9]{40}$/.test(p.head))throw Error('immutable factory PR identity required');
+ const key=`factory-challenge:${p.number}:${p.head}`;
+ if(s.get(key))return;
+ const c=await configAt(join(dir,'config.yaml')),owner=Object.entries(c.owners).find(([,r])=>r.harness==='codex'&&r.model==='gpt-6.1-sol');if(!owner)throw Error('configured Codex owner required');
+ const t:Ticket={repo:'fulmar-hq/agent-factory',number:p.number,owner:owner[0],creator:'launcher',source:`https://github.com/fulmar-hq/agent-factory/pull/${p.number}`,area:'controller',kind:'review',title:'Independent launcher challenge',approved:true,benefit:'high',estimateSeconds:600,estimateTokens:8000000,paths:['.factory-tmp'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort:'medium',test:'Read review.diff and review-contract.md; run focused checks with scratch HOME/TMPDIR; write .factory-tmp/challenge.json.',outcome:''};
+ const gate=()=>{if(s.get('paused')!==false)throw Error('factory paused');const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8'));const q=qualificationFor(raw,c,t,Date.now());if(!q||s.get('codex-renewal-uncertain')===true)throw Error('Codex medium qualification unavailable');usageGate(s.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');return q;};
+ const q=gate();if(q.version!==(await command(['codex','--version'])).trim())throw Error('installed CLI qualification differs');await verifySubscription('codex');
+ const id=crypto.randomUUID(),run=join(dir,'runs','factory-challenges',`${p.number}-${p.head}-${id}`),work=join(run,'source'),scratch=join(work,'.factory-tmp');
+ const claimed=s.atomic(()=>{const lease=s.get<{kind:string;state:string;pid:number}>('launcher-maintenance-lease');if(lease?.kind!=='integration'||lease.state!=='active'||lease.pid!==process.pid)throw Error('integration maintenance custody required');if(s.get(key))return false;const old=s.get<{state:string}>('factory-challenge-slot');if(old&&old.state!=='released')throw Error('prior challenge custody unresolved');gate();if(!builderSlots(s,c).free)return false;s.set(key,{id,state:'starting',pr:p.number,head:p.head,run,at:Date.now()});s.set('factory-challenge-slot',{id,state:'starting',at:Date.now()});return true;});
+ if(!claimed)return;
+ let child:ReturnType<typeof spawnWorker>|undefined,fd:number|undefined,timer:ReturnType<typeof setInterval>|undefined,native:NativeReceipt|undefined,nativeId:string|undefined,stopped=false,done=false;const startedAt=Date.now(),accounting=new WorkerAccounting();let failure:string|undefined;
+ try{
+  mkdirSync(work,{recursive:true,mode:0o700});await git(['init','-q'],work);
+  const main=JSON.parse(await command(['gh','api','repos/fulmar-hq/agent-factory/git/ref/heads/main'])).object.sha as string;if(!/^[a-f0-9]{40}$/.test(main))throw Error('immutable factory base unavailable');
+  await git(['-c','credential.helper=','-c','credential.helper=!gh auth git-credential','fetch','--depth=1','https://github.com/fulmar-hq/agent-factory.git',p.head,main],work);await git(['checkout','--detach',p.head],work);
+  if((await git(['rev-parse','HEAD'],work)).trim()!==p.head)throw Error('review snapshot head differs');
+  for(const path of [scratch,join(work,'node_modules'),join(work,'review.diff'),join(work,'review-contract.md')])if(existsSync(path)||(()=>{try{return lstatSync(path).isSymbolicLink();}catch{return false;}})())throw Error('review scratch/dependency path is already tracked or linked');
+  mkdirSync(join(scratch,'home'),{recursive:true,mode:0o700});await command(process.platform==='darwin'?['cp','-cR',join(checkout,'node_modules'),join(work,'node_modules')]:['cp','-R',join(checkout,'node_modules'),join(work,'node_modules')]);localizeDependencies(work,checkout,join(run,'dependency-links'));
+  writeFileSync(join(work,'review.diff'),await git(['diff','--no-ext-diff','--no-textconv',main,p.head],work),{flag:'wx',mode:0o600});
+  const pr=JSON.parse(await command(['gh','pr','view',String(p.number),'--repo',t.repo,'--json','body,title']));let body=String(pr.body);const issue=body.match(/refs\s+#([0-9]+)/i);if(issue)body+='\nLinked issue:\n'+await command(['gh','issue','view',issue[1]!,'--repo',t.repo,'--json','body','--jq','.body']);if(body.length>100000)throw Error('review contract exceeds bound');
+  writeFileSync(join(work,'review-contract.md'),`PR ${p.number}, head ${p.head}, main ${main}. Verify was green and the protected merge state CLEAN at admission.\n${pr.title}\n${body}`,{flag:'wx',mode:0o600});
+  t.outcome=`Independently challenge immutable launcher PR ${p.number} head ${p.head}. You did not author it. Read review.diff, review-contract.md, repo rules and exact-head source. Try to break it; report reproducible actionable defects with file/line. Preserve Bun, strict types, native isolation, fail-closed qualification, usage 0.70/0.90, capacity controller start6/max12 and fixed release windows. Do not implement, commit, merge, sign in, send messages or change policy. A bounded part-one source module can pass its own contract, but list missing installed acceptance honestly. Run focused tests only, with HOME="$PWD/.factory-tmp/home"; host process/browser checks may be sandbox-denied and must not become invented success. No intentional macOS os.abort/SIGABRT. Write .factory-tmp/challenge.json exactly {head,verdict:"PASS"|"CHANGES_REQUESTED",findings:[{severity:"P0"|"P1"|"P2"|"P3",title,file,line,detail}],installedGaps:[string],tests:[string]}. head must equal ${p.head}. Only .factory-tmp is writable. Finish after the result.`;
+  gate();fd=openSync(join(run,'native.jsonl'),'ax',0o600);const spec=ownerSpec(t,work,scratch);child=spawnWorker(spec,work,fd);
+  const sample=()=>{try{gate();native?.poll(accounting);if(Date.now()-startedAt>=600000||accounting.tokens>=16000000||native?.evidence('gpt-6.1-sol','medium').conflict)throw Error('challenge budget or native conflict');}catch(error){failure=String(error);stopped=true;void child!.stop().catch(()=>{});}};
+  timer=setInterval(sample,500);s.set('factory-challenge-slot',{id,state:'running',pr:p.number,head:p.head,pid:child.pid,identity:child.pid?processIdentity(child.pid):null,workspace:work,startedAt,model:t.model,effort:t.effort});
+  let pending='';for await(const chunk of child.stdout){writeSync(fd,chunk);pending+=chunk.toString();let end:number;while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);const event=accounting.ingest('codex',line);if(event.native){if(nativeId&&nativeId!==event.native)throw Error('challenge native ID changed');nativeId=event.native;native??=new NativeReceipt('codex',nativeId,work,spec.env.HOME,startedAt);s.set('factory-challenge-slot',{...s.get<object>('factory-challenge-slot'),nativeId});}if(event.done)done=true;sample();}}
+  const code=await child.exited;for(let i=0;i<256;i++){sample();if(!native||native.caughtUp)break;}await child.stop();
+  const review=reviewSchema.parse(JSON.parse(readFileSync(join(scratch,'challenge.json'),'utf8'))),evidence=native?.evidence('gpt-6.1-sol','medium');
+  const ok=!stopped&&code===0&&done&&review.head===p.head&&evidence?.verified===true&&child.cleanup.verified;
+  const result={pr:p.number,head:p.head,workspace:work,startedAt,ok,native:evidence,cleanup:child.cleanup,review,failure,tokens:accounting.tokens,seconds:(Date.now()-startedAt)/1000};writeFileSync(join(run,'receipt.json'),JSON.stringify(result,null,2),{flag:'wx',mode:0o600});s.event(`codex-challenge:${p.number}:${p.head}:${id}`,'codex-challenge',result,'Retain exact-head independent native review; a changed head needs a new review');s.set(key,{id,state:ok?'done':'failed',run,head:p.head});
+  const note=`Independent Codex challenge ${ok?review.verdict:'BLOCKED'} at head ${p.head}.\n\n${review.findings.map(f=>`${f.severity}: ${f.title} (${f.file}:${f.line})\n${f.detail}`).join('\n\n')||'No actionable source finding reported.'}\n\nSource acceptance and installed acceptance remain separate. Native identity and cleanup receipts stay in the private controller.`;
+  const notePath=join(run,'review.md');writeFileSync(notePath,note,{flag:'wx',mode:0o600});await command(['gh','pr','review',String(p.number),'--repo',t.repo,'--comment','--body-file',notePath]);
+  return result as Challenge;
+ }catch(error){s.set(key,{id,state:'blocked',head:p.head,run,error:String(error)});s.event(`factory-challenge-blocked:${id}`,'factory-challenge-blocked',{pr:p.number,head:p.head,run,error:String(error)},'Reconcile native custody and retained evidence; never replay an uncertain challenge');return;}
+ finally{if(timer)clearInterval(timer);try{if(child){await child.stop();await child.exited;}}finally{if(fd!==undefined)closeSync(fd);s.set('factory-challenge-slot',child&&!child.cleanup.verified?{id,state:'unknown',run}:{id,state:'released',at:Date.now()});}}
+}

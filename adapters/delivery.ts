@@ -54,8 +54,34 @@ export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c"
 export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
   if(platform!=="darwin")return;
   const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
-  if(existsSync(path) && readFileSync(path,"utf8").includes("os.abort()"))
-    throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");
+  if(!existsSync(path) || !readFileSync(path,"utf8").includes("os.abort()"))return;
+  const refuse=()=>{throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");};
+  if(/test_calendar_build_diagnostic/.test(test))refuse();
+  for(const match of test.matchAll(/\bunittest\b([^;&|]*)/g)) {
+    let cwd=checkout;
+    for(const cd of test.slice(0,match.index).matchAll(/\bcd\s+([^\s;&|]+)/g)) {
+      const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value))refuse();cwd=resolve(cwd,value);
+    }
+    const args=match[1]!.trim().split(/\s+/).filter(Boolean).map(s=>s.replace(/^['"]|['"]$/g,""));
+    let discovery=false,start=cwd,pattern="test*.py";const names:string[]=[];
+    for(let i=0;i<args.length;i++) {
+      const arg=args[i]!;if(arg==="discover"){discovery=true;continue;}
+      if(["-v","-q","-f","-b","-c","--verbose","--quiet","--failfast","--buffer","--catch","--locals"].includes(arg))continue;
+      if(arg==="-k"){if(!args[++i])refuse();continue;}
+      if(["-s","--start-directory","-p","--pattern","-t","--top-level-directory"].includes(arg)) {
+        const value=args[++i];if(!value || !/^[A-Za-z0-9_./*?\[\]-]+$/.test(value))refuse();
+        if(arg==="-s"||arg==="--start-directory")start=resolve(cwd,value!);else if(arg==="-p"||arg==="--pattern")pattern=value!;continue;
+      }
+      if(!/^[A-Za-z0-9_./]+$/.test(arg))refuse();names.push(arg);
+    }
+    if(!discovery&&names.length)continue;
+    const tail=relative(start,path);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
+  }
+  // Other test runners are unresolved collection unless explicitly scoped to files.
+  for(const match of test.matchAll(/\bpytest\b([^;&|]*)/g)) {
+    const paths=match[1]!.trim().split(/\s+/).filter(s=>s&&!s.startsWith("-"));
+    if(!paths.length||paths.some(p=>!p.endsWith(".py")||!/^[A-Za-z0-9_./]+$/.test(p)))refuse();
+  }
 }
 export function prepareTestScratch(checkout:string) {
   mkdirSync(join(checkout,".factory-tmp"),{recursive:true});

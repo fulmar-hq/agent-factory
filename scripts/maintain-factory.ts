@@ -5,6 +5,7 @@ import {homedir} from 'node:os';
 import {command} from '../adapters/github';
 import {root} from '../launcher/config';
 import {Store} from '../tracking/store';
+import {runFactoryChallenge} from '../adapters/factory-challenge';
 import {maintainFactory,nativeChallenge,factoryRepository,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
 const repo=resolve(import.meta.dir,'..');
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
@@ -15,10 +16,11 @@ async function pull(number:number):Promise<FactoryPull>{
  const commit=await api(`git/commits/${p.headRefOid}`);
  return {number:p.number,head:p.headRefOid,tree:commit.tree.sha,createdAt:p.createdAt,draft:p.isDraft,state:p.state,mergeState:p.mergeStateStatus,verify:p.statusCheckRollup.some((c:{name:string;conclusion:string;status:string})=>c.name==='Verify'&&c.status==='COMPLETED'&&c.conclusion==='SUCCESS')};
 }
-export function maintenancePort(s:Store):MaintenancePort{return {
+export function maintenancePort(s:Store):MaintenancePort{let newChallenge=false;return {
  pulls:async()=>{const list=JSON.parse(await command(['gh','pr','list','--repo',factoryRepository,'--state','open','--limit','101','--json','number,createdAt,headRefOid,isDraft,baseRefName']));if(list.length>100)throw Error('factory PR inventory truncated');return list.filter((p:{baseRefName:string})=>p.baseRefName==='main').map((p:{number:number;headRefOid:string;createdAt:string;isDraft:boolean})=>({number:p.number,head:p.headRefOid,createdAt:p.createdAt,draft:p.isDraft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
  pull,
- challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}},
+ update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
+ challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}if(!newChallenge){newChallenge=true;return runFactoryChallenge(s,p,root,repo);}},
  verifyChallenge:c=>nativeChallenge(c,homedir()),
  signed:async(head,tree)=>{const c=await api(`commits/${head}`);return c.sha===head&&c.commit.tree.sha===tree&&c.commit.verification.verified===true&&c.commit.verification.reason==='valid';},
  merged:async number=>{const p=await api(`pulls/${number}`);if(p.base?.ref!=='main'||p.base?.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('merge reconciliation repository/base differs');if(!p.merged)return {state:p.state==='open'?'OPEN':'CLOSED',head:p.head.sha};const c=await api(`git/commits/${p.merge_commit_sha}`);return {state:'MERGED',head:p.head.sha,revision:p.merge_commit_sha,tree:c.tree.sha};},
@@ -44,5 +46,5 @@ if(import.meta.main){
  writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),checkout:repo}),{mode:0o600});
  const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
  try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
- finally{if(ownsLease&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
+ finally{const challenge=s.get<{state:string}>('factory-challenge-slot');if(ownsLease&&(!challenge||challenge.state==='released')&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
 }

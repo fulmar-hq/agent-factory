@@ -71,3 +71,5 @@ test('unknown legacy digest and archived same digest do not count as supply',()=
 test('stopped dormant custody cannot hide free builder slots from the watchdog',()=>{
  const e=setup();try{for(const n of [1,2]){const x=e.admit(ticket(n),admission());e.s.db.query("UPDATE sessions SET status='paused',pid=NULL WHERE id=?").run(x.id);e.s.set(`cleanup-evidence:${x.id}`,{verified:true});}expect(e.active()).toHaveLength(2);expect(e.slots().free).toBe(2);observeClaimProgress(e,{at:now,claimed:0,paused:false});observeClaimProgress(e,{at:now+7200000,claimed:0,paused:false});expect(e.s.get('watchdog-stall')).toMatchObject({state:'open'});expect(e.active()).toHaveLength(2);}finally{e.s.close();}
 });
+
+test('independent watchdog ages a last successful claim without another tick',()=>{const e=setup();try{const x=e.admit(ticket(),admission());observeClaimProgress(e,{at:now,claimed:1,paused:false});e.finish(x.id,true);expect(checkClaimStall(e,now+7200001)).toMatchObject({state:'open'});}finally{e.s.close();}});
