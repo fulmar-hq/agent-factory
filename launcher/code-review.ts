@@ -13,7 +13,7 @@ export function reviewChecksGreen(p:BoardPull,repo:string) {
  const success=(c:BoardPull['statusCheckRollup'][number])=>(c.conclusion??c.state)==='SUCCESS'&&(c.status===undefined||c.status==='COMPLETED');
  return checks.some(c=>c.name==='Verify'&&success(c)) && (repo!=='fulmar-hq/alido'||checks.some(c=>/^Secret scan$/i.test(c.name??'')&&success(c))) && checks.every(c=>success(c)||c.status==='COMPLETED'&&['SKIPPED','NEUTRAL'].includes(c.conclusion??''));
 }
-const HistoricalReview=z.object({repo:z.string().regex(/^[\w.-]+\/[\w.-]+$/),pr:z.number().int().positive(),head:z.string().regex(/^[a-f0-9]{40}$/),session:z.string().min(1),native:z.string().min(1),verdict:z.enum(['PASS','CHANGES_REQUESTED','BLOCKED']),verdictUrl:z.string().url(),evidence:z.string().min(20).max(12000)}).strict();
+const HistoricalReview=z.object({issue:z.number().int().positive().optional(),repo:z.string().regex(/^[\w.-]+\/[\w.-]+$/),pr:z.number().int().positive(),head:z.string().regex(/^[a-f0-9]{40}$/),session:z.string().min(1),native:z.string().min(1),verdict:z.enum(['PASS','CHANGES_REQUESTED','BLOCKED']),verdictUrl:z.string().url(),evidence:z.string().min(20).max(12000)}).strict();
 // Explicit trusted migration input only. Never manufacture a native review,
 // qualification or PASS: require retained successful independent worker custody.
 export function importHistoricalReviews(s:Store,c:Config,dir:string) {
@@ -29,7 +29,11 @@ export function importHistoricalReviews(s:Store,c:Config,dir:string) {
   const brief=JSON.parse(session.brief) as {title?:string;kind?:string;repo?:string};
   if(brief.repo!==r.repo||!(/^(?:Challenge|Accept|Review)\b/i.test(brief.title??'')||['review','challenge','acceptance'].includes(brief.kind??'')))throw Error('historical worker was not a same-repository independent review');
  }
- s.atomic(()=>{for(const r of packet.reviews){const key=`code-review:${r.repo}:${r.pr}:${r.head}`;if(!s.get(key)){s.set(key,{state:'done',historical:true,...r});s.event(`historical-${key}`,'historical-review-import',r,'Retain original native, report and PR verdict; withdraw an invalid receipt with a reviewed append-only correction');}}s.set('historical-review-migration',{complete:true,count:packet.reviews.length});});
+ const rank={PASS:0,BLOCKED:1,CHANGES_REQUESTED:2};
+ s.atomic(()=>{for(const r of packet.reviews){const key=`code-review:${r.repo}:${r.pr}:${r.head}`,prior=s.get<{historical?:boolean;verdict?:keyof typeof rank}>(key);
+  s.event(`historical-${key}:${r.session}:${r.verdict}`,'historical-review-import',r,'Retain original native, report and PR verdict; withdraw an invalid receipt with a reviewed append-only correction');
+  if(!prior||prior.historical&&rank[r.verdict]>rank[prior.verdict??'PASS'])s.set(key,{state:'done',historical:true,...r});
+ }s.set('historical-review-migration',{complete:true,count:packet.reviews.length});});
  return true;
 }
 export interface CodeReviewPort {
