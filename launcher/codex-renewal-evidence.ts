@@ -307,7 +307,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   } else {
     requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode > 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
     requireThat(s.stopAt! >= s.before.at && s.stopAt! < r.endedAt && s.signals.length > 0, "stop timing unverified");
-    requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
+    requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= s.final.at && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
     if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");

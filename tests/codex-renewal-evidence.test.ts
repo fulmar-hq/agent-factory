@@ -294,3 +294,10 @@ test('owned stable identities carry their newly observed groups into final clean
 for(const index of [1,2])test('framed structured lifecycle failure refuses '+index,()=>{const f=fixture(),r=f.m.runs[index];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'failed',arguments:'{"cmd":"setup"}'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'function_call_output',call_id:'failed',output:'Wall time: 0.1 seconds\nOutput:\n'+JSON.stringify({exit_code:1,error:'failed setup',is_error:true})}});},true);expect(f.collect().status).toBe('refused');});
 
 test('a completed security turn cannot certify another unfinished turn',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1000).toISOString(),type:'turn_context',payload:{model:f.m.model,effort:r.effort,cwd:r.workspace}},{timestamp:new Date(r.startedAt+1001).toISOString(),type:'event_msg',payload:{type:'task_started'}});},true);const b=bytes(Buffer.from(f.read(r.stream.path)).toString()+JSON.stringify({type:'turn.started'})+'\n');f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+
+
+test('root may exit on TERM before bounded descendant KILL and final absence',()=>{
+ const f=fixture();for(const r of f.m.runs.filter(r=>r.kind==='time')){const end=r.startedAt+50010;r.endedAt=end;f.mutate(r.supervisor,s=>{s.endedAt=end;});}
+ expect(f.collect().status).toBe('verified');
+ const bad=f.m.runs.find(r=>r.kind==='time')!;f.mutate(bad.supervisor,s=>{s.signals.at(-1).at=s.final.at+1;});expect(f.collect().status).toBe('refused');
+});
