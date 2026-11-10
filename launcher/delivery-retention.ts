@@ -198,14 +198,24 @@ export function verifyProcessCustody(c:Context,paths:string[], run=spawnSync, re
   };checkProcesses();
   const files=run(process.platform==="darwin" ? "/usr/sbin/lsof" : "lsof",["-nP","-Fpcfn"],{encoding:"utf8",timeout:5000,maxBuffer:32*1024*1024});
   if(files.error || files.status!==0 || files.stderr.trim() || !files.stdout.startsWith("p"))throw Error("fresh cwd/open-file inventory unavailable");
-  let pid="";
+  let pid="", commandSeen=false, file="", named=false, cwdSeen=false;
+  const finishFile=()=>{if(file && !named)throw Error("incomplete open-file name");if(file==="cwd")cwdSeen=true;file="";named=false;};
+  const finishProcess=()=>{finishFile();if(pid && (!commandSeen || !cwdSeen))throw Error("incomplete cwd/process inventory");};
   for(const line of files.stdout.trim().split("\n")) {
-    if(line.startsWith("p")){if(!/^p[1-9][0-9]*$/.test(line))throw Error("partial open-file inventory");pid=line.slice(1);}
-    else if(line.startsWith("n")) {
-      const name=line.slice(1).replace(/ \(deleted\)$/,"");
+    if(line.startsWith("p")){
+      finishProcess();if(!/^p[1-9][0-9]*$/.test(line))throw Error("partial open-file inventory");
+      pid=line.slice(1);commandSeen=false;cwdSeen=false;
+    } else if(line.startsWith("c")) {
+      if(!pid || commandSeen || file || line.length<2)throw Error("partial process command");commandSeen=true;
+    } else if(line.startsWith("f")) {
+      finishFile();if(!pid || !commandSeen || !/^f(?:cwd|rtd|txt|mem|DEL|[0-9]+[a-z]*)$/.test(line))throw Error("unavailable descriptor inventory");file=line.slice(1);
+    } else if(line.startsWith("n")) {
+      if(!file || line.length<2 || /\([^)]*(?:Permission denied|Operation not permitted|opendir:|readlink:|stat:|error:)/i.test(line))throw Error("unavailable open-file name");
+      named=true;const name=line.slice(1).replace(/ \(deleted\)$/,"");
       if(paths.some(path=>inside(path,name)))throw Error(`cwd/open-file custody: ${pid} ${name}`);
-    } else if(!/^[cf]/.test(line))throw Error("unknown open-file inventory record");
+    } else throw Error("unknown open-file inventory record");
   }
+  finishProcess();
   checkProcesses();verifyNativeTerminal(c,readNative);
 }
 export const retentionPorts:RetentionPorts={fs:retentionFS,github:verifyPublished,custody:verifyProcessCustody};

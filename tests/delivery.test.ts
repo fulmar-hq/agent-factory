@@ -97,7 +97,7 @@ test("publisher fails closed without native isolation and checks claim before im
 test("delivery setup preserves edits and isolates Git metadata and dependencies",async()=>{
  const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,realpathSync,symlinkSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {prepareDelivery,branchFor}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
- const dir=mkdtempSync(join(tmpdir(),"factory-worktree-")),source=join(dir,"source"),work=join(dir,"work"),id="d".repeat(64);
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-worktree-"))),source=join(dir,"source"),work=join(dir,"work"),id="d".repeat(64);
  mkdirSync(source);mkdirSync(join(source,"node_modules"));writeFileSync(join(source,"node_modules/fixture"),"original dependency");symlinkSync(join(source,"node_modules"),join(source,"node_modules/node_modules"));
  const git=(...args:string[])=>command(["git","-C",source,...args]);
  await git("init");await git("config","user.name","Fictional Owner");await git("config","user.email","fictional@example.invalid");
@@ -182,9 +182,9 @@ test("dependency copies request clone-aware independent files through the filesy
 });
 
 test("worker refuses hardlinked dependency objects and shared standalone Git alternates",async()=>{
- const {mkdtempSync,mkdirSync,writeFileSync,linkSync,readFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {mkdtempSync,mkdirSync,writeFileSync,linkSync,readFileSync,realpathSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {verifyDependencyObjects,prepareDelivery,branchFor}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
- const dir=mkdtempSync(join(tmpdir(),"factory-shared-refusal-")),deps=join(dir,"deps");mkdirSync(deps);
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-shared-refusal-"))),deps=join(dir,"deps");mkdirSync(deps);
  writeFileSync(join(dir,"shared"),"source");linkSync(join(dir,"shared"),join(deps,"fixture"));
  expect(()=>verifyDependencyObjects(deps)).toThrow("shared writable");
  const source=join(dir,"source"),work=join(dir,"work"),id="e".repeat(64);mkdirSync(source);mkdirSync(join(source,"node_modules"));

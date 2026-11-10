@@ -256,3 +256,9 @@ test("unknown browser-parent and missing supervisor evidence remain blocked",asy
  const f=fixture();f.s.set(`browser-parent:${f.id}`,{state:"RW"});expect((await f.plan()).result).toBe("blocked");f.s.close();
  const g=fixture();g.s.set(`supervisor:${g.id}`,null);expect((await g.plan()).result).toBe("blocked");g.s.close();
 });
+
+for(const lsof of ["p9\ncfixture\nfcwd\n", "p9\ncfixture\nfNOFD\nn/proc/9/fd (opendir: Permission denied)\n", "p9\ncfixture\nf3\nn/elsewhere\n"])test("incomplete lsof custody never authorizes an archive: "+JSON.stringify(lsof), async()=>{
+ const f=fixture(),idle="1 0 1 S Tue Nov 10 00:00:00 2026 fixture\n";
+ f.ports.custody=c=>verifyProcessCustody(c,[f.workspace],processRun([idle],lsof),f.transcript);
+ const result=await f.plan();expect(result.result).toBe("blocked");expect(f.files.has(f.workspace)).toBe(true);expect(f.calls.some(c=>c.startsWith("rename:"))).toBe(false);f.s.close();
+});
