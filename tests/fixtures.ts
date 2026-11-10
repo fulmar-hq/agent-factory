@@ -96,3 +96,9 @@ export const admission = () => ({
   qualification: qualification(),
   billing: billing(),
 });
+// Fictional GraphQL connection, including completeness for nested evidence.
+export function githubPage(kind:'issues'|'pullRequests',rows:any[],options:{total?:number;next?:boolean;cursor?:string|null}={}) {
+ const info={hasNextPage:false,endCursor:null};
+ const nodes=rows.map(r=>kind==='issues'?{...r,closedAt:r.closedAt??null,labels:{nodes:r.labels,pageInfo:info}}:{title:'Fictional pull',headRefName:'fixture',reviewDecision:null,...r,reviews:{nodes:r.reviews??[],pageInfo:info},closingIssuesReferences:{nodes:r.closingIssuesReferences??[],pageInfo:info},commits:{nodes:[{commit:{statusCheckRollup:{contexts:{nodes:r.statusCheckRollup??[],pageInfo:info}}}}]}});
+ return JSON.stringify({data:{repository:{[kind]:{totalCount:options.total??rows.length,nodes,pageInfo:{hasNextPage:options.next??false,endCursor:options.cursor??null}}}}});
+}
