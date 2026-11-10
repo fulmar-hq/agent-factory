@@ -1,16 +1,25 @@
 import {createHash} from 'node:crypto';
 import type {Store} from '../tracking/store';
-import type {Challenge} from '../launcher/factory-maintenance';
+import {normalizeChallenge,type Challenge} from '../launcher/factory-maintenance';
 import {command} from './github';
 export type RetainedReview=Challenge&{repo?:string;depth?:'standard'|'deep';review:Challenge['review']&{installedGaps?:string[]}};
 // Native execution and publication are separate durable facts. An unknown POST
 // is reconciled by complete exact-marker readback before another attempt.
 export async function publishRetainedReview(s:Store,repo:string,baseRef:string,eventId:string,result:RetainedReview,execute=command):Promise<boolean> {
- const key=`review-publication:${repo}:${result.pr}:${result.head}:${eventId}`;
+ result={...result,...normalizeChallenge(result)};
+ const clean=(value:unknown)=>String(value??'').replace(/\/(?:Users|home)\/[^/\n]+/g,'~').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[redacted email]').replace(/\b(?:AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9_-]{20,})\b/g,'[redacted credential]').replace(/\bBearer\s+[A-Za-z0-9._~-]+/gi,'Bearer [redacted]').replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'$1[redacted]');
+ const excerpt=(value:unknown,limit:number)=>{const text=clean(value);return text.length<=limit?text:text.slice(0,Math.floor(limit*0.7))+' … [excerpt] … '+text.slice(-Math.floor(limit*0.25));};
+ const findings=Array.isArray(result.review.findings)?result.review.findings:[],gaps=Array.isArray(result.review.installedGaps)?result.review.installedGaps:[];
+ const verdict=!result.ok||!result.native?.verified||!result.cleanup?.verified||result.review.verdict==='BLOCKED'?'BLOCKED':result.review.verdict==='PASS'&&findings.length===0&&Array.isArray(result.review.installedGaps)&&gaps.length===0?'PASS':findings.length?'DEFECT':'BLOCKED';
+ const budget=Math.floor(54000/Math.max(1,findings.length+gaps.length));
+ const details=findings.map((value,index)=>{const f=value as {severity:string;title:string;file:string;line:number;detail:string};return `${index+1}. [${excerpt(f.severity,8)}] ${excerpt(f.title,100)} (${excerpt(f.file,120)}:${f.line})\n${excerpt(f.detail,Math.max(250,budget-300))}`;});
+ if(gaps.length)details.push((result.evidenceScope==='source-review'?'Required source-review evidence:':'Retained gap statements (source-review relevance is unclassified; reconcile before approval):')+'\n'+gaps.map((gap,index)=>`${index+1}. ${excerpt(gap,budget-20)}`).join('\n'));
+ if(!Array.isArray(result.review.installedGaps))details.push('The retained result does not declare its required evidence gaps. Reconcile the original review evidence before approval.');
+ const content=`Independent review ${verdict} at ${result.head}${result.depth?` (${result.depth})`:''}: ${verdict==='PASS'?'no actionable defect found.':findings.length?'actionable findings follow.':'review evidence needs reconciliation.'}\n${details.join('\n\n')}\nDefects return to the same ticket and PR. Hosted acceptance and release gates remain required.`;
+ const publication=createHash('sha256').update(JSON.stringify({repo,pr:result.pr,head:result.head,eventId,content})).digest('hex');
+ const key=`review-publication:${repo}:${result.pr}:${result.head}:${eventId}:${publication}`;
  if(s.get<{state:string}>(key)?.state==='published')return true;
- const marker=`<!-- factory-review:${createHash('sha256').update(JSON.stringify({repo,pr:result.pr,head:result.head,eventId})).digest('hex')} -->`;
- const verdict=!result.ok||!result.native?.verified||!result.cleanup?.verified||result.review.verdict==='BLOCKED'?'BLOCKED':result.review.verdict==='PASS'&&result.review.findings.length===0&&Array.isArray(result.review.installedGaps)&&result.review.installedGaps.length===0?'PASS':result.review.findings.length?'DEFECT':'BLOCKED';
- const body=`${marker}\nIndependent review ${verdict} at ${result.head}${result.depth?` (${result.depth})`:''}: ${result.review.findings.length?result.review.findings.map(value=>{const f=value as {title:string;file:string;line:number};return `${f.title} (${f.file}:${f.line})`;}).join('; ').slice(0,2500):verdict==='PASS'?'no actionable defect found.':'required review evidence incomplete.'}\nDefects return to the same ticket and PR. Hosted acceptance and release gates remain required.`;
+ const marker=`<!-- factory-review:${publication} -->`,body=marker+'\n'+content;
  const record=(state:string,extra:Record<string,unknown>={})=>{s.set(key,{state,repo,pr:result.pr,head:result.head,eventId,marker,at:Date.now(),...extra});s.event(`review-publication:${crypto.randomUUID()}`,'review-publication',{state,repo,pr:result.pr,head:result.head,eventId,...extra},'Retain native result and publication intent; reconcile exact marker before retrying an unknown response');};
  try {
   if(result.review.head!==result.head)throw Error('retained review result head mismatch');

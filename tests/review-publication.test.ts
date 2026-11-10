@@ -6,11 +6,12 @@ import {config} from './fixtures';
 import {Store} from '../tracking/store';
 import {runFactoryChallenge,preparationFailure} from '../adapters/factory-challenge';
 import {maintenancePort} from '../scripts/maintain-factory';
-import type {FactoryPull} from '../launcher/factory-maintenance';
+import {acceptedChallenge,type FactoryPull} from '../launcher/factory-maintenance';
 import type {RetainedReview} from '../adapters/review-publication';
 const head='a'.repeat(40),p:FactoryPull={number:7,head,tree:'',createdAt:'',draft:false,state:'OPEN',mergeState:'CLEAN',verify:true};
-function fixture(factory=false){
+function fixture(factory=false,change?:(result:RetainedReview)=>void){
  const s=new Store(':memory:'),repo=factory?'fulmar-hq/agent-factory':'example/demo',eventId='trusted-native-review',result:RetainedReview={repo,pr:7,head,workspace:'/fictional',startedAt:1,ok:true,native:{id:'independent-native',path:'/fictional/receipt',verified:true,models:['gpt-6.1-sol'],efforts:['medium']},cleanup:{verified:true},review:{head,verdict:'PASS',findings:[],installedGaps:[]}};
+ change?.(result);
  s.event(eventId,factory?'codex-challenge':'code-review-verdict',result,'fictional native receipt');s.set(factory?`factory-challenge:7:${head}`:`code-review:${repo}:7:${head}`,{state:'blocked',error:'old transient publication failure'});
  const remote:any[]=[],calls:string[][]=[];let posts=0,uncertain=true,moved=false,failBeforePost=false,malformed=false;
  const execute=async(args:string[])=>{calls.push(args);const path=args.find(a=>a.startsWith('repos/'));if(args.includes('POST')){posts++;if(failBeforePost){failBeforePost=false;throw Error('network unavailable before server accepted POST');}const body=args.find(a=>a.startsWith('body='))!.slice(5);remote.push({id:17,body,commit_id:head,user:{login:'fictional-owner'},state:'COMMENTED'});if(uncertain)throw Error('connection lost after accepted POST');return '{}';}if(args.includes('user'))return JSON.stringify({login:'fictional-owner'});if(path?.includes('/reviews?'))return JSON.stringify(malformed?{incomplete:true}:remote);if(path===`repos/${repo}/pulls/7`)return JSON.stringify({head:{sha:moved?'b'.repeat(40):head,repo:{full_name:repo}},base:{ref:factory?'main':'QA',repo:{full_name:repo}},state:'open'});throw Error('unexpected fixture command '+args.join(' '));};
@@ -58,4 +59,22 @@ test('retained pre-native GitHub backoff cannot allocate another preparation ear
 
 test('the real adapter refuses an unverified new claim before any installation or native effect',async()=>{
  const s=new Store(':memory:');try{await expect(runFactoryChallenge(s,{...p,verify:false},'/not-an-installation')).rejects.toThrow('green checks');expect(s.get('factory-challenge-slot')).toBeNull();}finally{s.close();}
+});
+
+test('legacy PASS with unclassified deployment gaps remains blocked in the real adapter and factory acceptance',async()=>{
+ const gap='Deployment and Production confirmation were not run.';const f=fixture(true,result=>{result.review.installedGaps=[gap];});f.certain();
+ try {
+  const port=maintenancePort(f.s,async()=>f.run()),result=await port.challenge(p);expect(result?.review.verdict).toBe('BLOCKED');expect(acceptedChallenge(result,p)).toBe(false);
+  const original=JSON.parse((f.s.db.query("SELECT data FROM events WHERE kind='codex-challenge'").get() as {data:string}).data);expect(original.review.verdict).toBe('PASS');expect(original.review.installedGaps).toEqual([gap]);expect(acceptedChallenge(original,p)).toBe(false);
+  expect(f.s.db.query("SELECT id FROM events WHERE kind='review-evidence-reconciliation'").all()).toHaveLength(1);
+  expect(f.remote[0].body).toContain('source-review relevance is unclassified');expect(f.remote[0].body).toContain(gap);expect(f.remote[0].body).not.toContain('Required source-review evidence:');
+ }finally{f.s.close();}
+});
+test('absent evidence declarations cannot turn a retained PASS into factory approval',async()=>{
+ const f=fixture(true,result=>{delete result.review.installedGaps;});f.certain();try{const result=await f.run();expect(result?.review.verdict).toBe('BLOCKED');expect(acceptedChallenge(result,p)).toBe(false);expect(f.remote[0].body).toContain('does not declare its required evidence gaps');}finally{f.s.close();}
+});
+test('original-PR verdicts retain severity, actionable reproduction and required evidence without private identifiers',async()=>{
+ const detail='Reproduce by selecting Save twice before the first response; the second request bypasses the consent guard. Probe path /Users/vincent/.alido-private/probe and contact private@example.invalid. TEST_API_KEY=private-credential-material;';
+ const f=fixture(false,result=>{result.evidenceScope='source-review';result.review.verdict='CHANGES_REQUESTED';result.review.findings=[{severity:'P1',title:'Fence concurrent saves',file:'src/save.ts',line:42,detail}];result.review.installedGaps=['Run the dedicated consent concurrency regression with the synthetic tenant fixture.'];});f.certain();
+ try{expect((await f.run())?.review.verdict).toBe('CHANGES_REQUESTED');const body=f.remote[0].body;expect(body).toContain('[P1]');expect(body).toContain('src/save.ts:42');expect(body).toContain('selecting Save twice before the first response');expect(body).toContain('dedicated consent concurrency regression');expect(body).not.toContain('/Users/vincent');expect(body).not.toContain('private@example.invalid');expect(body).not.toContain('private-credential-material');}finally{f.s.close();}
 });

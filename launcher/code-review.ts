@@ -62,18 +62,19 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
  catch(error){s.set('historical-review-migration',{complete:false,count:0,reason:String(error)});}
  // Missing legacy provenance grants no approval and must not prevent an actual
  // independent review of a current green product change.
- const protectedPRs=new Set<number>();
+ const protectedPRs=new Set<number>();let protectedBatch=false,batchError='frozen release packet unavailable';
  const batchPath=join(dir,'release-batch.json');
- if(existsSync(batchPath)) {
+ try {
   const batch=JSON.parse(readFileSync(batchPath,'utf8'));
-  if(!Number.isSafeInteger(batch.pr)||!Array.isArray(batch.sources)||batch.sources.some((p:{number?:number})=>!Number.isSafeInteger(p.number)))throw Error('release batch protection unavailable; review sweep refused');
-  protectedPRs.add(batch.pr);for(const p of batch.sources)protectedPRs.add(p.number);
- }
+  if(!Number.isSafeInteger(batch.pr)||batch.pr<1||!Array.isArray(batch.sources)||batch.sources.length>1000||batch.sources.some((p:{number?:number})=>!Number.isSafeInteger(p.number)||p.number! < 1))throw Error('frozen release packet malformed');
+  protectedPRs.add(batch.pr);for(const p of batch.sources)protectedPRs.add(p.number);protectedBatch=true;
+ }catch(error){batchError=String(error);}
  let claimed=false;
  for(const project of Object.values(c.projects)) {
   // Factory PRs already use this same independent exact-head executor in the
   // protected factory maintenance lane; never give them a second review.
   if(project.repo==='fulmar-hq/agent-factory'||!repositories[project.repo])continue;
+  if(project.repo==='fulmar-hq/alido'&&!protectedBatch){s.event(`code-review-frozen-refused:${createHash('sha256').update(batchError).digest('hex')}`,'code-review-frozen-refused',{repo:project.repo,reason:batchError},'Restore the authentic frozen release packet before any Alido PR sweep; never infer an empty exclusion list');continue;}
   const snapshot=s.get<PullSnapshot>(`board-pulls:${project.repo}`);
   const pulls=snapshot&&!snapshot.error&&snapshot.at<=now&&now-snapshot.at<120000&&snapshot.pulls.every(p=>typeof p.baseRefName==='string')?snapshot.pulls:await port.pulls(project.repo);
   for(const p of [...pulls].sort((a,b)=>a.number-b.number)) {

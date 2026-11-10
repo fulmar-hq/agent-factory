@@ -7,7 +7,7 @@ import type {Store} from '../tracking/store';
 export class FactoryMergeRejected extends Error{constructor(readonly status:number,detail:string){super(`protected merge rejected (${status}): ${detail}`);}}
 export const factoryRepository='fulmar-hq/agent-factory';
 export type FactoryPull={number:number;head:string;tree:string;createdAt:string;draft:boolean;state:string;mergeState:string;verify:boolean};
-export type Challenge={pr:number;head:string;ok:boolean;native:{id:string;path:string;verified:boolean;models:string[];efforts:string[]};cleanup:{verified:boolean};review:{head:string;verdict:string;findings:unknown[]};workspace:string;startedAt:number};
+export type Challenge={pr:number;head:string;ok:boolean;native:{id:string;path:string;verified:boolean;models:string[];efforts:string[]};cleanup:{verified:boolean};review:{head:string;verdict:string;findings:unknown[];installedGaps?:string[]};evidenceScope?:'source-review';workspace:string;startedAt:number};
 export interface MaintenancePort {
  pulls():Promise<FactoryPull[]>;
  pull(number:number):Promise<FactoryPull>;
@@ -20,7 +20,15 @@ export interface MaintenancePort {
  install(head:string):Promise<string>;
 }
 export function acceptedChallenge(c:Challenge|undefined,p:FactoryPull):c is Challenge {
- return !!c && c.pr===p.number && c.head===p.head && c.ok===true && c.review.head===p.head && c.review.verdict==='PASS' && c.review.findings.length===0 && c.native.verified===true && c.cleanup.verified===true && c.native.models.join()==='gpt-6.1-sol' && c.native.efforts.join()==='medium';
+ return !!c && c.pr===p.number && c.head===p.head && c.ok===true && c.review.head===p.head && c.review.verdict==='PASS' && Array.isArray(c.review.findings) && c.review.findings.length===0 && Array.isArray(c.review.installedGaps) && c.review.installedGaps.length===0 && c.native.verified===true && c.cleanup.verified===true && c.native.models.join()==='gpt-6.1-sol' && c.native.efforts.join()==='medium';
+}
+// An old PASS cannot waive absent or unclassified evidence. Preserve the raw
+// result; this derived disposition requires explicit evidence reconciliation.
+export function normalizeChallenge(c:Challenge):Challenge {
+ if(c.review.verdict!=='PASS')return c;
+ if(Array.isArray(c.review.findings)&&c.review.findings.length)return {...c,review:{...c.review,verdict:'CHANGES_REQUESTED'}};
+ if(!Array.isArray(c.review.findings)||!Array.isArray(c.review.installedGaps)||c.review.installedGaps.length)return {...c,review:{...c.review,verdict:'BLOCKED'}};
+ return c;
 }
 export function nativeChallenge(c:Challenge,home:string):boolean {
  try {const receipt=new NativeReceipt('codex',c.native.id,c.workspace,home,c.startedAt),accounting=new WorkerAccounting();for(let i=0;i<256;i++){receipt.poll(accounting);if(receipt.caughtUp)break;}const evidence=receipt.evidence('gpt-6.1-sol','medium');return evidence.verified && evidence.path===c.native.path;}catch{return false;}
