@@ -11,9 +11,9 @@ export const mailPath = () => process.env.FACTORY_MAIL_DB ?? join(homedir(), ".a
 // A stable episode ID survives retries/restarts and a crash between stores.
 // Failure to notify never opens admission; later ticks retry the same alarm.
 export function diskCapacityAlert(s:Store,now:number,path=mailPath()) {
- if(s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))return;
- const r=s.get<{state:string;episode?:string;freeGiB?:number}>('disk-capacity');
+ const r=s.get<{state:string;episode?:string;freeGiB?:number;usedFraction?:number}>('disk-capacity');
  if(!r || !['critical','unknown'].includes(r.state) || !r.episode || s.get(`alert:${r.episode}`))return;
+ if(r.state==='critical'&&(r.usedFraction??0)>0.85&&((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'disk',now,'',true)))return;
  const summary=r.state==='unknown' ? 'Factory cannot read free disk space; new work is blocked.' : `Factory has ${r.freeGiB?.toFixed(1)} GiB free; new work is blocked below 30 GiB. Please inspect factory capacity.`;
  try {
   if(!existsSync(path))throw Error('existing Telegram bridge store unavailable');
@@ -39,6 +39,7 @@ export function qualificationAlerts(s: Store, qualifications: Record<string, unk
     const q = parsed.data;
     if (q.expiresAt > now + 2 * 60 * 60 * 1000) continue;
     const id = `qualification-expiry:${provider}:${q.expiresAt}`;
+    if(relatedFactoryAlarm(path,'qualification',now,id,true))continue;
     if (s.get(id)) continue;
     const summary = `Factory ${provider} qualification ${q.expiresAt <= now ? "expired" : `expires at ${new Date(q.expiresAt).toISOString()}`}; requalify before more work.`;
     try {
@@ -61,3 +62,10 @@ export function qualificationAlerts(s: Store, qualifications: Record<string, unk
 // Independent alarm owns overlapping notifications only while its completed
 // heartbeat remains fresh. Failed/stopped monitoring restores the legacy path.
 export function healthOwnsAlerts(dir:string,now:number){try{const value=JSON.parse(readFileSync(join(dir,'health','heartbeat.json'),'utf8'));return Number.isSafeInteger(value.at)&&value.at>=0&&value.at<=now&&now-value.at<=10*60000;}catch{return false;}}
+
+export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'|'release',now:number,except='',healthOnly=false):{id:string;summary:string}|null{
+ if(!existsSync(path))return null;const db=new Database(path,{readonly:true,strict:true});
+ try{const legacy=healthOnly?'0':condition==='qualification'?"id LIKE 'qualification-expiry:%'":condition==='disk'?"sender_ref='factory-disk'":"id LIKE 'release-preflight-missing:%'";
+ return db.query(`SELECT id,summary FROM messages m WHERE recipient='Vincent' AND recipient_app='telegram' AND id<>? AND created_at<=? AND (created_at>=? OR NOT EXISTS(SELECT 1 FROM telegram_messages t WHERE t.mail_id=m.id)) AND (id LIKE ? OR (${legacy})) ORDER BY created_at DESC LIMIT 1`).get(except,now,now-2*3600000,`factory-health:${condition}:%:opening:Vincent`) as {id:string;summary:string}|null;
+ }finally{db.close();}
+}

@@ -154,11 +154,12 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
 // Dry-runs/rehearsals never call this function.
 export function releasePreflightAlert(s:Store,r:ReleaseReadiness,now=Date.now(),path=mailPath()) {
  if(r.ready||!r.missing.length)return {queued:false};
- if(healthOwnsAlerts(dirname(s.db.filename),now))return {queued:false,ownedBy:'independent-health-watch'};
+ const owned=healthOwnsAlerts(dirname(s.db.filename),now);
+ if(owned){const covered=new Set(['fresh billing','billing and factory state','factory state','AWS sign-in','disk space','owner qualification','release qualification','quality qualification','release holds']);r={...r,missing:r.missing.filter(m=>!covered.has(m.input))};if(!r.missing.length)return {queued:false,ownedBy:'independent-health-watch'};}
  if(!Number.isSafeInteger(r.at)||!Number.isSafeInteger(now)||now<r.at)throw Error('preflight alert is only admitted at 19:00');
  const admitted=toronto(r.at),current=toronto(now);
  if(admitted.day!==r.day||admitted.minute!==1140||current.day!==r.day||current.minute>=1190)throw Error('preflight alert is only admitted at 19:00 and must finish before 19:50');
- const id=`release-preflight-missing:${r.day}`;
+ const id=`${owned?'release-preflight-extra':'release-preflight-missing'}:${r.day}`;
  if(s.get(id))return {queued:false,id};
  const names:Record<string,string>={
   'fresh billing':'a fresh AWS bill reading','billing and factory state':'the billing and factory checks',

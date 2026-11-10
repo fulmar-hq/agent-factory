@@ -7,6 +7,7 @@ import {z} from 'zod';
 import {ConfigSchema,QualificationSchema,BillingSchema} from './config';
 import {releaseAvailable} from '../wallet/release';
 import {originalSessionExpiry,supportedReleaseHold} from './release-readiness';
+import {relatedFactoryAlarm} from './alerts';
 import {command} from '../adapters/github';
 import {diskReading} from './disk';
 import {processIdentity} from './process';
@@ -124,9 +125,10 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   try{for(const pending of pendingHealthDeliveries(state,()=>now)){
    db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
    const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;save();db.exec('COMMIT');
-   const command=begun.command,id=command.idempotencyKey;
-   bridge.send(id,command.recipient,command.message);
-   const receipt=bridge.delivered(id,command.recipient);
+   const command=begun.command,id=command.idempotencyKey,condition=state.outbox.find(n=>n.id===command.notificationId)!.condition;
+   const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release',now,id):null;
+   if(!related)bridge.send(id,command.recipient,command.message);
+   const receipt=bridge.delivered(related?.id??id,command.recipient);
    if(receipt){db.exec('BEGIN IMMEDIATE');const latest=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=acknowledgeHealthDelivery(FactoryHealthStateSchema.parse(JSON.parse(latest.json)),command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
   }}finally{bridge.close();}
   const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));

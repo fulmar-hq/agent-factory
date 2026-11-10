@@ -10,7 +10,7 @@ import { qualification } from "./fixtures";
 test("expiry alerts use one retained bridge line per provider/expiry, including crash retry and renewal", () => {
   const dir=mkdtempSync(join(tmpdir(),"factory-alert-")), path=join(dir,"mail.sqlite"), db=new Database(path), s=new Store(":memory:");
   // Existing bridge outbox columns; no new bot, network or model call.
-  db.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY,send_id TEXT,created_at INTEGER,sender TEXT,sender_app TEXT,sender_ref TEXT,recipient TEXT,recipient_app TEXT,kind TEXT,reply TEXT,summary TEXT,body TEXT,thread_id TEXT,depth INTEGER,hash TEXT,state TEXT,wake_state TEXT)`);
+  db.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY,send_id TEXT,created_at INTEGER,sender TEXT,sender_app TEXT,sender_ref TEXT,recipient TEXT,recipient_app TEXT,kind TEXT,reply TEXT,summary TEXT,body TEXT,thread_id TEXT,depth INTEGER,hash TEXT,state TEXT,wake_state TEXT);CREATE TABLE telegram_messages(message_id INTEGER PRIMARY KEY,mail_id TEXT,sent_at INTEGER)`);
   const now=Date.now(), q={...qualification(),expiresAt:now+7200001};
   try {
     qualificationAlerts(s,{codex:q},now,path);
