@@ -67,7 +67,7 @@ export async function tick(dir = root) {
     const e = new Engine(s, c),
       now = Date.now();
     observeDisk(s,diskReading(dir,now));
-    diskCapacityAlert(s,now);
+    if(!healthOwnsAlerts(dir,now))diskCapacityAlert(s,now);
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     if(!healthOwnsAlerts(dir,now))qualificationAlerts(s, qualifications, now);

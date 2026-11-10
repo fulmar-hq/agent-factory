@@ -71,12 +71,21 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&existsSync(q.data.evidence.split('#')[0]!),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
    snapshot.qualifications=ok(Date.now(),'protected qualification file and exact live renewal readback',{required:[...required.keys()],records});
    }catch(error){snapshot.qualifications=failed(now,String(error));}
+   try{
    const effects=db.query("SELECT key,value FROM kv WHERE key LIKE 'executor:%' LIMIT 10001").all() as {key:string;value:string}[];
    if(effects.length>10000)throw Error('release inventory truncated');
    const windows=effects.flatMap(row=>{const m=row.key.match(/^executor:(\d{4}-\d{2}-\d{2}):(qa|promote)$/);if(!m)return [];const e=JSON.parse(row.value),prefix=row.key+':';const events=db.query("SELECT at,data FROM events WHERE kind='release-executor' AND id LIKE ? ORDER BY at").all(prefix+'%') as {at:number;data:string}[];
     const started=events.find(r=>JSON.parse(r.data).kind===`${m[2]}:started`),completed=events.findLast(r=>[`${m[2]}:success`,`${m[2]}:failure`,`${m[2]}:deadline`].includes(JSON.parse(r.data).kind));
-    return [{windowId:`${m[1]}:${m[2]==='qa'?'qa':'production'}`,state:e.state==='success'?'success' as const:e.state==='failure'?'failed' as const:'running' as const,startedAt:started?.at??null,completedAt:completed?.at??null,receipt:row.key}];});
+    let state=e.state==='success'?'success' as const:e.state==='failure'?'failed' as const:'running' as const,done=completed?.at??null,receipt=row.key;
+    if(m[2]==='promote'&&e.state==='success'){
+     const readback=effects.find(r=>r.key===`executor:${m[1]}:readback`);if(!readback)throw Error('required Production readback is unavailable');
+     const result=JSON.parse(readback.value);receipt+=`;${readback.key}`;
+     const final=db.query("SELECT at FROM events WHERE kind='release-executor' AND id IN (?,?,?) ORDER BY at DESC LIMIT 1").get(`executor:${m[1]}:readback:success`,`executor:${m[1]}:readback:failure`,`executor:${m[1]}:readback:deadline`) as {at:number}|null;
+     state=result.state==='success'?'success':result.state==='failure'?'failed':'running';done=state==='running'?null:final?.at??null;
+    }
+    return [{windowId:`${m[1]}:${m[2]==='qa'?'qa':'production'}`,state,startedAt:started?.at??null,completedAt:done,receipt}];});
    const first=db.query('SELECT MIN(at) AS at FROM events').get() as {at:number|null};snapshot.releases=first.at===null?failed(now,'release history unavailable'):ok(now,'complete retained release executor inventory',{completeFrom:first.at,completeThrough:now,windows});
+   }catch(error){snapshot.releases=failed(now,String(error));}
    try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
    db.exec('COMMIT');
   }finally{db.close();}

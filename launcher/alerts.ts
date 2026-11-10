@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync,readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join,dirname } from "node:path";
 import { Store } from "../tracking/store";
 import { QualificationSchema } from "./config";
 
@@ -11,6 +11,7 @@ export const mailPath = () => process.env.FACTORY_MAIL_DB ?? join(homedir(), ".a
 // A stable episode ID survives retries/restarts and a crash between stores.
 // Failure to notify never opens admission; later ticks retry the same alarm.
 export function diskCapacityAlert(s:Store,now:number,path=mailPath()) {
+ if(s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))return;
  const r=s.get<{state:string;episode?:string;freeGiB?:number}>('disk-capacity');
  if(!r || !['critical','unknown'].includes(r.state) || !r.episode || s.get(`alert:${r.episode}`))return;
  const summary=r.state==='unknown' ? 'Factory cannot read free disk space; new work is blocked.' : `Factory has ${r.freeGiB?.toFixed(1)} GiB free; new work is blocked below 30 GiB. Please inspect factory capacity.`;
@@ -31,6 +32,7 @@ export function diskCapacityAlert(s:Store,now:number,path=mailPath()) {
 // Use the existing bridge's outbox; never create a replacement store or bot.
 // Stable IDs make retries after a crash idempotent across both SQLite stores.
 export function qualificationAlerts(s: Store, qualifications: Record<string, unknown>, now: number, path = mailPath()) {
+  if(s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))return;
   for (const provider of ["codex", "claude"]) {
     const parsed = QualificationSchema.safeParse(qualifications[provider]);
     if (!parsed.success) continue;
