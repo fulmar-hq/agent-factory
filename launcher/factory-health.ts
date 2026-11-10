@@ -255,9 +255,11 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   else if (now - tick.value.lastSuccessAt > HEALTH_TIMING.tickMaxAge) tickIssues.push(issue("Factory has not completed a tick for over ten minutes"));
   findings.push(finding("tick", tickIssues, "Factory ticks are working again."));
 
+  const renewalProcesses = qualifications.ok ? qualifications.value.records.flatMap(r => r.renewal ? [r.renewal.process] : []) : [];
+  const custodyConflict = work.ok && work.value.running.some(p => renewalProcesses.some(r => p.pid === r.pid || p.sessionId === r.sessionId || p.nativeSessionId === r.nativeSessionId));
   const workIssues: Issue[] = [];
   let workPending = false;
-  if (!work.ok || work.value.claims.some(c => c.heldSince > work.observedAt) ||
+  if (!work.ok || custodyConflict || work.value.claims.some(c => c.heldSince > work.observedAt) ||
     new Set(work.value.claims.map(c => c.id)).size !== work.value.claims.length ||
     new Set(work.value.running.map(p => p.sessionId)).size !== work.value.running.length ||
     new Set(work.value.running.map(p => p.pid)).size !== work.value.running.length ||
@@ -281,7 +283,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   findings.push(finding("disk", !disk.ok ? [unavailable("disk")] : disk.value.usedFraction > 0.85 ? [issue("Factory disk use is above 85%; free space safely")] : [], "Factory disk use is back within its limit."));
 
   function qualificationIssues(through?: number): Issue[] {
-    if (!qualifications.ok) return [unavailable("qualification")];
+    if (!qualifications.ok || custodyConflict) return [unavailable("qualification")];
     const q = qualifications.value;
     const renewals = q.records.flatMap(r => r.renewal ? [r.renewal.process] : []);
     if (new Set(q.required).size !== q.required.length || new Set(q.records.map(r => r.provider)).size !== q.records.length ||

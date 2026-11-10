@@ -582,3 +582,13 @@ test("multi-day watchdog outage retains every intervening release obligation", (
   expect(result.evaluation.findings.find(f => f.condition === "release")!.status).toBe("incident");
   for (const w of missed) expect(result.state.memory.releaseObligations.some(r => r.id === w.id)).toBe(true);
 });
+
+test("conflicting work and renewal inventories cannot clear a stall", () => {
+ const stalled=fixture();stalled.work.value.ready=1;stalled.work.value.inactiveSince=AT-20*M;stalled.work.value.refusal="qualification";
+ const state=advance(initialFactoryHealthState(),stalled),newer=fixture(AT+1);
+ newer.work.value.ready=1;newer.qualifications.value.records[0].expiresAt=AT+H;
+ const renewal=renewing(newer);newer.work.value.running=[{...renewal.process,purpose:"work"}];
+ const result=transitionFactoryHealth(state,newer,()=>AT+1);
+ for(const condition of ["work","qualification"])expect(result.evaluation.findings.find(f=>f.condition===condition)!.status).toBe("unknown");
+ expect(result.state.outbox.filter(n=>n.condition==="work"&&n.kind==="recovery")).toHaveLength(0);
+});
