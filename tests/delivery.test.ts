@@ -2,8 +2,29 @@ import { test, expect } from "bun:test";
 import { deliveryRequest } from "../adapters/delivery";
 import { turnTokens } from "../launcher/budgets";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
+
+test("publisher refuses retained macOS abort fixtures without changing the snapshot",async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {assertMacCrashSafe,testSnapshot}=await import("../adapters/delivery");
+ const checkout=mkdtempSync(join(tmpdir(),"factory-crash-test-")),path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
+ mkdirSync(join(checkout,"infra/ci"),{recursive:true});writeFileSync(path,"os.abort()");
+ const command="python3 -m unittest discover -s infra/ci -p 'test_*.py'";
+ expect(()=>assertMacCrashSafe(checkout,command,"darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,"test -d infra/ci && cd infra/ci && python3 -m unittest -v","darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,command,"linux")).not.toThrow();
+ expect(()=>assertMacCrashSafe(checkout,"node --version","darwin")).not.toThrow();
+ expect(()=>assertMacCrashSafe(checkout,"python3 -m unittest test_other","darwin")).not.toThrow();
+ expect(()=>assertMacCrashSafe(checkout,"python3 -m unittest discover -s infra/ci -p test_other.py","darwin")).not.toThrow();
+ expect(()=>assertMacCrashSafe(checkout,"python3 -m unittest -v -k other","darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,"cd infra && python3 -m unittest discover -s ci","darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,"test -d . && (cd .factory-tmp && true); python3 -m unittest discover -s infra/ci","darwin")).toThrow("crash-producing");
+ if(process.platform==="darwin")await expect(testSnapshot({...ticket(),test:command},checkout,"unused","unused")).rejects.toThrow("crash-producing");
+ expect(readFileSync(path,"utf8")).toBe("os.abort()");
+ writeFileSync(path,"os.kill(os.getpid(), int(child_signal))");
+ expect(()=>assertMacCrashSafe(checkout,command,"darwin")).not.toThrow();
+});
 
 test("source command timeout retains an explicit failure diagnostic",async()=>{
  const {command}=await import("../adapters/github");
@@ -97,7 +118,7 @@ test("publisher fails closed without native isolation and checks claim before im
 test("delivery setup preserves edits and isolates Git metadata and dependencies",async()=>{
  const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,realpathSync,symlinkSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {prepareDelivery,branchFor}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
- const dir=mkdtempSync(join(tmpdir(),"factory-worktree-")),source=join(dir,"source"),work=join(dir,"work"),id="d".repeat(64);
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-worktree-"))),source=join(dir,"source"),work=join(dir,"work"),id="d".repeat(64);
  mkdirSync(source);mkdirSync(join(source,"node_modules"));writeFileSync(join(source,"node_modules/fixture"),"original dependency");symlinkSync(join(source,"node_modules"),join(source,"node_modules/node_modules"));
  const git=(...args:string[])=>command(["git","-C",source,...args]);
  await git("init");await git("config","user.name","Fictional Owner");await git("config","user.email","fictional@example.invalid");
@@ -137,9 +158,15 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
  writeFileSync(join(source,"fixture"),"tested");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","worker");
  await git("bundle","create",".factory-delivery.bundle","HEAD");
  const t={...ticket(),repo:"fulmar-hq/alido",paths:["fixture"]},calls:string[][]=[];
+ let signed="",testedTree="";
  const execute=async(a:string[])=>{
   calls.push(a);
-  if(a.includes("commit-tree"))return command(a.filter(x=>x!=="-S"));
+  if(a.includes("commit-tree")) {testedTree=a[a.indexOf("commit-tree")+2];signed=await command(a.filter(x=>x!=="-S"));return signed;}
+  if(a[0]==="gh" && a[1]==="api") {
+   if(a[2].includes("git/ref/"))return JSON.stringify({ref:`refs/heads/feat/factory-${"a".repeat(16)}`,object:{type:"commit",sha:signed.trim()}});
+   if(a[2].includes("commits/"))return JSON.stringify({sha:signed.trim(),commit:{tree:{sha:testedTree},verification:{verified:true,reason:"valid"}}});
+   if(a[2].includes("pulls/"))return JSON.stringify({html_url:"https://github.com/fulmar-hq/alido/pull/1",state:"open",head:{sha:signed.trim(),ref:`feat/factory-${"a".repeat(16)}`,repo:{full_name:t.repo}},base:{ref:"QA",repo:{full_name:t.repo}}});
+  }
   if(a.includes("verify-commit") || a.includes("push"))return "";
   if(a.includes("list"))return "[]";
   if(a.includes("create") && a[0]==="gh")return "https://github.com/fulmar-hq/alido/pull/1";
@@ -161,4 +188,53 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
  }
  expect(calls.some(a=>a.includes("push"))).toBe(false);expect(calls.some(a=>a.includes("commit-tree"))).toBe(false);
  await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
+});
+
+
+test("dependency copies request clone-aware independent files through the filesystem port",async()=>{
+ const {copyDependencies}=await import("../adapters/delivery"),{constants}=await import("node:fs");
+ let options:unknown;const io={realpathSync:(p:string)=>p,lstatSync:()=>({isSymbolicLink:()=>false,isDirectory:()=>true}),existsSync:()=>false,
+   cpSync:(_from:string,_to:string,opts:unknown)=>{options=opts;},readdirSync:()=>[]};
+ await copyDependencies("/fictional/source","/fictional/target",io as unknown as Parameters<typeof copyDependencies>[2],async()=>{throw Error("portable copy must not shell out");},"linux");
+ const calls:string[][]=[];
+ await copyDependencies("/fictional/source","/fictional/target",io as unknown as Parameters<typeof copyDependencies>[2],async args=>{calls.push(args);return "";},"darwin");
+ expect(calls).toEqual([["cp","-cR","/fictional/source","/fictional/target"]]);
+ expect(options).toMatchObject({mode:constants.COPYFILE_FICLONE,recursive:true,dereference:false,force:false,errorOnExist:true});
+});
+
+test("worker refuses hardlinked dependency objects and shared standalone Git alternates",async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,linkSync,readFileSync,realpathSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {verifyDependencyObjects,prepareDelivery,branchFor}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-shared-refusal-"))),deps=join(dir,"deps");mkdirSync(deps);
+ writeFileSync(join(dir,"shared"),"source");linkSync(join(dir,"shared"),join(deps,"fixture"));
+ expect(()=>verifyDependencyObjects(deps)).toThrow("shared writable");
+ const source=join(dir,"source"),work=join(dir,"work"),id="e".repeat(64);mkdirSync(source);mkdirSync(join(source,"node_modules"));
+ const git=(...args:string[])=>command(["git","-C",source,...args]);
+ await git("init");await git("config","user.name","Fictional");await git("config","user.email","fixture@example.invalid");
+ writeFileSync(join(source,"fixture"),"base");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","fixture");
+ await git("worktree","add","-b",branchFor(id),work,"HEAD");await prepareDelivery(work,source,join(dir,"archive"),id);
+ const alternate=join(work,".git/objects/info/alternates");writeFileSync(alternate,join(source,".git/objects"));
+ await expect(prepareDelivery(work,source,join(dir,"archive"),id)).rejects.toThrow("standalone worker Git");
+ expect(readFileSync(alternate,"utf8")).toBe(join(source,".git/objects"));
+});
+
+test('standalone copy-on-write clone has no live alternates and mutations never change source objects',async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,existsSync,lstatSync,chmodSync,realpathSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {cloneStandalone}=await import('../adapters/delivery'),{command}=await import('../adapters/github');
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),'factory-object-copy-'))),source=join(dir,'source'),target=join(dir,'copy');mkdirSync(source);
+ const git=(...args:string[])=>command(['git','-C',source,...args]);
+ await git('init');writeFileSync(join(source,'fixture'),'retained');await git('add','fixture');
+ await git('-c','user.name=Fictional','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-m','fixture');
+ const sha=(await git('rev-parse','HEAD')).trim();
+ await cloneStandalone(source,target);
+ expect(existsSync(join(target,'.git/objects/info/alternates'))).toBe(false);
+ expect((await command(['git','-C',target,'rev-parse','HEAD'])).trim()).toBe(sha);
+ const object=join(sha.slice(0,2),sha.slice(2)),original=join(source,'.git/objects',object),copied=join(target,'.git/objects',object);
+ const before=readFileSync(original);expect(lstatSync(copied).nlink).toBe(1);expect(lstatSync(copied).ino).not.toBe(lstatSync(original).ino);
+ chmodSync(copied,0o600);writeFileSync(copied,'changed only in disposable test clone');expect(readFileSync(original)).toEqual(before);
+ expect((await git('cat-file','-t',sha)).trim()).toBe('commit');
+ // A source that itself depends on external objects is never copied as standalone.
+ writeFileSync(join(source,'.git/objects/info/alternates'),'/fictional/other/objects');
+ if(process.platform==='darwin')await expect(cloneStandalone(source,join(dir,'refused'))).rejects.toThrow('standalone source');
 });

@@ -1,4 +1,4 @@
-import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync } from "node:fs";
+import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync, cpSync, lstatSync } from "node:fs";
 import { join, dirname, relative, resolve, isAbsolute } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
@@ -27,6 +27,61 @@ export function localizeDependencies(workspace:string, source:string, archive:st
     }
   };
   visit(deps);
+  const verify=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const path=join(dir,entry.name);
+    if(entry.isSymbolicLink()) {
+      const tail=relative(deps,realpathSync(path));
+      if(tail.startsWith("..") || isAbsolute(tail))throw Error("dependency link resolves outside copied install");
+    } else if(entry.isDirectory())verify(path);
+  }};verify(deps);
+}
+
+// Native macOS cp requests APFS copy-on-write; portable COPYFILE_FICLONE
+// falls back to an ordinary independent copy on other filesystems. Never use hardlinks/shared Git objects.
+export async function copyDependencies(source:string, target:string, io = {cpSync,lstatSync,readdirSync,realpathSync,existsSync}, execute=command, platform:NodeJS.Platform=process.platform) {
+  if(io.realpathSync(source)!==resolve(source) || io.lstatSync(source).isSymbolicLink())throw Error("dependency root must be local");
+  if(io.existsSync(target))throw Error("dependency copy target already exists");
+  if(platform==="darwin")await execute(["cp","-cR",source,target]);
+  else io.cpSync(source,target,{recursive:true,mode:constants.COPYFILE_FICLONE,
+    dereference:false,verbatimSymlinks:true,force:false,errorOnExist:true});
+  verifyDependencyObjects(target,io);
+}
+export function verifyDependencyObjects(target:string, io = {lstatSync,readdirSync,realpathSync}) {
+  if(!io.lstatSync(target).isDirectory() || io.realpathSync(target)!==resolve(target))throw Error("shared dependency root refused");
+  const visit=(dir:string)=>{
+    for(const entry of io.readdirSync(dir,{withFileTypes:true})) {
+      const path=join(dir,entry.name),stat=io.lstatSync(path);
+      if(stat.isDirectory())visit(path);
+      else if(stat.isFile() && stat.nlink!==1)throw Error("shared writable dependency object refused");
+      else if(!stat.isFile() && !stat.isSymbolicLink())throw Error("special dependency object refused");
+    }
+  };
+  visit(target);
+}
+
+// Setup is launcher-only. On APFS, replace the temporary reference clone's
+// object directory with independent copy-on-write files BEFORE any model or
+// test process gets custody. No alternates, hardlinks or copied source config.
+export async function cloneStandalone(source:string,target:string,execute=command,platform:NodeJS.Platform=process.platform) {
+  if(platform!=="darwin") {
+    await execute(["git","-c","core.hooksPath=/dev/null","clone","--no-hardlinks","--no-checkout",source,target]);return;
+  }
+  const objects=(await execute(["git","-C",source,"rev-parse","--path-format=absolute","--git-path","objects"])).trim();
+  if(!isAbsolute(objects) || realpathSync(objects)!==objects || existsSync(join(objects,"info/alternates")))throw Error("standalone source objects required");
+  const verify=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const p=join(dir,entry.name),s=lstatSync(p);
+    if(s.isSymbolicLink() || (!s.isFile() && !s.isDirectory()))throw Error("nonlocal Git objects refused");
+    if(s.isDirectory())verify(p);
+  }};verify(objects);
+  await execute(["git","-c","core.hooksPath=/dev/null","clone","--shared","--no-checkout",source,target]);
+  const metadata=join(realpathSync(target),".git"),copied=join(metadata,"objects-independent");
+  await copyDependencies(objects,copied,undefined,execute,platform);
+  verify(copied);
+  // Retain the small setup receipt; Git only reads the new independent objects.
+  renameSync(join(metadata,"objects"),join(metadata,"reference-setup"));
+  renameSync(copied,join(metadata,"objects"));
+  if(existsSync(join(metadata,"objects/info/alternates")))throw Error("shared Git objects refused");
+  await execute(["git","-C",target,"cat-file","-e","HEAD^{commit}"]);
 }
 
 export const deliveryRepo = "fulmar-hq/alido";
@@ -49,6 +104,46 @@ export function executableTest(test:string) {
   return test;
 }
 export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c",executableTest(test)];
+// Retained snapshots may predate the macOS-safe diagnostic test. Refuse the
+// known crashing suite rather than changing a frozen tree or skipping a test.
+export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
+  if(platform!=="darwin" || !/\b(?:unittest|pytest|test_calendar_build_diagnostic)\b/.test(test))return;
+  const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
+  const refuse=()=>{throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");};
+  if(!existsSync(path))return;
+  const fixture=lstatSync(path),root=realpathSync(checkout),target=realpathSync(path),inside=relative(root,target);
+  if(!fixture.isFile()||fixture.isSymbolicLink()||fixture.nlink!==1||fixture.size>1024*1024||inside.startsWith("..")||isAbsolute(inside))refuse();
+  if(!readFileSync(path,"utf8").includes("os.abort()"))return;
+  if(/test_calendar_build_diagnostic/.test(test))refuse();
+  for(const match of test.matchAll(/\bunittest\b([^;&|]*)/g)) {
+    if(/[(){}|`$]/.test(test.slice(0,match.index)) || /\b(?:if|then|else|elif|fi|case|esac|for|while|until|do|done|eval|source|pushd|popd)\b/.test(test.slice(0,match.index)) || /(?:^|[;&])\s*\.\s/.test(test.slice(0,match.index)))refuse();
+    let cwd=realpathSync(checkout);
+    for(const cd of test.slice(0,match.index).matchAll(/\bcd\s+([^\s;&|]+)/g)) {
+      const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value)||value.startsWith("-"))refuse();try{cwd=realpathSync(resolve(cwd,value));}catch{refuse();}
+    }
+    const args=match[1]!.trim().split(/\s+/).filter(Boolean).map(s=>s.replace(/^['"]|['"]$/g,""));
+    let discovery=false,start=cwd,pattern="test*.py";const names:string[]=[];
+    for(let i=0;i<args.length;i++) {
+      const arg=args[i]!;if(arg==="discover"){discovery=true;continue;}
+      if(["-v","-q","-f","-b","-c","--verbose","--quiet","--failfast","--buffer","--catch","--locals"].includes(arg))continue;
+      if(arg==="-k"){if(!args[++i])refuse();continue;}
+      if(["-s","--start-directory","-p","--pattern","-t","--top-level-directory"].includes(arg)) {
+        const value=args[++i];if(!value || !/^[A-Za-z0-9_./*?\[\]-]+$/.test(value))refuse();
+        if(arg==="-s"||arg==="--start-directory")start=resolve(cwd,value!);else if(arg==="-p"||arg==="--pattern")pattern=value!;continue;
+      }
+      if(!/^[A-Za-z0-9_./]+$/.test(arg))refuse();names.push(arg);
+    }
+    if(!discovery&&names.length)continue;
+    if(discovery){if(names.length>3)refuse();if(names[0])start=resolve(cwd,names[0]);if(names[1])pattern=names[1];}
+    try{start=realpathSync(start);}catch{refuse();}
+    const tail=relative(start,target);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
+  }
+  // Other test runners are unresolved collection unless explicitly scoped to files.
+  for(const match of test.matchAll(/\bpytest\b([^;&|]*)/g)) {
+    const paths=match[1]!.trim().split(/\s+/).filter(s=>s&&!s.startsWith("-"));
+    if(!paths.length||paths.some(p=>!p.endsWith(".py")||!/^[A-Za-z0-9_./]+$/.test(p)))refuse();
+  }
+}
 export function prepareTestScratch(checkout:string) {
   mkdirSync(join(checkout,".factory-tmp"),{recursive:true});
   appendFileSync(join(checkout,".git/info/exclude"),"\n.factory-tmp/\n");
@@ -64,16 +159,25 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     const branch=(await git("branch","--show-current")).trim();
     if (branch !== branchFor(id)) throw Error("worker branch mismatch");
     const clone=join(archive,"local-clone");
-    await command(["git","clone","--no-hardlinks","--no-checkout",source,clone]);
+    await cloneStandalone(source,clone);
     await command(["git","-C",clone,"checkout","-b",branch,head]);
     renameSync(join(workspace,".git"),join(archive,"original-gitfile"));
     renameSync(join(clone,".git"),join(workspace,".git"));
   }
   if (!existsSync(join(workspace,"node_modules"))) {
     if (!existsSync(join(source,"node_modules"))) throw Error("installed dependencies missing");
-    await command(process.platform === "darwin" ? ["cp","-cR",join(source,"node_modules"),join(workspace,"node_modules")] : ["cp","-R",join(source,"node_modules"),join(workspace,"node_modules")]);
+    await copyDependencies(join(source,"node_modules"),join(workspace,"node_modules"));
   }
+  verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
+  const metadata=join(workspace,".git");
+  if(realpathSync(metadata)!==metadata || existsSync(join(metadata,"commondir")) || existsSync(join(metadata,"objects/info/alternates")))throw Error("standalone worker Git required");
+  const checkGit=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const path=join(dir,entry.name),stat=lstatSync(path);
+    if(stat.isSymbolicLink() || (stat.isFile() && stat.nlink!==1))throw Error("shared writable worker Git object refused");
+    if(stat.isDirectory())checkGit(path);
+  }};checkGit(metadata);
+  if((await git("branch","--show-current")).trim()!==branchFor(id))throw Error("worker branch mismatch");
   const exclude=join(workspace,".git/info/exclude");
   const {appendFileSync}=await import("node:fs");
   appendFileSync(exclude,"\n.factory-tmp/\n.factory-delivery.bundle\n");
@@ -124,7 +228,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   const snapshot=join(dir,`incoming-${crypto.randomUUID()}.bundle`);
   snapshotBundle(join(workspace,".factory-delivery.bundle"),snapshot);
   const checkout=join(dir,`publish-${crypto.randomUUID()}`);
-  await execute(["git","-c","core.hooksPath=/dev/null","clone","--no-hardlinks","--no-checkout",trustedSource,checkout]);
+  await cloneStandalone(trustedSource,checkout,execute);
   const git=(...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","user.name=Vincent Messina","-c","user.email=72951696+vincentmessina@users.noreply.github.com","-c","core.attributesFile=/dev/null","-C",checkout,...args]);
   await git("config","core.hooksPath","/dev/null");
   await git("fetch","--no-tags",snapshot,"HEAD");
@@ -160,16 +264,20 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   const base=t.repo===deliveryRepo ? "QA" : "main";
   const existing=JSON.parse(await execute(["gh","pr","list","--repo",t.repo,"--head",branch,"--base",base,"--json","url"]));
   const url=existing[0]?.url ?? (await execute(["gh","pr","create","--repo",t.repo,"--base",base,"--head",branch,"--title",t.title,"--body",`refs #${t.number}\nLauncher tested tree: ${tree}\nLauncher signed commit: ${signed}`])).trim();
-  return {head:signed,tree,url,branch,repo:t.repo};
+  const result={head:signed,tree,url,branch,repo:t.repo};
+  const {verifyPublished}=await import("../launcher/delivery-retention");
+  await verifyPublished(result,execute);
+  return result;
 }
 
 // Tests run in the worker boundary, never with launcher credentials. The caller
 // checks clean status and the tree again after this process exits.
 export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
   executableTest(t.test);
+  assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
-    await command(["cp","-R",join(source,"node_modules"),join(checkout,"node_modules")]);
+    await copyDependencies(join(source,"node_modules"),join(checkout,"node_modules"));
     localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
   }
   // Tests retain scratch receipts (including Vitest's local token). They are
