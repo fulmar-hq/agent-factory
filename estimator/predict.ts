@@ -51,7 +51,7 @@ export function score(rows: History[]) {
   const errors = Object.fromEntries(dimensions.map(d => [d,{count:0, candidate:0, mean:0}])) as Record<Dimension,{count:number;candidate:number;mean:number}>;
   // Chronological held-out predictions: every training row completed before target launch.
   for (const row of chronological(rows)) for (const d of dimensions) {
-    if (row.imported || row[d] === null || rows.filter(r => r.completed < row.started && r.provider === row.provider && r[d] !== null).length < 5) continue;
+    if (row.imported || row[d] === null || rows.filter(r => !r.imported && r.completed < row.started && r.provider === row.provider && r[d] !== null).length < 5) continue;
     const candidate = predict(rows,row,row.started,d,true), mean = predict(rows,row,row.started,d,false);
     if (candidate === null || mean === null) continue;
     errors[d].count++;

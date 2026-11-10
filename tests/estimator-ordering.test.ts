@@ -112,3 +112,9 @@ test("dimension-specific comparable and provider fallback preserve unknown token
   for (const shuffled of permutations(input)) expect(estimate(shuffled,target,100000,evaluation)).toEqual(forecast);
   expect(estimate(Array.from({length:50}, (_,n) => row(n,10)),target,100000).method).toBe("mean");
 });
+
+
+test('an imported predecessor cannot promote the default forecast',()=>{
+ const rows=Array.from({length:24},(_,i)=>({...target,id:String(i),started:1000+i*1000,completed:1500+i*1000,seconds:i<10?100:1,tokens:i<10?1000:10,elapsed:i<10?200:2,imported:false}));const imported={...rows[0]!,id:'imported',started:1,completed:2,imported:true};
+ expect(score([...rows,imported])).toEqual(score(rows));expect(estimate([...rows,imported],target,100000)).toEqual(estimate(rows,target,100000));
+});
