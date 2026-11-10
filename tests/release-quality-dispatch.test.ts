@@ -5,8 +5,8 @@ import {config} from './fixtures';
 import {runOwner} from '../launcher/owner';
 import {tmpdir} from 'node:os';
 import {Store} from '../tracking/store';
-import {ownerRuntimeKey,dispatchWake,queueWake,pendingWakes,type Wake} from '../launcher/wake';
-import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
+import {ownerRuntimeKey,queueWake,pendingWakes,type Wake} from '../launcher/wake';
+import {testDispatchWake as dispatchWake,testDispatchReleaseQuality as dispatchReleaseQuality} from './fixtures';
 test('busy acceptance remains exclusively with pinned release source and later dispatches once',()=>{
  const s=new Store(':memory:');const w:Wake={id:'fictional-pinned',owner:'quality',kind:'qa-deployed',payload:{deadline:Date.now()+60000}};
  let starts=0;try{

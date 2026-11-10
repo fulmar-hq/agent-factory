@@ -1,4 +1,6 @@
 import {githubPages} from '../adapters/github-pages';
+import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
+import {dirname} from 'node:path';
 import { recordPulls, pullFields, type BoardPull } from "../board/pulls";
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
@@ -23,10 +25,12 @@ const wakePriority=(w:Wake)=>w.kind==='qa-deployed'?-3:w.kind==='production-veri
 export function pendingWakes(s:Store) {
  return (s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value)).filter((r:Wake & {state:string})=>r.state==='queued').sort((a:Wake,b:Wake)=>wakePriority(a)-wakePriority(b)) as Wake[];
 }
-export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity) {
+export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=processIdentity,diskProbe:()=>DiskReading=()=>diskReading(s.db.filename===":memory:" ? undefined : dirname(s.db.filename))) {
  const claimed=s.atomic(()=>{
   const queued=s.get<Wake & {state:string}>(`owner-wake:${w.id}`);
   if(queued?.state!=='queued')return false;
+  try {requireDiskCapacity(diskProbe);}
+  catch {return false;} // Keep the wake queued; no owner runtime claimed.
   if(queued.kind==='qa-deployed'){
    const deadline=(queued.payload as {deadline?:number})?.deadline;
    if(!Number.isSafeInteger(deadline) || Date.now()>=deadline!){

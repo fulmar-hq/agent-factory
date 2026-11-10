@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
 import { branchFor } from "../adapters/delivery";
 import { planDeliveryRetention, archiveDeliveryRetention, verifyPublished, verifyNativeTerminal, verifyProcessCustody,

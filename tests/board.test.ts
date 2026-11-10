@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { board } from "../board/server";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { ticket, admission } from "./fixtures";
 import { config } from "./fixtures";
 test("board binds loopback, shows local data, rejects helper and cross-origin writes", async () => {
