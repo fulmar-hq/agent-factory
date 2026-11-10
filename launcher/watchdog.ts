@@ -15,7 +15,13 @@ export function observeClaimProgress(e:Engine,h:{at:number;claimed:number;paused
 }
 export function checkClaimStall(e:Engine,now:number) {
  return e.s.atomic(()=>{
-  const p=e.s.get<ClaimProgress>('claim-progress');
+  let p=e.s.get<ClaimProgress>('claim-progress');
+  const free=e.s.get('paused')===false&&e.slots().free>0;
+  if(!p){p={since:now,at:now,free,claimed:0};e.s.set('claim-progress',p);}
+  else if(now>p.at){
+   const last=e.s.db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation') AND at<=?").get(now) as {at:number|null};
+   p={...p,since:!free||!p.free||(last.at!==null&&last.at>p.at)?now:p.since,at:now,free,claimed:0};e.s.set('claim-progress',p);
+  }
   const old=e.s.get<{id:string;state:string}>('watchdog-stall');
   const stalled=p && p.free && e.s.get('paused')===false && e.slots().free>0 && now>=p.since+7200000;
   if(stalled){

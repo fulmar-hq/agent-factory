@@ -1,10 +1,11 @@
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
 import {Engine} from '../launcher/engine';
-import {claimableReady,reviewPublished} from '../launcher/queue';
+import {claimableReady,reviewPublished as reconcilePublished} from '../launcher/queue';
 import {observeClaimProgress,checkClaimStall} from '../launcher/watchdog';
 import {intakeLabel,type Issue} from '../adapters/github';
 import {config,ticket,admission,now} from './fixtures';
+const reviewPublished=(e:Engine,execute:Parameters<typeof reconcilePublished>[1])=>reconcilePublished(e,execute,()=> 'fictional-review-process');
 function setup(){const e=new Engine(new Store(':memory:'),config());e.pause(false,'owner');return e;}
 function fixture(){
  const e=setup(),t=ticket();
@@ -73,3 +74,7 @@ test('stopped dormant custody cannot hide free builder slots from the watchdog',
 });
 
 test('independent watchdog ages a last successful claim without another tick',()=>{const e=setup();try{const x=e.admit(ticket(),admission());observeClaimProgress(e,{at:now,claimed:1,paused:false});e.finish(x.id,true);expect(checkClaimStall(e,now+7200001)).toMatchObject({state:'open'});}finally{e.s.close();}});
+
+test('independent checks begin a conservative interval when full capacity becomes free',()=>{const e=setup();try{const workers=[e.admit(ticket(1),admission()),e.admit(ticket(2),admission())];observeClaimProgress(e,{at:now,claimed:2,paused:false});for(const x of workers)e.finish(x.id,true);expect(checkClaimStall(e,now+7200001)).toBeNull();expect(checkClaimStall(e,now+14400001)).toMatchObject({state:'open'});}finally{e.s.close();}});
+
+test('dismissed reviews cannot replay an old publication over its retained return marker',async()=>{const r=fixture();try{await reviewPublished(r.e,async a=>a[1]==='pr'?JSON.stringify({state:'OPEN',url:'https://github.com/example/demo/pull/2',reviewDecision:'CHANGES_REQUESTED'}):r.execute(a));expect(r.e.s.get(`review-returned:${r.x.id}:${r.t.approvalDigest}`)).not.toBeNull();expect(await reviewPublished(r.e,r.execute)).toBe(0);expect(r.i.labels[0].name).toBe('state:ready');expect(r.calls.filter(a=>a.includes('edit'))).toHaveLength(0);}finally{r.e.s.close();}});

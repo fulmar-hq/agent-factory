@@ -19,6 +19,7 @@ test("publisher refuses retained macOS abort fixtures without changing the snaps
  expect(()=>assertMacCrashSafe(checkout,"python3 -m unittest discover -s infra/ci -p test_other.py","darwin")).not.toThrow();
  expect(()=>assertMacCrashSafe(checkout,"python3 -m unittest -v -k other","darwin")).toThrow("crash-producing");
  expect(()=>assertMacCrashSafe(checkout,"cd infra && python3 -m unittest discover -s ci","darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,"test -d . && (cd .factory-tmp && true); python3 -m unittest discover -s infra/ci","darwin")).toThrow("crash-producing");
  if(process.platform==="darwin")await expect(testSnapshot({...ticket(),test:command},checkout,"unused","unused")).rejects.toThrow("crash-producing");
  expect(readFileSync(path,"utf8")).toBe("os.abort()");
  writeFileSync(path,"os.kill(os.getpid(), int(child_signal))");

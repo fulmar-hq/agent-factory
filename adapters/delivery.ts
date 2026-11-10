@@ -88,6 +88,7 @@ export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS
   const refuse=()=>{throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");};
   if(/test_calendar_build_diagnostic/.test(test))refuse();
   for(const match of test.matchAll(/\bunittest\b([^;&|]*)/g)) {
+    if(/[(){}|`$]/.test(test.slice(0,match.index)))refuse();
     let cwd=checkout;
     for(const cd of test.slice(0,match.index).matchAll(/\bcd\s+([^\s;&|]+)/g)) {
       const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value))refuse();cwd=resolve(cwd,value);
