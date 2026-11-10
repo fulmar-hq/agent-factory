@@ -21,6 +21,7 @@ export function maintenancePort(s:Store):MaintenancePort{return {
  challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}},
  verifyChallenge:c=>nativeChallenge(c,homedir()),
  signed:async(head,tree)=>{const c=await api(`commits/${head}`);return c.sha===head&&c.commit.tree.sha===tree&&c.commit.verification.verified===true&&c.commit.verification.reason==='valid';},
+ merged:async number=>{const p=await api(`pulls/${number}`);if(p.base?.ref!=='main'||p.base?.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('merge reconciliation repository/base differs');if(!p.merged)return {state:p.state==='open'?'OPEN':'CLOSED',head:p.head.sha};const c=await api(`git/commits/${p.merge_commit_sha}`);return {state:'MERGED',head:p.head.sha,revision:p.merge_commit_sha,tree:c.tree.sha};},
  merge:async(number,head)=>{await command(['gh','pr','merge',String(number),'--repo',factoryRepository,'--squash','--match-head-commit',head]);const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
  install:async target=>{
   if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');
@@ -42,6 +43,6 @@ if(import.meta.main){
  try{mkdirSync(lock,{mode:0o700});}catch{throw Error('maintenance already claimed; reconcile retained lock before retry');}
  writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),checkout:repo}),{mode:0o600});
  const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
- try{s.atomic(()=>{if(s.get<{state:string}>('launcher-maintenance-lease')?.state==='active')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
+ try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
  finally{if(ownsLease&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
 }

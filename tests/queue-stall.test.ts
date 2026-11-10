@@ -67,3 +67,7 @@ test('unknown legacy digest and archived same digest do not count as supply',()=
   expect(claimableReady(r.e,[{...r.t,approvalDigest:'ready:'+'b'.repeat(43)}])).toHaveLength(0);
  }finally{r.e.s.close();}
 });
+
+test('stopped dormant custody cannot hide free builder slots from the watchdog',()=>{
+ const e=setup();try{for(const n of [1,2]){const x=e.admit(ticket(n),admission());e.s.db.query("UPDATE sessions SET status='paused',pid=NULL WHERE id=?").run(x.id);e.s.set(`cleanup-evidence:${x.id}`,{verified:true});}expect(e.active()).toHaveLength(2);expect(e.slots().free).toBe(2);observeClaimProgress(e,{at:now,claimed:0,paused:false});observeClaimProgress(e,{at:now+7200000,claimed:0,paused:false});expect(e.s.get('watchdog-stall')).toMatchObject({state:'open'});expect(e.active()).toHaveLength(2);}finally{e.s.close();}
+});
