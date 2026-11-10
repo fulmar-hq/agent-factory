@@ -63,9 +63,9 @@ export function qualificationAlerts(s: Store, qualifications: Record<string, unk
 // heartbeat remains fresh. Failed/stopped monitoring restores the legacy path.
 export function healthOwnsAlerts(dir:string,now:number){try{const value=JSON.parse(readFileSync(join(dir,'health','heartbeat.json'),'utf8'));return Number.isSafeInteger(value.at)&&value.at>=0&&value.at<=now&&now-value.at<=10*60000;}catch{return false;}}
 
-export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'|'release',now:number,except='',healthOnly=false):{id:string;summary:string}|null{
+export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'|'release'|'work',now:number,except='',healthOnly=false):{id:string;summary:string}|null{
  if(!existsSync(path))return null;const db=new Database(path,{readonly:true,strict:true});
- try{const legacy=healthOnly?'0':condition==='qualification'?"id LIKE 'qualification-expiry:%'":condition==='disk'?"sender_ref='factory-disk'":"id LIKE 'release-preflight-missing:%'";
+ try{const legacy=healthOnly?'0':condition==='qualification'?"id LIKE 'qualification-expiry:%'":condition==='disk'?"sender_ref='factory-disk'":condition==='work'?"id LIKE 'claim-stall:%'":"id LIKE 'release-preflight-missing:%'";
  const rows=db.query(`SELECT id,summary,created_at FROM messages WHERE recipient='Vincent' AND recipient_app='telegram' AND id<>? AND created_at<=? AND (id LIKE ? OR (${legacy})) ORDER BY created_at DESC LIMIT 32`).all(except,now,`factory-health:${condition}:%:opening:Vincent`) as {id:string;summary:string;created_at:number}[];
  for(const row of rows){if(row.created_at>=now-2*3600000)return row;const table=db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_messages'").get();if(!table||!db.query('SELECT 1 FROM telegram_messages WHERE mail_id=? LIMIT 1').get(row.id))return row;}return null;
  }finally{db.close();}
@@ -74,6 +74,7 @@ export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'
 // One bridge message per durable watchdog incident, even across a crash between
 // outbox insertion and local receipt. Resolution is recorded without a message.
 export function watchdogAlert(s:Store,now:number,path=mailPath()) {
+ if((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'work',now,'',true))return;
  const incident=s.get<{id:string;state:string;summary:string}>('watchdog-stall');
  if(!incident || incident.state!=='open' || s.get(`alert:${incident.id}`))return;
  try {

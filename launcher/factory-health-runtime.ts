@@ -88,7 +88,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    const first=db.query('SELECT MIN(at) AS at FROM events').get() as {at:number|null};snapshot.releases=first.at===null?failed(now,'release history unavailable'):ok(now,'complete retained release executor inventory',{completeFrom:first.at,completeThrough:now,windows});
    }catch(error){snapshot.releases=failed(now,String(error));}
    try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
-   const day=healthReleaseWindows(now)[0]!.day,report=get<{day:string;validThrough:number;ready:boolean;missing:{input:string;reason:string}[]}>(`release-preflight-report:${day}`);if(report){const saved=db.query("SELECT at FROM events WHERE id=? AND kind='release-readiness'").get(`release-readiness:${day}`) as {at:number}|null;snapshot.readiness=ok(saved?.at??now,`release-preflight-report:${day}`,{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});}
+   const day=healthReleaseWindows(now)[0]!.day,report=get<{day:string;validThrough:number;ready:boolean;missing:{input:string;reason:string}[]}>(`release-preflight-report:${day}`);if(report){const saved=db.query("SELECT at,data FROM events WHERE id=? AND kind='release-readiness'").get(`release-readiness:${day}`) as {at:number;data:string}|null;if(!saved||JSON.stringify(JSON.parse(saved.data))!==JSON.stringify(report))snapshot.readiness=failed(now,'authoritative preflight report receipt unavailable or mismatched');else snapshot.readiness=ok(saved.at,`release-preflight-report:${day}`,{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});}
    db.exec('COMMIT');
   }finally{db.close();}
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
@@ -124,11 +124,11 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   save();db.exec('COMMIT');
   const bridge=healthBridge(mail);
   try{for(const pending of pendingHealthDeliveries(state,()=>now)){
-   const notification=state.outbox.find(n=>n.id===pending.notificationId)!;const preflight=healthReleaseWindows(now).find(w=>w.stage==='qa'&&now>=w.startAt-3600000&&now<w.startAt-3600000+5*60000);if(notification.condition==='release'&&notification.kind==='opening'&&preflight)continue;
+
    db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
    const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;save();db.exec('COMMIT');
    const command=begun.command,id=command.idempotencyKey,condition=state.outbox.find(n=>n.id===command.notificationId)!.condition;
-   const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release',now,id):null;
+   const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release'|'work',now,id):null;
    if(!related)bridge.send(id,command.recipient,command.message);
    const receipt=bridge.delivered(related?.id??id,command.recipient);
    if(receipt){db.exec('BEGIN IMMEDIATE');const latest=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=acknowledgeHealthDelivery(FactoryHealthStateSchema.parse(JSON.parse(latest.json)),command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
