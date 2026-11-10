@@ -51,7 +51,7 @@ export function isLocalPreview(url:string) {
   const host=new URL(url).hostname.toLowerCase().replace(/\.$/,"");
   const mapped=host.match(/^\[::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}\]$/);
   const mappedLoopback=mapped!==null && (Number.parseInt(mapped[1]!,16) >>> 8)===127;
-  return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host === "0.0.0.0" || /^127(?:\.[0-9]{1,3}){3}$/.test(host) || mappedLoopback;
+  return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host === "[::]" || host === "[::ffff:0:0]" || host === "0.0.0.0" || /^127(?:\.[0-9]{1,3}){3}$/.test(host) || mappedLoopback;
 }
 export function queueBrowser(e: Engine, parent: string, raw: unknown, now = Date.now()) {
   const request = BrowserNeeded.parse(raw);
