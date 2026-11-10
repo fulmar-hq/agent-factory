@@ -24,3 +24,32 @@ test('legacy critical free-space alert remains when percentage alarm is not cove
 test('legacy qualification fallback reuses recent independent alarm history',async()=>{const {qualificationAlerts}=await import('../launcher/alerts'),{qualification}=await import('./fixtures');const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),now=Date.now();try{const b=healthBridge(f.path);b.send('factory-health:qualification:1:fictional:opening:Vincent','Vincent','Fictional qualification warning');b.close();qualificationAlerts(s,{codex:{...qualification(),expiresAt:now+3600000}},now+11*60000,f.path);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);}finally{s.close();f.db.close();}});
 
 test('conflicting required owner models cannot collapse into one healthy qualifier',async()=>{const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),now=Date.now()+1000,c=config();try{s.set('paused',false);s.set('heartbeat',{at:now,status:'ok',ready:0});s.event('start','resume',{},'retain',now-1);c.owners.other={harness:'codex',model:'different-required-model',effort:'medium'};writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(c));writeFileSync(join(f.dir,'qualifications.json'),'{}');writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at:now,status:'ok'})+'\n');const r=await collectFactoryHealth(f.dir,now,null,undefined,async()=>{throw Error('fictional hold');});expect(r.snapshot.qualifications?.state).toBe('unavailable');expect(r.snapshot.controller?.state).toBe('ok');}finally{s.close();f.db.close();}});
+
+
+test('late Telegram receipt retains its original reused bridge row across restarts',async()=>{
+ const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),base=Date.parse('2026-11-10T12:00:00-05:00');
+ try{s.set('paused',false);s.event('init','resume',{},'retain',base-86400000);writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(f.dir,'qualifications.json'),'{}');
+  f.db.query("INSERT INTO messages(id,created_at,recipient,recipient_app,summary) VALUES(?,?,'Vincent','telegram',?)").run('qualification-expiry:codex:fictional',base,'Fictional legacy warning');
+  const run=async(at:number)=>{s.set('heartbeat',{at,status:'ok',ready:0});writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at,status:'ok'})+'\n');return watchFactoryHealth(f.dir,f.path,at,{execute:async()=>{throw Error('fictional unavailable network');}});};
+  await run(base);f.db.query('INSERT INTO telegram_messages VALUES(?,?,?)').run(123,'qualification-expiry:codex:fictional',base+121*60000);await run(base+122*60000);
+  expect(f.db.query("SELECT id FROM messages WHERE id LIKE 'factory-health:qualification:%:opening:Vincent'").all()).toHaveLength(0);
+  const db=new Database(join(f.dir,'health/state.sqlite'),{readonly:true});try{expect(db.query("SELECT bridge_id FROM delivery_links WHERE recipient='Vincent' AND bridge_id=?").all('qualification-expiry:codex:fictional')).toHaveLength(1);}finally{db.close();}
+ }finally{s.close();f.db.close();}
+});
+
+test('live wallet changes advance decision observation while cached bill keeps its original age',async()=>{
+ const {evaluateFactoryHealth}=await import('../launcher/factory-health');const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),base=Date.parse('2026-11-10T12:00:00-05:00');
+ try{s.set('paused',false);s.event('init','resume',{},'retain',base-86400000);writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(f.dir,'qualifications.json'),'{}');writeFileSync(join(f.dir,'release-billing.json'),JSON.stringify({observedAt:base,month:'2026-11',postedCents:0,unpostedCents:0,fixedCents:0,projectedCents:0,receipt:'fictional bill'}));
+  const collect=async(at:number)=>{s.set('heartbeat',{at,status:'ok',ready:0});writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at,status:'ok'})+'\n');return (await collectFactoryHealth(f.dir,at,null,undefined,async()=>{throw Error('fictional unavailable network');})).snapshot;};
+  s.set('aws-stop-latched',true);const first=await collect(base),one=evaluateFactoryHealth(first,()=>base);s.set('aws-stop-latched',false);const second=await collect(base+60000),two=evaluateFactoryHealth(second,()=>base+60000,one.memory);
+  expect(second.billing).toMatchObject({state:'ok',observedAt:base+60000,value:{billingObservedAt:base,allowed:true}});expect(two.memory.observations.billing?.conflicted).toBe(false);
+ }finally{s.close();f.db.close();}
+});
+
+test('monitoring windows recompute all effective readiness checks without refreshing AWS billing',async()=>{
+ const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),now=Date.parse('2026-11-10T20:40:00-05:00'),calls:string[][]=[];
+ try{s.set('paused',false);s.event('init','resume',{},'retain',now-86400000);s.set('heartbeat',{at:now,status:'ok',ready:0});writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(f.dir,'qualifications.json'),'{}');writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at:now,status:'ok'})+'\n');writeFileSync(join(f.dir,'release-billing.json'),JSON.stringify({observedAt:now-3600000,month:'2026-11',postedCents:0,unpostedCents:0,fixedCents:0,projectedCents:0,receipt:'fictional cached bill'}));
+  const r=await collectFactoryHealth(f.dir,now,null,undefined,async args=>{calls.push(args);if(args[0]==='git')return 'a'.repeat(40);if(args[0]==='/bin/df')return 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/fictional 100000000 1000000 99000000 1% /System/Volumes/Data\n';throw Error('fictional missing dependency');});
+  expect(r.snapshot.readiness).toMatchObject({state:'ok',observedAt:now,value:{ready:false}});expect(calls.some(args=>args[0]==='aws')).toBe(false);expect(calls.some(args=>args.includes('actions/variables/QA_HOLD'))).toBe(false);expect(calls.some(args=>args.some(a=>a.endsWith('/actions/variables/QA_HOLD')))).toBe(true);
+ }finally{s.close();f.db.close();}
+});

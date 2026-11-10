@@ -16,7 +16,7 @@ type Carrier={day:string;base:string;revision:string;tree:string;pr:number;ref:s
 type Disk={freeGiB:number;usedFraction:number;source?:string;path?:string};
 type Missing={input:string;reason:string};
 export type ReleaseReadiness={day:string;at:number;validThrough:number;ready:boolean;missing:Missing[];evidence:Record<string,unknown>};
-export type ReadinessOptions={dir:string;config:Config;store:Store;brake:string|null;billingRefusal?:string|null;billingEvidence?:unknown;factorySource?:string;readings?:{codex?:Meter;claude?:Meter};carrier?:Carrier;now?:number;execute?:typeof command;readJSON?:typeof optionalJSON;disk?:()=>Disk|Promise<Disk>;identity?:typeof processIdentity};
+export type ReadinessOptions={dir:string;config:Config;store:Pick<Store,'get'>;brake:string|null;billingRefusal?:string|null;billingEvidence?:unknown;factorySource?:string;readings?:{codex?:Meter;claude?:Meter};carrier?:Carrier;now?:number;execute?:typeof command;readJSON?:typeof optionalJSON;disk?:()=>Disk|Promise<Disk>;identity?:typeof processIdentity};
 const repo='fulmar-hq/alido';
 const record=(v:unknown):v is Record<string,unknown>=>!!v && typeof v==='object' && !Array.isArray(v);
 const heldLabel=(l:unknown)=>record(l)&&typeof l.name==='string'&&['qa hold','qa-hold'].includes(l.name.toLowerCase());
