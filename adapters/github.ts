@@ -81,13 +81,14 @@ export async function reconcile(
   for (const project of Object.values(c.projects)) {
     try {
       const issues = await githubPages(project.repo,'issues',execute) as Issue[];
+      const repositoryReady:Ticket[]=[];
       s.atomic(() => {
         for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
           try {
             const t = issueTicket(project.repo, i);
-            if (t) ready.push(t);
+            if (t) repositoryReady.push(t);
           } catch (e) {
             decision = String(e);
           }
@@ -111,8 +112,10 @@ export async function reconcile(
           error: null,
         });
       });
+      ready.push(...repositoryReady);
     } catch (e) {
-      s.set(`github:${project.repo}`, { error: String(e), observedAt: now });
+      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now });}
+      catch{console.error(`GitHub failure receipt unavailable for ${project.repo}; candidates remain refused.`);}
     }
   }
   return ready;
