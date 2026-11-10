@@ -21,7 +21,7 @@ import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
-import { qualificationAlerts,watchdogAlert,diskCapacityAlert } from "./alerts";
+import {qualificationAlerts,watchdogAlert,diskCapacityAlert} from "./alerts";
 import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
 import { qualificationFor } from "./usage-push-policy";
