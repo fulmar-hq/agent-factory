@@ -253,3 +253,6 @@ test("a native workdir override cannot substitute another relative probe",()=>{c
 test("a late-only descendant cleanup observation cannot qualify",()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.final.at=now-1;});expect(f.collect().status).toBe("refused");});
 
 test("installed CLI shell wrapper still binds the exact immutable probe",()=>{const f=fixture(),r=f.m.runs[0],raw=Buffer.from(f.read(r.stream.path)).toString().replace(`"command":"/usr/bin/python3 ${f.m.probe.path}"`,`"command":"/bin/zsh -c '/usr/bin/python3 ${f.m.probe.path}'"`),b=bytes(raw);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe("verified");});
+
+test("turn context cwd cannot redirect a relative probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x[1].payload.cwd="/unrelated-workspace";},true);expect(f.collect().status).toBe("refused");});
+test("an aborted native turn before the budget stop cannot qualify",()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+200).toISOString(),type:"event_msg",payload:{type:"turn_aborted"}});},true);expect(f.collect().status).toBe("refused");});

@@ -170,7 +170,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat((p?.model === undefined || p.model === m.model) && (p?.effort === undefined || p.effort === r.effort), "conflicting native model/effort");
     requireThat(row.type !== "error" && p?.type !== "error", "native receipt error");
     if (row.type === "turn_context") {
-      requireThat(p?.model === m.model && p.effort === r.effort, "native model/effort mismatch"); contexts++;
+      requireThat(p?.model === m.model && p.effort === r.effort && (p.cwd === undefined || p.cwd === r.workspace), "native model/effort/cwd mismatch"); contexts++;
     }
     if (row.type === "event_msg" && p?.type === "token_count" && p.info !== null) {
       requireThat(contexts > 0, "accounting before native context");
@@ -179,7 +179,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       counters.push({ at: timestamp, usage: u });
     }
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) completed++;
-    if (row.type === "event_msg" && ["error", "turn_aborted"].includes(p?.type ?? "") && r.kind === "security") throw Error("native security turn failed");
+    if (row.type === "event_msg" && ["error", "turn_aborted"].includes(p?.type ?? "") && (r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)) throw Error("native turn failed before controlled stop");
     if (row.type === "response_item" && p?.type === "function_call") {
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
