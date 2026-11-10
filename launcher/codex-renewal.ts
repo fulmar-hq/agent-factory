@@ -22,13 +22,13 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
  const bytes=readFileSync(join(dir,'qualifications.json'),'utf8'),q=JSON.parse(bytes),fingerprint=renewalFingerprint(checkout,version);
  let prior:unknown;
  try{prior={version:QualificationSchema.parse(q.codex).version,hashes:JSON.parse(readFileSync(join(dirname(QualificationSchema.parse(q.codex).evidence),'source-hashes.json'),'utf8'))};}catch{/* No matching material evidence makes renewal due, never qualified. */}
- const due=renewalDue(q,fingerprint,prior,now),delivery=e.s.get<{expiresAt:number}>('delivery-qualified');
+ const due=renewalDue(q,fingerprint,prior,now),workerDueAt=due.dueAt,delivery=e.s.get<{expiresAt:number}>('delivery-qualified');
  if(delivery&&Number.isSafeInteger(delivery.expiresAt))due.dueAt=Math.min(due.dueAt,delivery.expiresAt-6*3600000);
  const expectedPublisher=publisherBoundary(checkout,dir);
  const id=renewalDigest({qualification:renewalDigest(bytes),fingerprint});
  return e.s.atomic(()=>{
   const previous=e.s.get<{id:string;dueAt:number}>('codex-renewal-schedule');
-  const schedule={id,...due,fingerprint,observedAt:now};e.s.set('codex-renewal-schedule',schedule);
+  const schedule={id,...due,workerDueAt,publisherExpiresAt:delivery?.expiresAt,fingerprint,observedAt:now};e.s.set('codex-renewal-schedule',schedule);
   if(previous?.id!==id)e.s.event(`renewal-scheduled:${id}`,'codex-renewal-scheduled',schedule,'Retain schedule and custody; rollback through reviewed source, never advance expiry from a schedule',now);
   if(e.s.get('codex-renewal-uncertain')===true)return {state:'adoption-uncertain',...schedule};
   if(now<due.dueAt)return {state:'scheduled',...schedule};
@@ -40,6 +40,8 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
   requireDiskCapacity(e.diskProbe);
   if(!builderSlots(e.s,e.c).free)return {state:'waiting-capacity',...schedule};
   const published=currentPublisherProof(e.s,dir,expectedPublisher,now);if(!published)return {state:'waiting-publisher-proof',...schedule,nextCheckAt:now+60000};
+  const covered=e.s.get<{qualificationSha256:string;fingerprint:string;publisherReceipt:string;publisherExpiresAt:number}>('codex-renewal-covered-publisher');
+  if(workerDueAt>now&&covered?.qualificationSha256===renewalDigest(bytes)&&covered.fingerprint===renewalDigest(fingerprint)&&covered.publisherExpiresAt===delivery?.expiresAt&&(covered.publisherReceipt===published.pub.executionReceipt||published.proof.completedAt+86400000<=covered.publisherExpiresAt))return {state:'waiting-publisher-proof',...schedule,nextCheckAt:now+60000};
   const claim={publisher:published.pub,id,state:'starting',at:now,qualificationSha256:renewalDigest(bytes),fingerprint};
   e.s.set(`codex-renewal-attempt:${id}`,claim);e.s.set('codex-renewal-slot',claim);e.s.set('launcher-maintenance-lease',{id,kind:'renewal',state:'active',at:now});
   // Claim and synchronous detached-spawn attempt share normal slot custody.
