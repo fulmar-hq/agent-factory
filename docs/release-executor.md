@@ -177,3 +177,10 @@ supply no alternative deployment credentials. Native metadata observations are
 retained in the private effect journal and promotion receipt. They prove
 readiness only; the normal OIDC deployment, source/health/configuration/rollback
 verification and independent Production readback remain required.
+
+The native receipt's evidence may be one nonempty string or an explicit array of
+nonempty finding strings. The trusted schema preserves every array entry as
+newline-separated wire text, retains the input digest and leaves the native raw
+file untouched. It never changes the tuple or verdict; empty, mixed or object
+findings and extra keys refuse. This representation repair does not rerun a
+model or replace a rejected decision.

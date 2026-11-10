@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {createHash} from 'node:crypto';
 import {Store} from '../tracking/store';
 import {queueWake,type Wake} from './wake';
 import type {ReleaseBatch} from './release-batch';
@@ -12,7 +13,7 @@ export interface ReleasePort {
 }
 const sha=z.string().regex(/^[a-f0-9]{40}$/);
 const SnapshotSchema=z.object({revision:sha,tree:sha,holdId:z.string().min(1),held:z.boolean(),overlap:z.boolean()});
-export const AcceptanceSchema=z.object({day:z.string(),revision:sha,tree:sha,artifact:z.string().min(1),verdict:z.enum(['ACCEPT','REJECT']),evidence:z.string().min(1)}).strict();
+export const AcceptanceSchema=z.object({day:z.string(),revision:sha,tree:sha,artifact:z.string().min(1),verdict:z.enum(['ACCEPT','REJECT']),evidence:z.union([z.string().trim().min(1),z.array(z.string().trim().min(1)).min(1)]).transform(value=>Array.isArray(value)?value.join('\n'):value)}).strict();
 export type Acceptance=z.infer<typeof AcceptanceSchema> & {at:number;wake:string;native:string;qaRun?:number;qaAttempt?:number};
 type Effect={state:'claimed'|'running'|'success'|'failure';context:ReleaseContext;handle?:Record<string,unknown>;evidence?:Record<string,unknown>};
 type Night={day:string;candidate?:Snapshot;refused?:string};
@@ -143,5 +144,5 @@ export function recordAcceptance(s:Store,wake:string,native:string,raw:unknown,n
  const a=AcceptanceSchema.parse(raw),qa=s.get<Effect>(`executor:${a.day}:qa`);
  const w=s.get<{owner:string;kind:string;payload:ReleaseContext & {artifact:string}}>(`owner-wake:${wake}`);
  if(!native.trim() || !w || w.owner!=='quality' || w.kind!=='qa-deployed' || w.payload.day!==a.day || w.payload.revision!==a.revision || w.payload.tree!==a.tree || w.payload.artifact!==a.artifact || !qa || qa.state!=='success' || qa.context.tree!==a.tree || qa.context.revision!==a.revision || qa.evidence?.artifact!==a.artifact || now<Number(qa.evidence?.completedAt ?? Infinity) || now>=qa.context.deadline || toronto(now).day!==a.day)throw Error('Quality receipt does not bind timely frozen QA');
- return s.atomic(()=>{if(s.get(`executor:${a.day}:acceptance`))throw Error('Quality verdict already retained');const receipt={...a,at:now,wake,native,qaRun:qa.evidence?.qaRun,qaAttempt:qa.evidence?.qaAttempt};s.set(`executor:${a.day}:acceptance`,receipt);s.event(`executor:${a.day}:quality`,'quality-acceptance',receipt,undo,now);return receipt;});
+ return s.atomic(()=>{if(s.get(`executor:${a.day}:acceptance`))throw Error('Quality verdict already retained');const receipt={...a,inputDigest:createHash('sha256').update(JSON.stringify(raw)).digest('hex'),at:now,wake,native,qaRun:qa.evidence?.qaRun,qaAttempt:qa.evidence?.qaAttempt};s.set(`executor:${a.day}:acceptance`,receipt);s.event(`executor:${a.day}:quality`,'quality-acceptance',receipt,undo,now);return receipt;});
 }
