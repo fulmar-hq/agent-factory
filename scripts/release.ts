@@ -7,14 +7,18 @@ import {ReleaseExecutor,toronto} from '../launcher/release';
 import {AlidoReleasePort} from '../adapters/release';
 import {releaseBilling} from '../adapters/billing';
 import {awsRefusal,debit} from '../wallet/ledger';
+import {command} from '../adapters/github';
+import {localReadings,claudeStatus} from '../adapters/usage';
+import {readReleaseBatch,type ReleaseBatch} from '../launcher/release-batch';
+import {collectReleaseReadiness,releasePreflightAlert,type ReleaseReadiness} from '../launcher/release-readiness';
 const stage=process.argv[2];
+const invokedAt=Date.now();
 if(!['preflight','qa','production','reconcile','dry-run'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
 const s=new Store(join(root,'controller.sqlite'));
 try {
  const c=await configAt(join(root,'config.yaml'));
  const policy=()=>Bun.YAML.parse(readFileSync(join(root,'config.yaml'),'utf8'));
  const funds=(now:number)=>releaseAvailable(s,c,admittedBilling,policy(),now);
- const port=new AlidoReleasePort();
  const minute=toronto(Date.now()).minute;
  if(stage==='reconcile' && minute>=1080 && minute<1140 && s.get('aws-stop-latched')!==true){
   const attempt=s.get<number>('release-billing-refresh-at')??0;
@@ -25,7 +29,7 @@ try {
   }
  }
  let admittedBilling=(await inputs(root)).billing;
- const executor=new ReleaseExecutor(s,port,async()=>{
+ const brake=async()=>{
   if(s.get('aws-stop-latched')===true)return 'AWS stop latched';
   if(s.get('paused')!==false)return 'factory paused';
   const now=Date.now();
@@ -36,13 +40,54 @@ try {
   // Each remote admission reserves a conservative dollar. Existing holds/caps apply.
   if(funds(now)<100)return 'release wallet insufficient';
   return null;
- },Date.now,id=>{
+ };
+ let batch:ReleaseBatch|undefined,readiness:ReleaseReadiness|undefined;
+ if(stage!=='reconcile'){
+  try{batch=readReleaseBatch(root,toronto(Date.now()).day);}catch(error){if(stage==='production')throw error;}
+ }
+ if(stage==='dry-run'||stage==='preflight'&&minute===1140||stage==='qa'&&minute===1200){
+  let billingRefusal:string|null=null;
+  try{admittedBilling=await releaseBilling(root);const now=Date.now();billingRefusal=awsRefusal(s,c,now,admittedBilling);if(!billingRefusal&&funds(now)<100)billingRefusal='release wallet insufficient';}
+  catch(error){billingRefusal=String(error);}
+  // Billing is collected even when pause or STOP independently refuses starts.
+  const factorySource=(await command(['git','rev-parse','HEAD'],import.meta.dir+'/..')).trim();
+  const [readings,quota]=await Promise.all([localReadings(),claudeStatus()]);
+  if(quota&&(!readings.claude||quota.observedAt>readings.claude.observedAt))readings.claude=quota;
+  readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
+  if(stage==='preflight')readiness.at=invokedAt;
+  if(stage==='preflight'){
+   s.event(`release-readiness:${readiness.day}`,'release-readiness',readiness,'Retain the preflight report; correct missing inputs before the next fixed window');
+   s.set(`release-preflight-report:${readiness.day}`,readiness);
+   releasePreflightAlert(s,readiness);
+  }
+  if(stage!=='dry-run'&&!readiness.ready){console.log(JSON.stringify({state:'refused',readiness}));process.exitCode=1;}
+ }
+ const port=new AlidoReleasePort(undefined,Date.now,undefined,batch,readiness);
+ const executor=new ReleaseExecutor(s,port,brake,Date.now,id=>{
   const now=Date.now();if(awsRefusal(s,c,now,admittedBilling)||funds(now)<100)throw Error('wallet changed before reservation');
   debit(s,id,'aws',100,now);
- });
- if(stage==='dry-run')console.log(JSON.stringify({effects:false,snapshot:await port.snapshot(),brake:await executor.brake()}));
- else console.log(JSON.stringify(await executor.run(stage as 'preflight'|'qa'|'production'|'reconcile')));
+ },batch);
+ if(stage==='reconcile'&&minute>=1140&&minute<1190){
+  const pending=s.get<ReleaseReadiness>(`release-preflight-report:${toronto(Date.now()).day}`);
+  if(pending&&!pending.ready)try{releasePreflightAlert(s,pending);}
+  catch(error){s.event(`executor-alert-retry:${pending.day}`,'release-preflight-alert-failure',{error:String(error)},'Restore existing Alido Mail; reconciliation retries the same stable alert ID before19:50');}
+ }
+ if(stage==='dry-run')console.log(JSON.stringify({effects:false,snapshot:await port.snapshot(),readiness}));
+ else if(process.exitCode!==1){
+  const result=await executor.run(stage as 'preflight'|'qa'|'production'|'reconcile');
+  if(stage==='preflight'&&toronto(invokedAt).minute===1140&&['refused','skipped'].includes(result.state)){
+   const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'preflight checks',reason:JSON.stringify(result)}],evidence:{result}};
+   s.set(`release-preflight-report:${failed.day}`,failed);releasePreflightAlert(s,failed);
+  }
+  console.log(JSON.stringify(result));
+ }
 }catch(error){
  const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
+ if(stage==='preflight'&&toronto(invokedAt).minute===1140){
+  const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'release configuration',reason:String(error)}],evidence:{error:String(error)}};
+  s.set(`release-preflight-report:${failed.day}`,failed);
+  try{releasePreflightAlert(s,failed);}
+  catch(alertError){s.event(`executor-alert-failed:${day}`,'release-preflight-alert-failure',{error:String(alertError)},'Restore existing Alido Mail outbox; retain failed delivery evidence');}
+ }
  console.error(String(error));process.exitCode=1;
 }finally{s.close();}
