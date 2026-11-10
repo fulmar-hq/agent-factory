@@ -19,6 +19,7 @@ function correctionPlan(dir:string) {
  } finally {closeSync(fd);}
 }
 export function intakeInstructions(c:Config,dir:string) {
+ if(c.refill)return 'Product-only refill. Work down the existing real product backlog. Prioritize multi-staff and mixed-calendar booking, Outlook, Leads, onboarding, Settings and reply quality. Every proposal needs category: product and intakeEvidence: {kind: issue, number: the existing OPEN product backlog issue}. Repair or split that real outcome without duplicating active work. Never create review, challenge or acceptance tickets, tests-only filler, report documents or factory maintenance tasks. Review belongs to the same ticket and PR. Return an empty tickets array when no safe product leaf exists. Return mix: {product: ticket count, other: 0}, including empty refills. Spare usage goes only to product work; usage never changes review requirements.';
  if(c.autonomy?.intake_mode!=='drain')return 'Intake mode: build. New useful product scope is permitted within the existing policy.';
  let plan='Correction plan unavailable: do not propose factory-plan tickets.';
  try {plan=correctionPlan(dir).split('## 5. Steps')[1]?.split('## 6.')[0] ?? plan;}catch{}
@@ -27,6 +28,18 @@ export function intakeInstructions(c:Config,dir:string) {
 // Validate at both creation and auto-approval. A stale queued build wake cannot
 // mint new scope after a mode change. Remote errors and absent proof fail closed.
 export async function enforceIntakeMode(e:Engine,repo:string,raw:Record<string,unknown>,dir:string,execute=command) {
+ if(e.c.refill) {
+  const objective=String(raw.outcome??'').trim();
+  const reportPaths=Array.isArray(raw.paths)&&raw.paths.some(p=>typeof p==='string'&&/-challenge\.md$/.test(p));
+  if(reportPaths||/^(?:independently\s+)?(?:review|challenge|accept|audit|verify)\b/i.test(objective)||/(?:read.only|independent)\s+(?:review|challenge|acceptance)|no (?:code|implementation) changes|review.report/i.test(objective))throw Error('refill: review or acceptance work belongs on the original PR');
+  if(raw.category!=='product' || !['fix','feature','product'].includes(String(raw.kind)) || !raw.intakeEvidence || /^(?:review|challenge|accept|acceptance|audit|verify)\b/i.test(String(raw.title ?? '')))throw Error('refill: product tasks only; no review or acceptance tickets');
+  const evidence=Evidence.parse(raw.intakeEvidence);
+  if(evidence.kind!=='issue')throw Error('refill: existing product backlog issue required');
+  const source=JSON.parse(await execute(['gh','issue','view',String(evidence.number),'--repo',repo,'--json','number,state,title,labels']));
+  if(source.number!==evidence.number || source.state!=='OPEN' || typeof source.title!=='string' || !Array.isArray(source.labels) || /^(?:review|challenge|accept|acceptance|audit|verify)\b/i.test(source.title) || source.labels.some((l:{name?:string})=>/^kind:(?:review|challenge|acceptance)$/.test(l.name??'')))throw Error('refill: source must be an open product backlog issue');
+  if(repo==='fulmar-hq/agent-factory')throw Error('refill: factory maintenance is not product backlog');
+  return;
+ }
  if(e.c.autonomy?.intake_mode!=='drain')return;
  const evidence=Evidence.parse(raw.intakeEvidence);
  if(evidence.kind==='factory-plan') {

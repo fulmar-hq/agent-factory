@@ -3,7 +3,10 @@ import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:f
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {command} from '../adapters/github';
-import {root} from '../launcher/config';
+import {root,configAt} from '../launcher/config';
+import {reviewProductChanges} from '../launcher/code-review';
+import {githubPages} from '../adapters/github-pages';
+import type {BoardPull} from '../board/pulls';
 import {processIdentity} from '../launcher/process';
 import {Store} from '../tracking/store';
 import {runFactoryChallenge} from '../adapters/factory-challenge';
@@ -56,6 +59,13 @@ if(import.meta.main){
  try{mkdirSync(lock,{mode:0o700});}catch{throw Error('maintenance already claimed; reconcile retained lock before retry');}
  writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),checkout:repo}),{mode:0o600});
  const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
- try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,identity:processIdentity(process.pid),at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
+ try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,identity:processIdentity(process.pid),at:Date.now()});ownsLease=true;});const initialLimits=JSON.parse(await command(['gh','api','rate_limit']));if(initialLimits.resources?.core?.remaining<500||initialLimits.resources?.graphql?.remaining<500)throw Error(`GitHub API reserve: wait until reset ${Math.max(initialLimits.resources?.core?.reset??0,initialLimits.resources?.graphql?.reset??0)}`);const started=Date.now();console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));
+  // Keep API reserve for launcher reconciliation; an exhausted pool waits for
+  // the next scheduled pass rather than retrying reads or omitting the review.
+  const limits=JSON.parse(await command(['gh','api','rate_limit']));
+  if(limits.resources?.core?.remaining>=500&&limits.resources?.graphql?.remaining>=500&&!s.db.query("SELECT id FROM events WHERE kind='factory-challenge-started' AND at>=?").get(started)) {
+   const c=await configAt(join(root,'config.yaml')),repositories=JSON.parse(readFileSync(join(root,'repositories.json'),'utf8')) as Record<string,string>;
+   await reviewProductChanges(s,c,root,repositories,{pulls:async repo=>await githubPages(repo,'pullRequests') as BoardPull[],files:async(repo,number)=>{const result=JSON.parse(await command(['gh','api',`repos/${repo}/pulls/${number}/files?per_page=100`]));if(!Array.isArray(result)||result.length>=100)throw Error('review files truncated; require bounded change');return result;},review:(p,checkout,target,claimed)=>runFactoryChallenge(s,p,root,checkout,claimed,target)});
+  }else s.event(crypto.randomUUID(),'review-wait',{reason:'API reserve or one new review already admitted this pass',coreReset:limits.resources?.core?.reset,graphqlReset:limits.resources?.graphql?.reset},'Wait for the scheduled pass and hourly reset; never retry or waive review');}
  finally{const challenge=s.get<{state:string}>('factory-challenge-slot');if(ownsLease&&(!challenge||challenge.state==='released')&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
 }
