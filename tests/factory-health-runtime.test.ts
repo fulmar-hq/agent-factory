@@ -76,3 +76,11 @@ test('preflight selects newer actual controller usage over cached import and rev
   writeFileSync(join(f.dir,'readings.json'),JSON.stringify({codex:{...meter(.95),observedAt:now-60000}}));expect(freshestHealthReadings(f.dir,{codex:{...meter(.1),observedAt:now}}).codex?.windows[0]?.used).toBe(.1);
  }finally{f.db.close();}
 });
+
+
+test('Telegram receipt failure cannot block independent Coordinator delivery or later notifications',async()=>{
+ const f=bridge(),now=Date.now();try{f.db.exec('DROP TABLE telegram_messages');await watchFactoryHealth(join(f.dir,'missing-controller'),f.path,now,{execute:async()=>{throw Error('fictional no network');}});
+  expect((f.db.query("SELECT COUNT(*) AS n FROM messages WHERE recipient='Coordinator'").get() as {n:number}).n).toBeGreaterThan(0);
+  const db=new Database(join(f.dir,'missing-controller/health/state.sqlite'),{readonly:true});try{expect((db.query("SELECT COUNT(*) AS n FROM delivery_failures WHERE recipient='Vincent'").get() as {n:number}).n).toBeGreaterThan(0);}finally{db.close();}
+ }finally{f.db.close();}
+});

@@ -141,7 +141,7 @@ export function healthBridge(path:string){
 export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports:{execute?:typeof command;identity?:typeof processIdentity}={}){
  const clock=at===undefined?Date.now:()=>at;let now=clock();
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});const db=new Database(join(dir,'health','state.sqlite'),{create:true,strict:true});
- db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER); CREATE TABLE IF NOT EXISTS delivery_links(notification TEXT NOT NULL,recipient TEXT NOT NULL,bridge_id TEXT NOT NULL,PRIMARY KEY(notification,recipient));');
+ db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER); CREATE TABLE IF NOT EXISTS delivery_links(notification TEXT NOT NULL,recipient TEXT NOT NULL,bridge_id TEXT NOT NULL,PRIMARY KEY(notification,recipient)); CREATE TABLE IF NOT EXISTS delivery_failures(notification TEXT NOT NULL,recipient TEXT NOT NULL,at INTEGER NOT NULL,error TEXT NOT NULL);');
  try{db.exec('BEGIN IMMEDIATE');const row=db.query('SELECT json,inactive FROM state WHERE id=1').get() as {json:string;inactive:number|null}|null;
   const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null,ports.identity??processIdentity,ports.execute??command);
   const evaluated=clock();if(evaluated<now)throw Error("health collection clock regressed");now=evaluated;collected.snapshot.capturedAt=now;
@@ -150,6 +150,7 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   save();db.exec('COMMIT');
   const bridge=healthBridge(mail);
   try{for(const pending of pendingHealthDeliveries(state,()=>now)){
+   try{
 
    db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
    const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;
@@ -160,6 +161,7 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
    if(link.bridge_id===id)bridge.send(id,command.recipient,command.message);
    const receipt=bridge.delivered(link.bridge_id,command.recipient);
    if(receipt){db.exec('BEGIN IMMEDIATE');const latest=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=acknowledgeHealthDelivery(FactoryHealthStateSchema.parse(JSON.parse(latest.json)),command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
+   }catch(error){if(db.inTransaction)db.exec('ROLLBACK');db.query('INSERT INTO delivery_failures VALUES(?,?,?,?)').run(pending.notificationId,pending.recipient,now,String(error));}
   }}finally{bridge.close();}
   const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
   return {at:now,findings:evaluation.findings,outbox:state.outbox.length};

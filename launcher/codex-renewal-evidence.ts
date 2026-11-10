@@ -147,14 +147,14 @@ export type CodexRenewalEvidenceOptions = {
 
 // Deliberately small grammar: no arbitrary shell expression can substitute JSON
 // for execution of the exact hashed, workspace-local probe.
-function probeInvocation(command: string, workspace: string, probe: string): boolean {
+export function probeInvocation(command: string, workspace: string, probe: string): boolean {
   if (probe !== join(workspace, "probe.py") || !/^\/[A-Za-z0-9/_.-]+$/.test(probe)) return false;
   const commands = [`/usr/bin/python3 ${probe}`, "/usr/bin/python3 probe.py"];
   return commands.some(c => command === c || command === `/bin/zsh -c '${c}'`);
 }
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
-function nativeFailure(value:unknown):boolean {
+export function nativeFailure(value:unknown):boolean {
   if(Array.isArray(value))return value.some(nativeFailure);
   if(!value || typeof value!=="object")return false;
   for(const [key,v] of Object.entries(value)){
