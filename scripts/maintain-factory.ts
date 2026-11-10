@@ -41,7 +41,7 @@ if(import.meta.main){
  // Interrupted custody is retained, never stolen on a timeout.
  try{mkdirSync(lock,{mode:0o700});}catch{throw Error('maintenance already claimed; reconcile retained lock before retry');}
  writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),checkout:repo}),{mode:0o600});
- const s=new Store(join(root,'controller.sqlite'));
- try{console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
- finally{s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
+ const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
+ try{s.atomic(()=>{if(s.get<{state:string}>('launcher-maintenance-lease')?.state==='active')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
+ finally{if(ownsLease&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
 }
