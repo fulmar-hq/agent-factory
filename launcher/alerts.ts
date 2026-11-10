@@ -13,9 +13,9 @@ export const mailPath = () => process.env.FACTORY_MAIL_DB ?? join(homedir(), ".a
 export function diskCapacityAlert(s:Store,now:number,path=mailPath()) {
  const r=s.get<{state:string;episode?:string;freeGiB?:number;usedFraction?:number}>('disk-capacity');
  if(!r || !['critical','unknown'].includes(r.state) || !r.episode || s.get(`alert:${r.episode}`))return;
- if(r.state==='critical'&&(r.usedFraction??0)>0.85&&((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'disk',now,'',true)))return;
  const summary=r.state==='unknown' ? 'Factory cannot read free disk space; new work is blocked.' : `Factory has ${r.freeGiB?.toFixed(1)} GiB free; new work is blocked below 30 GiB. Please inspect factory capacity.`;
  try {
+ if(r.state==='critical'&&(r.usedFraction??0)>0.85&&((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'disk',now,'',true)))return;
   if(!existsSync(path))throw Error('existing Telegram bridge store unavailable');
   const db=new Database(path,{readwrite:true,strict:true});
   try {
@@ -39,10 +39,10 @@ export function qualificationAlerts(s: Store, qualifications: Record<string, unk
     const q = parsed.data;
     if (q.expiresAt > now + 2 * 60 * 60 * 1000) continue;
     const id = `qualification-expiry:${provider}:${q.expiresAt}`;
-    if(relatedFactoryAlarm(path,'qualification',now,id,true))continue;
     if (s.get(id)) continue;
     const summary = `Factory ${provider} qualification ${q.expiresAt <= now ? "expired" : `expires at ${new Date(q.expiresAt).toISOString()}`}; requalify before more work.`;
     try {
+      if(relatedFactoryAlarm(path,'qualification',now,id,true))continue;
       if (!existsSync(path)) throw Error("existing Telegram bridge store unavailable");
       const db = new Database(path, { readwrite: true, strict: true });
       try {
@@ -74,10 +74,10 @@ export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'
 // One bridge message per durable watchdog incident, even across a crash between
 // outbox insertion and local receipt. Resolution is recorded without a message.
 export function watchdogAlert(s:Store,now:number,path=mailPath()) {
- if((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'work',now,'',true))return;
  const incident=s.get<{id:string;state:string;summary:string}>('watchdog-stall');
  if(!incident || incident.state!=='open' || s.get(`alert:${incident.id}`))return;
  try {
+  if((s.db.filename!==':memory:'&&healthOwnsAlerts(dirname(s.db.filename),now))||relatedFactoryAlarm(path,'work',now,'',true))return;
   if(!existsSync(path))throw Error('existing Telegram bridge store unavailable');
   const db=new Database(path,{readwrite:true,strict:true});
   try {

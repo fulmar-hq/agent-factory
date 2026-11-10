@@ -154,12 +154,14 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
 // Dry-runs/rehearsals never call this function.
 export function releasePreflightAlert(s:Store,r:ReleaseReadiness,now=Date.now(),path=mailPath()) {
  if(r.ready||!r.missing.length)return {queued:false};
- const related=relatedFactoryAlarm(path,'release',now,'',true);if(related){s.event(`preflight-existing:${r.day}:${related.id}`,'release-preflight-existing-notification',{day:r.day,notification:related.id,missing:r.missing},'Retain complete readiness report and existing notification');return {queued:false,ownedBy:related.id};}
  if(!Number.isSafeInteger(r.at)||!Number.isSafeInteger(now)||now<r.at)throw Error('preflight alert is only admitted at 19:00');
  const admitted=toronto(r.at),current=toronto(now);
  if(admitted.day!==r.day||admitted.minute!==1140||current.day!==r.day||current.minute>=1190)throw Error('preflight alert is only admitted at 19:00 and must finish before 19:50');
  const id=`release-preflight-missing:${r.day}`;
  if(s.get(id))return {queued:false,id};
+ try{
+ const related=relatedFactoryAlarm(path,'release',now,'',true);if(related){s.event(`preflight-existing:${r.day}:${related.id}`,'release-preflight-existing-notification',{day:r.day,notification:related.id,missing:r.missing},'Retain complete readiness report and existing notification');return {queued:false,ownedBy:related.id};}
+ }catch(error){s.event(crypto.randomUUID(),'release-preflight-notification-failure',{day:r.day,error:String(error)},'Retry notification with the same day ID; preserve failed readiness',now);return {queued:false,id,error:String(error)};}
  const names:Record<string,string>={
   'fresh billing':'a fresh AWS bill reading','billing and factory state':'the billing and factory checks',
   'factory state':'the factory to be ready','AWS sign-in':'an AWS sign-in lasting past 10:30 PM',

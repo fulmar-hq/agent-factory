@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync,writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { qualificationAlerts,watchdogAlert } from "../launcher/alerts";
+import { qualificationAlerts,watchdogAlert,diskCapacityAlert } from "../launcher/alerts";
 import { Store } from "../tracking/store";
 import { qualification } from "./fixtures";
 
@@ -48,4 +48,18 @@ test("watchdog bridges one message per incident and silently closes",()=>{
   s.set('watchdog-stall',{id:'fixture-stall',state:'resolved',summary:'Synthetic stall evidence'});watchdogAlert(s,4,path);
   expect(db.query('SELECT * FROM messages').all()).toHaveLength(1);
  }finally{s.close();db.close();rmSync(dir,{recursive:true});}
+});
+
+
+test('corrupt optional bridge never aborts controller alert reconciliation or marks success',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-corrupt-alert-')),path=join(dir,'mail.sqlite'),s=new Store(':memory:'),now=Date.now();writeFileSync(path,'fictional corrupt bridge');
+ try{
+  expect(()=>watchdogAlert(s,now,path)).not.toThrow();expect(s.rows('events')).toHaveLength(0);
+  s.set('watchdog-stall',{id:'fictional-stall',state:'open',summary:'Fictional incident'});
+  s.set('disk-capacity',{state:'critical',episode:'fictional-disk',freeGiB:20,usedFraction:0.95});
+  expect(()=>watchdogAlert(s,now,path)).not.toThrow();expect(()=>diskCapacityAlert(s,now,path)).not.toThrow();
+  expect(()=>qualificationAlerts(s,{codex:{...qualification(),expiresAt:now+60000}},now,path)).not.toThrow();
+  expect((s.rows('events') as {kind:string}[]).map(r=>r.kind).sort()).toEqual(['disk-alert-failure','qualification-alert-failure','watchdog-alert-failure']);
+  expect(s.get('alert:fictional-stall')).toBeNull();expect(s.get('alert:fictional-disk')).toBeNull();
+ }finally{s.close();rmSync(dir,{recursive:true});}
 });
