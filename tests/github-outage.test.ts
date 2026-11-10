@@ -196,3 +196,24 @@ test('repeated full ticks never individually poll an already-reviewing publicati
  try{for(let pass=0;pass<3;pass++)expect(await tick(dir)).toMatchObject({status:'ok',ready:0,claimed:0});expect(individualReads).toBe(0);expect(e.sessions()[0].status).toBe('finished');expect(s.get('board-pr:https://github.com/example/demo/pull/7')).toBeNull();expect(s.rows('events').filter((r:any)=>r.kind==='github-state')).toHaveLength(0);}
  finally{command.mockRestore();s.close();rmSync(dir,{recursive:true});}
 });
+
+// The same classifier must govern live transport, reset probing and persisted
+// failures so a legacy 429 cannot be archived as an unrelated worker failure.
+for(const diagnostic of ['gh: Too Many Requests (HTTP 429)','gh: request rejected (HTTP 429)','gh: Too Many Requests'])for(const resetKnown of [true,false])test(`429 holds across calls with resetKnown=${resetKnown}: ${diagnostic}`,async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-gh-429-')),bin=join(dir,'bin'),calls=join(dir,'calls'),prior=process.env.PATH;
+ mkdirSync(bin);writeFileSync(join(bin,'gh'),`#!/bin/sh\necho call >> '${calls}'\nif [ "$2" = rate_limit ]; then\n echo '> GET /rate_limit HTTP/1.1' >&2\n echo '${JSON.stringify(resetKnown?{resources:{core:{remaining:0,reset:2000000000}}}:{resources:{}})}'\nelse\n echo '> GET /repos/example/demo/issues HTTP/1.1' >&2\n echo '${diagnostic}' >&2\n exit 1\nfi\n`,{mode:0o700});process.env.PATH=bin;
+ const before=Date.now();
+ try{
+  expect(unavailable('Error: gh failed (exit 1): '+diagnostic)).toBe(true);
+  await githubContext.run(dir,async()=>{
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toBeInstanceOf(GitHubUnavailable);
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toThrow('GitHub backoff');
+  });
+  expect(readFileSync(calls,'utf8').trim().split('\n')).toHaveLength(2);
+  const s=new Store(join(dir,'controller.sqlite'));try{
+   const hold=s.get<{retryAt:number}>('github-backoff')!;
+   if(resetKnown)expect(hold.retryAt).toBe(2000000001000);
+   else{expect(hold.retryAt).toBeGreaterThanOrEqual(before+15*60000);expect(hold.retryAt).toBeLessThanOrEqual(Date.now()+15*60000);}
+  }finally{s.close();}
+ }finally{process.env.PATH=prior;rmSync(dir,{recursive:true});}
+});
