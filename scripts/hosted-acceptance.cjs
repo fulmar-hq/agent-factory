@@ -63,7 +63,7 @@ async function probe(deps = {}) {
     check('preferences',preferences.status === 200 && !!preferences.body && typeof preferences.body === 'object' && !preferences.body.error);
     const other = await request('other-business-denial','/api/businesses/qa-synthetic-window-coverings');
     check('tenantDenied',other.status === 403 && other.body?.error === 'forbidden');
-    for (const [label,path] of [['inbox',''],['follow-ups','/follow-ups'],['leads','/leads'],['bookings','/bookings'],['learning','/learning'],['settings','/settings']]) {
+    for (const [label,path] of [['inbox',''],['business','?settings=business'],['leads','?section=leads'],['appointments','?settings=appointments'],['learning','?section=learning'],['settings','?settings=overview']]) {
       const response = await (deps.fetch || fetch)('http://127.0.0.1:3000/workspaces/qa-synthetic-other-business'+path,{method:'GET',redirect:'manual',signal:AbortSignal.timeout(6000),headers:{cookie,'x-forwarded-proto':'https','x-forwarded-host':'qa.goalido.com'}});
       const html = await response.text();
       report.requests.push({label,status:response.status,html:html.includes('<html')});

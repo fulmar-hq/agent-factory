@@ -112,7 +112,10 @@ export class ReleaseExecutor {
    if(result?.state==='failure'){queueWake(this.s,{id:`release-failed:${day}:${step}`,owner:'release',kind:'release-diagnosis',payload:{step,context:result.context,evidence:result.evidence}},this.clock());return this.refuse(day,`${step} failed or deadline`);}
    if(step==='qa' && result?.state==='success'){
     const at=this.clock(),{context,evidence}=result;
-    if(at>=context.deadline && !this.s.get(`executor:${day}:acceptance`))this.receipt(day,'Quality deadline expired',{tree:context.tree,deadline:context.deadline});
+    if(at>=context.deadline){
+     if(!this.s.get(`executor:${day}:acceptance`))this.receipt(day,'Quality deadline expired',{tree:context.tree,deadline:context.deadline});
+     this.qualityDispatch?.({id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,deadline:context.deadline}});
+    }
     if(at<context.deadline)this.s.atomic(()=>{
      this.receipt(day,'QA deployed',evidence);
      const wake={id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,artifact:evidence?.artifact,qaEvidence:evidence,deadline:context.deadline}};
