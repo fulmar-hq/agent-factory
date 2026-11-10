@@ -91,7 +91,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
    const raw=await readJSON(join(o.dir,'readings.json'));
    for(const owner of ['release','quality']){
     const role=owner==='quality'?effectiveQuality:o.config.owners[owner];if(!role)continue;
-    try{usageGate(o.readings?.[role.harness]??(record(raw)?raw[role.harness]:undefined),false,now,o.config,role.harness);}
+    try{usageGate(o.readings?.[role.harness]??(record(raw)?raw[role.harness]:undefined),true,now,o.config,role.harness);}
     catch(error){missing(`${owner} usage`,String(error));}
    }
    return {checkedAt:now};
