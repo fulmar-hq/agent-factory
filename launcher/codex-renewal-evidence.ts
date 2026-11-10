@@ -160,13 +160,14 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
   requireThat(s.runId === m.runId && s.nativeId === r.nativeId && s.workspace === r.workspace && s.startedAt === r.startedAt && s.endedAt === r.endedAt, "supervisor custody mismatch");
   requireThat(stream.filter(x => x.type === "thread.started").length === 1 && stream.find(x => x.type === "thread.started")?.thread_id === r.nativeId, "stream native identity mismatch");
-  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type) || x.item?.type === "error" || (x.error !== undefined && x.error !== null) || (x.item?.error !== undefined && x.item.error !== null) || x.status === "failed" || x.item?.status === "failed" || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.status !== undefined && x.item.status !== "completed")), "native stream failed");
+  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type) || x.item?.type === "error" || (x.error !== undefined && x.error !== null) || (x.item?.error !== undefined && x.item.error !== null) || x.status === "failed" || x.item?.status === "failed" || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.exit_code !== 0) || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.status !== undefined && x.item.status !== "completed")), "native stream failed");
   requireThat(stream.every(x => (x.thread_id === undefined || x.thread_id === r.nativeId) && (x.model === undefined || x.model === m.model) && (x.effort === undefined || x.effort === r.effort)), "conflicting stream identity/model/effort");
   const meta = rollout.filter(x => x.type === "session_meta");
   requireThat(meta.length === 1 && rollout[0] === meta[0] && meta[0].payload?.id === r.nativeId && meta[0].payload?.cwd === r.workspace, "rollout native custody mismatch");
   const counters: { at: number; usage: Usage }[] = [];
   let contexts = 0, completed = 0, previousAt = r.startedAt;
-  const aborts:number[]=[];
+  const aborts:number[]=[];let completedAt:number|null=null;
+  const outputTimes=new Map<string,number>();
   const calls = new Map<string, { name: string; arguments: string }>();
   const outputs = new Map<string, string>();
   for (const row of rollout) {
@@ -184,7 +185,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(!prev || Object.keys(u).every(k => u[k as keyof Usage] >= prev[k as keyof Usage]), "native accounting regression");
       counters.push({ at: timestamp, usage: u });
     }
-    if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) completed++;
+    if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) {completed++;completedAt=timestamp;}
     if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
     if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
@@ -193,7 +194,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
     if (row.type === "response_item" && p?.type === "function_call_output") {
-      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); outputs.set(p.call_id, p.output);
+      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
     }
   }
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
@@ -241,6 +242,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       return args.cmd === r.command && (args.workdir === undefined || args.workdir === r.workspace);
     });
     requireThat(matching.length === 1 && outputs.has(matching[0][0]), "actual native security invocation missing");
+    requireThat(completedAt !== null && completedAt > outputTimes.get(matching[0][0])!, "native security completion must follow actual probe output");
     securityOutput(outputs.get(matching[0][0])!);
     const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution");
     requireThat(executed.length === 1 && executed[0].item?.exit_code === 0 && probeInvocation(executed[0].item.command ?? "", r.workspace, m.probe.path), "native command exit unverified");
