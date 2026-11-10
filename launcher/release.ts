@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {Store} from '../tracking/store';
-import {queueWake} from './wake';
+import {queueWake,type Wake} from './wake';
 import type {ReleaseBatch} from './release-batch';
 export type ReleaseStep='preflight'|'freeze'|'qa'|'promote'|'readback';
 export type ReleaseContext={day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object;batch?:ReleaseBatch;readiness?:object};
@@ -24,7 +24,7 @@ export function toronto(now:number) {
 export function deadlineAt(now:number,minute:number){const d=new Date(now);return now-d.getUTCSeconds()*1000-d.getUTCMilliseconds()+(minute-toronto(now).minute)*60000;}
 const undo='Retain effects, handles, frozen source, rollback and receipts. Reconcile uncertain writes; never replay a claim.';
 export class ReleaseExecutor {
- constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{},readonly batch?:ReleaseBatch){}
+ constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{},readonly batch?:ReleaseBatch,readonly qualityDispatch?:(wake:Wake)=>void){}
  receipt(day:string,kind:string,data:unknown) {this.s.event(`executor:${day}:${kind}`,'release-executor',{day,kind,data},undo,this.clock());}
  effect(day:string,step:ReleaseStep){return this.s.get<Effect>(`executor:${day}:${step}`);}
  refuse(day:string,reason:string){this.receipt(day,`refused:${reason}`,{reason});return {state:'refused',reason};}
@@ -115,7 +115,8 @@ export class ReleaseExecutor {
     if(at>=context.deadline && !this.s.get(`executor:${day}:acceptance`))this.receipt(day,'Quality deadline expired',{tree:context.tree,deadline:context.deadline});
     if(at<context.deadline)this.s.atomic(()=>{
      this.receipt(day,'QA deployed',evidence);
-     queueWake(this.s,{id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,artifact:evidence?.artifact,qaEvidence:evidence,deadline:context.deadline}},at);
+     const wake={id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,artifact:evidence?.artifact,qaEvidence:evidence,deadline:context.deadline}};
+     queueWake(this.s,wake,at);this.qualityDispatch?.(wake);
     });
    }
    if(step==='promote' && result?.state==='success' && !this.effect(day,'readback')){
