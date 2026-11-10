@@ -16,7 +16,7 @@ function environment(){
  const c=config();c.owners={release:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'},quality:{harness:'claude',model:'opus-5.5',effort:'medium'}};
  const s=new Store(':memory:');s.set('paused',false);s.set('owner-runtime:quality',{workspace:tmpdir()});
  const q={...qualification(),expiresAt:through+1};
- const files:Record<string,unknown>={'release-auth-session.json':auth,'qualifications.json':{codex:q,claude:{...q,model:'opus-5.5'}},'release-quality-path.json':{version:1,qualified:true,provider:'claude',model:'opus-5.5',effort:'medium',expiresAt:through+1,source:factorySource,evidence:'fictional hosted browser and trusted receipt proof',browser:true,receiptIngestion:true},'readings.json':{codex:{...meter(),observedAt:now,windows:[{used:0.2,resetsAt:through+1},{used:0.3,resetsAt:through+1}]},claude:{...meter(),observedAt:now,windows:[{used:0.2,resetsAt:through+1},{used:0.3,resetsAt:through+1}]}}};
+ const files:Record<string,unknown>={'release-auth-session.json':auth,'qualifications.json':{codex:q,claude:{...q,model:'opus-5.5'}},'release-quality-path.json':{version:1,qualified:true,provider:'claude',model:'opus-5.5',effort:'medium',expiresAt:through+1,source:factorySource,evidence:'fictional hosted browser and trusted receipt proof',hostedHttp:true,receiptIngestion:true},'readings.json':{codex:{...meter(),observedAt:now,windows:[{used:0.2,resetsAt:through+1},{used:0.3,resetsAt:through+1}]},claude:{...meter(),observedAt:now,windows:[{used:0.2,resetsAt:through+1},{used:0.3,resetsAt:through+1}]}}};
  const remotes:Record<string,unknown>={
   'actions/variables/QA_HOLD':{value:JSON.stringify(hold)},
   'issues/1192':{labels:[]},
@@ -124,7 +124,7 @@ test('pause and STOP cannot conceal a failed or absent independent fresh billing
 test('qualified CLI owner alone cannot satisfy a missing or mismatched hosted acceptance path',async()=>{
  const e=environment();try{
   const proof=e.files['release-quality-path.json'];
-  for(const invalid of [null,{...(proof as object),browser:false},{...(proof as object),receiptIngestion:false},{...(proof as object),source:'e'.repeat(40)},{...(proof as object),provider:'codex'},{...(proof as object),expiresAt:through}]){
+  for(const invalid of [null,{...(proof as object),hostedHttp:false},{...(proof as object),receiptIngestion:false},{...(proof as object),source:'e'.repeat(40)},{...(proof as object),provider:'codex'},{...(proof as object),expiresAt:through}]){
    e.files['release-quality-path.json']=invalid;
    const r=await collectReleaseReadiness(e.options);
    expect(r.ready).toBe(false);expect(r.missing.some(x=>x.input==='hosted acceptance path')).toBe(true);
@@ -152,4 +152,26 @@ test('19:00 alert uses existing isolated outbox once per day, including crash/re
   expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({created_at:completed,recipient:'Vincent',recipient_app:'telegram',kind:'blocker',body:'',wake_state:'pending'});expect(String(rows[0].summary)).not.toContain('#');
   expect(()=>releasePreflightAlert(new Store(':memory:'),r,now,join(dir,'missing.sqlite'))).toThrow('existing Alido Mail');
  }finally{s.close();db.close();rmSync(dir,{recursive:true});}
+});
+
+
+test('readiness gates the effective ticket profile while Claude remains expired',async()=>{
+ const e=environment();try{
+  e.c.model_override='per_ticket_wins_then_per_role';
+  e.s.set('owner-runtime:quality',{workspace:tmpdir(),pid:123,identity:'fictional-ordinary-quality'});
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir()});
+  e.files['release-acceptance-ticket.json']={version:1,repo:'fulmar-hq/alido',number:1192,owner:'quality',day:carrier.day,provider:'codex',model:'gpt-6.1-sol',effort:'medium',source:'fictional owner decision',expiresAt:through+1,excludedNatives:['fictional-writer']};
+  (e.files['qualifications.json'] as any).claude.expiresAt=through-1;
+  delete (e.files['readings.json'] as any).claude;
+  e.files['release-quality-path.json']={...(e.files['release-quality-path.json'] as object),provider:'codex',model:'gpt-6.1-sol',effort:'medium'};
+  const r=await collectReleaseReadiness(e.options);expect(r.ready).toBe(true);
+  expect((r.evidence['owner qualification'] as any).quality.provider).toBe('codex');
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir(),pid:123});
+  expect((await collectReleaseReadiness(e.options)).missing.some(x=>x.input==='Quality runner')).toBe(true);
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir(),pid:123,identity:'fictional-acceptance'});
+  expect((await collectReleaseReadiness({...e.options,identity:()=> 'fictional-acceptance'})).missing.some(x=>x.input==='Quality runner')).toBe(true);
+  e.s.set('owner-runtime:quality-acceptance',{workspace:tmpdir()});
+  (e.files['qualifications.json'] as any).codex.expiresAt=through;
+  expect((await collectReleaseReadiness(e.options)).missing.some(x=>x.input==='quality qualification')).toBe(true);
+ }finally{e.s.close();}
 });

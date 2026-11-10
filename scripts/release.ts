@@ -1,4 +1,6 @@
 import {readFileSync} from 'node:fs';
+import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
+import {releaseWindowResult,readQaServerStates} from '../launcher/release-result';
 import {releaseAvailable,observeReleaseBilling} from '../wallet/release';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
@@ -66,7 +68,7 @@ try {
  const executor=new ReleaseExecutor(s,port,brake,Date.now,id=>{
   const now=Date.now();if(awsRefusal(s,c,now,admittedBilling)||funds(now)<100)throw Error('wallet changed before reservation');
   debit(s,id,'aws',100,now);
- },batch);
+ },batch,w=>{dispatchReleaseQuality(s,w,root);});
  if(stage==='reconcile'&&minute>=1140&&minute<1190){
   const pending=s.get<ReleaseReadiness>(`release-preflight-report:${toronto(Date.now()).day}`);
   if(pending&&!pending.ready)try{releasePreflightAlert(s,pending);}
@@ -90,4 +92,9 @@ try {
   catch(alertError){s.event(`executor-alert-failed:${day}`,'release-preflight-alert-failure',{error:String(alertError)},'Restore existing Alido Mail outbox; retain failed delivery evidence');}
  }
  console.error(String(error));process.exitCode=1;
-}finally{s.close();}
+}finally{
+ if(stage==='reconcile')try{
+  await releaseWindowResult(s,{observeServers:()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'})});
+ }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
+ s.close();
+}
