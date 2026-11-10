@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Factory-only regenerable caches. Source, Git and operational evidence stay put."""
-import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat
+import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat, re
 
 CACHES = {'node_modules', '.next', '.turbo'}
 PROTECTED = {'.git', '.factory-tmp', 'receipts', 'evidence', 'transcripts', 'logs',
@@ -8,9 +8,9 @@ PROTECTED = {'.git', '.factory-tmp', 'receipts', 'evidence', 'transcripts', 'log
 
 
 def command(args, allowed=(0,)):
-    p = subprocess.run(args, capture_output=True, text=True, timeout=120,
+    p = subprocess.run(args, capture_output=True, text=True, timeout=5 if args[0] in {'/bin/ps', '/usr/sbin/lsof'} else 120,
                        env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
-    if p.returncode not in allowed:
+    if p.returncode not in allowed or p.stderr.strip():
         raise RuntimeError('probe refused: ' + args[0] + ': ' + p.stderr[:200])
     return p.stdout
 
@@ -27,17 +27,75 @@ def evidence(name):
 
 
 def quiet(paths):
-    ps = command(['/bin/ps', '-axo', 'pid=,stat=,command='])
-    files = command(['/usr/sbin/lsof', '-nP', '-a', '-u', str(os.getuid()), '-Fpn'])
-    for line in ps.splitlines():
-        f = line.strip().split(None, 2)
-        if len(f) != 3 or int(f[0]) == os.getpid() or f[1].startswith('Z'):
-            continue
-        if any(str(p) in f[2] for p in paths):
-            return False
-    return not any(line.startswith('n') and any(
-        line[1:] == str(p) or line[1:].startswith(str(p) + '/') for p in paths)
-        for line in files.splitlines())
+    def processes():
+        out = command(['/bin/ps', '-ww', '-axo', 'uid=,pid=,stat=,command='])
+        if not out.strip():
+            raise RuntimeError('empty process inventory')
+        rows = {}
+        for line in out.splitlines():
+            fields = line.strip().split(None, 3)
+            if len(fields) != 4 or not fields[0].isdigit() or not fields[1].isdigit():
+                raise RuntimeError('partial process inventory')
+            uid, pid, state, args = fields
+            if int(uid) != os.getuid() or state.startswith('Z'):
+                continue
+            rows[int(pid)] = args
+            if int(pid) != os.getpid() and any(str(p) in args for p in paths):
+                return None
+        return rows
+    before = processes()
+    if before is None:
+        return False
+    files = command(['/usr/sbin/lsof', '-nP', '-a', '-u', str(os.getuid()), '-Fpcfn'])
+    if not files.startswith('p') or not files.endswith('\n'):
+        raise RuntimeError('empty or truncated file inventory')
+    seen = set()
+    pid = None
+    cmd = False
+    descriptor = None
+    named = False
+    cwd = False
+    def finish_file():
+        if descriptor is not None and not named:
+            raise RuntimeError('incomplete descriptor name')
+    def finish_process():
+        finish_file()
+        if pid is not None:
+            if not cmd or not cwd:
+                raise RuntimeError('incomplete command/cwd evidence')
+            seen.add(pid)
+    for line in files.splitlines():
+        if line.startswith('p'):
+            finish_process()
+            if not re.fullmatch(r'p[1-9][0-9]*', line):
+                raise RuntimeError('partial file process identity')
+            pid, cmd, descriptor, named, cwd = int(line[1:]), False, None, False, False
+        elif line.startswith('c'):
+            if pid is None or cmd or descriptor is not None or len(line) < 2:
+                raise RuntimeError('partial file command')
+            cmd = True
+        elif line.startswith('f'):
+            finish_file()
+            if not cmd or not re.fullmatch(r'f(?:cwd|rtd|txt|mem|DEL|[0-9]+[a-z]*)', line):
+                raise RuntimeError('unavailable descriptor inventory')
+            descriptor, named = line[1:], False
+        elif line.startswith('n'):
+            if descriptor is None or len(line) < 2 or re.search(r'\([^)]*(?:Permission denied|Operation not permitted|opendir:|readlink:|stat:|error:)', line, re.I):
+                raise RuntimeError('unavailable descriptor name')
+            named = True
+            cwd = cwd or descriptor == 'cwd'
+            name = line[1:].removesuffix(' (deleted)')
+            if any(name == str(p) or name.startswith(str(p) + '/') for p in paths):
+                return False
+        else:
+            raise RuntimeError('unknown file inventory record')
+    finish_process()
+    after = processes()
+    if after is None:
+        return False
+    if (set(before) & set(after)) - seen:
+        raise RuntimeError('stable process missing cwd/descriptor evidence')
+    return True
 
 
 def eligible(repo, cache):

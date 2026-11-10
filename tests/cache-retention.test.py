@@ -36,6 +36,19 @@ class Safety(unittest.TestCase):
   with patch.object(m,'quiet',side_effect=RuntimeError('unknown process evidence')):m.sweep(self.root,True)
   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,False)
   self.assertTrue((self.cache/'generated.js').exists())
+ def test_incomplete_process_inventories_refuse(self):
+  uid=os.getuid();ps=f'{uid} 4242 S python3\n'
+  complete='p4242\ncpython3\nfcwd\nn/other\nf0\nn/dev/null\n'
+  def run(files,process=ps):
+   with patch.object(m,'command',side_effect=[process,files,process]):return m.quiet([self.repo])
+  self.assertTrue(run(complete))
+  for files in ['p4242\nn/proc/4242/fd (opendir: Permission denied)\n','p4242\ncpython3\nf0\nn/dev/null\n',complete[:-1],complete.replace('n/dev/null','n/proc/fd (stat: Permission denied)'),complete.replace('fcwd\nn/other\n','')]:
+   with self.assertRaises(RuntimeError):run(files)
+  with patch.object(m,'command',side_effect=['partial\n']):
+   with self.assertRaises(RuntimeError):m.quiet([self.repo])
+  from subprocess import CompletedProcess
+  with patch.object(m.subprocess,'run',return_value=CompletedProcess([],0,'valid-looking output','warning: incomplete inventory')):
+   with self.assertRaises(RuntimeError):m.command(['lsof'])
  def test_hardlinked_marker_cannot_modify_source(self):
   scratch=self.repo/'.factory-tmp';scratch.mkdir();source=self.repo/'dirty-source';source.write_text('preserve')
   os.link(source,scratch/'dependencies-evicted.jsonl')
