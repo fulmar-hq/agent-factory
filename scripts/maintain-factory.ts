@@ -60,5 +60,5 @@ if(import.meta.main){
  finally{const challenge=s.get<{state:string}>('factory-challenge-slot');if(ownsLease&&(!challenge||challenge.state==='released')&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
  // The existing scheduled job owns recurring factory cache retention. The
  // cleaner serializes its own sweep and rechecks native/launcher custody.
- console.log(await command(['python3',join(repo,'scripts/cache-retention.py'),'--root',root,'--apply']));
+ console.log(await command(['python3',join(repo,'scripts/cache-retention.py'),'--root',root,'--apply'],undefined,20*60*1000));
 }

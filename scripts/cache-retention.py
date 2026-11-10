@@ -23,7 +23,7 @@ def evidence(name):
     n = name.lower()
     return (n in PROTECTED or n in {'log', 'trace', 'traces'} or
             n.endswith(('.log', '.jsonl', '.bundle', '.receipt', '.sqlite', '.db')) or
-            any(s in n for s in ('receipt', 'transcript', 'evidence')))
+            any(s in n for s in ('receipt', 'transcript', 'evidence', '.log.', 'trace')))
 
 
 def quiet(paths):
