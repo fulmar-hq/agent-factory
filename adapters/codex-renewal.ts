@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {lookup} from 'node:dns/promises';
 import {publisherBoundary,readPublisherProof,type PublisherPublication} from '../launcher/publisher-evidence';
 import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync,readdirSync} from 'node:fs';
@@ -26,9 +27,10 @@ function durable(path:string,bytes:string){const fd=openSync(path,'wx',0o600);tr
 function sync(path:string){const fd=openSync(path,'r');try{fsyncSync(fd);}finally{closeSync(fd);}}
 const json=(x:unknown)=>JSON.stringify(x,null,2)+'\n';
 function ref(path:string):ReceiptRef{return {path,sha256:renewalDigest(readFileSync(path,'utf8'))};}
-function lastUsage(path:string,at:number):Usage|undefined{
- const bytes=readFileSync(path,'utf8');if(bytes.length>16*1024*1024)throw Error('native receipt exceeds capture bound');
- for(const line of bytes.split('\n').reverse())try{const row=JSON.parse(line);if(row.type==='event_msg'&&row.payload?.type==='token_count'&&Date.parse(row.timestamp)<=at)return usageSchema.parse(row.payload.info.total_token_usage);}catch(error){if(error instanceof z.ZodError)throw error;}
+export function readLiveUsage(path:string,clock=Date.now){
+ const bytes=readFileSync(path);if(bytes.length>16*1024*1024)throw Error('native receipt exceeds capture bound');
+ const end=bytes.lastIndexOf(10)+1;if(!end)return;const prefix=bytes.subarray(0,end),observedAt=clock();
+ for(const line of prefix.toString('utf8').split('\n').reverse())try{const row=JSON.parse(line);if(row.type==='event_msg'&&row.payload?.type==='token_count'&&Date.parse(row.timestamp)<=observedAt)return {usage:usageSchema.parse(row.payload.info.total_token_usage),observedAt,prefixBytes:prefix.length,prefixSha256:createHash('sha256').update(prefix).digest('hex')};}catch(error){if(error instanceof z.ZodError)throw error;}
 }
 export function publisherTestedReceipt(dir:string,pub:{id:string;tree:string;testedTreeReceipt?:unknown}){
  const archive=realpathSync(join(dir,'runs/delivery',pub.id));
@@ -99,14 +101,14 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
    }
    const s=new Store(join(leaf,'rehearsal.sqlite')),e=new Engine(s,c),sessionId=`qualification-${effort}-${kind}`;activeProbe=s;activeSession=sessionId;
    let captureError:string|undefined,exit:{code:number|null;signal:NodeJS.Signals|null;at:number}|undefined,before:Snapshot|undefined,afterTerm:Snapshot|null=null,final:Snapshot|undefined;
-   const samples:{at:number;alive:true;usage:Usage}[]=[],signals:{pid:number;identity:string;signal:'SIGTERM'|'SIGKILL';at:number;result:'sent'}[]=[];
+   const samples:{at:number;alive:true;usage:Usage;prefixBytes:number;prefixSha256:string}[]=[],signals:{pid:number;identity:string;signal:'SIGTERM'|'SIGKILL';at:number;result:'sent'}[]=[];
    // These are isolated rehearsal custody rows, never admitted production work or fabricated qualifications.
    s.set('paused',false);s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run(sessionId,'qualification/codex#141',t.owner,'codex','reserved',JSON.stringify(t));e.claimStart(sessionId);claimSupervisor(e,sessionId);
    const observation:WorkerObservation & {sample:(native:import('./native').NativeReceipt|undefined,at:number)=>void}={
     signal:(pid,identity,signal,at)=>{if(signal==='SIGTERM'||signal==='SIGKILL')signals.push({pid,identity,signal,at,result:'sent'});},
     snapshot:(stage,rows,at)=>{if(stage==='afterTerm')afterTerm={at,error:null,rows};else final={at,error:null,rows};},
     exited:(code,signal,at)=>{exit={code,signal,at};},
-    sample:(native,at)=>{if(!native?.path||signals.length)return;const usage=lastUsage(native.path,at);if(!usage||usage.total_tokens<=0)return;const raw=s.db.query("SELECT data FROM events WHERE kind='native-process' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!raw)return;const pid=JSON.parse(raw.data).pid,table=snapshot();if(!table.rows.some(row=>row.pid===pid&&!row.state.startsWith('Z')))return;before=table;samples.push({at,alive:true,usage});
+    sample:(native,at)=>{if(!native?.path||signals.length)return;const capture=readLiveUsage(native.path);if(!capture||capture.usage.total_tokens<=0)return;const {usage}=capture;const raw=s.db.query("SELECT data FROM events WHERE kind='native-process' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!raw)return;const pid=JSON.parse(raw.data).pid,table=snapshot();if(!table.rows.some(row=>row.pid===pid&&!row.state.startsWith('Z')))return;before=table;samples.push({at:capture.observedAt,alive:true,usage,prefixBytes:capture.prefixBytes,prefixSha256:capture.prefixSha256});
       const evidence=native.evidence(t.model!,effort),old=QualificationSchema.parse(JSON.parse(original)[`codex:${effort}`]);
       if(evidence.verified)live.set('codex-renewal-native',{attempt:id,provider:`codex:${effort}`,qualificationId:renewalDigest(old),expiresAt:old.expiresAt,nativeId:native.id,nativePath:evidence.path,workspace,pid,identity:processIdentity(pid),startedAt:s.get<{at:number}>(`active-clock:${sessionId}`)!.at,observedAt:at,wake:`renewal:${id}:${effort}:${kind}`});}
    };
