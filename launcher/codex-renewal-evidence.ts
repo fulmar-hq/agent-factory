@@ -159,6 +159,7 @@ function nativeFailure(value:unknown):boolean {
   if(!value || typeof value!=="object")return false;
   for(const [key,v] of Object.entries(value)){
     if((key==="error"||key==="errors")&&v!==null&&v!==false&&v!==""&&(!Array.isArray(v)||v.length>0))return true;
+    if(["exit_code","exitCode"].includes(key)&&v!==null&&v!==0)return true;
     if((key==="is_error"&&v===true)||(["success","ok"].includes(key)&&v===false))return true;
     if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed","refusal"].includes(String(v)))return true;
     if(nativeFailure(v))return true;
