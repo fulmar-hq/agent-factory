@@ -4,7 +4,7 @@ import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {z} from 'zod';
-import {ConfigSchema,QualificationSchema,BillingSchema} from './config';
+import {ConfigSchema,QualificationSchema,BillingSchema,MeterSchema,type Meter} from './config';
 import {releaseAvailable} from '../wallet/release';
 import {awsRefusal} from '../wallet/ledger';
 import {readReleaseBatch} from './release-batch';
@@ -13,12 +13,21 @@ import {relatedFactoryAlarm} from './alerts';
 import {command} from '../adapters/github';
 import {diskReading} from './disk';
 import {processIdentity} from './process';
+import {qualificationEvidenceVerified} from './qualification-evidence';
 import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
 import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,type FactoryHealthSnapshot,type FactoryHealthState,type HealthDeliveryCommand} from './factory-health';
 const failed=(at:number,reason:string)=>({state:'unavailable' as const,observedAt:at,reason});
 const ok=<T>(at:number,receipt:string,value:T)=>({state:'ok' as const,observedAt:at,receipt,value});
 function tail(path:string){const fd=openSync(path,'r');try{const stat=fstatSync(fd),n=Math.min(stat.size,65536),bytes=Buffer.alloc(n);readSync(fd,bytes,0,n,stat.size-n);return bytes.toString().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});}finally{closeSync(fd);}}
+export function freshestHealthReadings(dir:string,current:unknown):{codex?:Meter;claude?:Meter}{
+ let saved:unknown;try{saved=JSON.parse(readFileSync(join(dir,'readings.json'),'utf8'));}catch{/* Fresh controller/native reads can recover a missing import. */}
+ const result:{codex?:Meter;claude?:Meter}={};
+ for(const provider of ['codex','claude'] as const){const candidates=[saved,current].flatMap(raw=>{const p=MeterSchema.safeParse(raw&&typeof raw==='object'?(raw as Record<string,unknown>)[provider]:undefined);return p.success?[p.data]:[];}).sort((a,b)=>b.observedAt-a.observedAt);
+  if(candidates.length>1&&candidates[0]!.observedAt===candidates[1]!.observedAt&&JSON.stringify(candidates[0]!.windows)!==JSON.stringify(candidates[1]!.windows))throw Error('contradictory same-time native usage');
+  if(candidates[0])result[provider]=candidates[0];
+ }return result;
+}
 export async function collectFactoryHealth(dir:string,now:number,previousInactive:number|null=null,identity=processIdentity,execute=command):Promise<{snapshot:FactoryHealthSnapshot;inactive:number|null}>{
  const snapshot:FactoryHealthSnapshot={version:1,capturedAt:now};
  const disk=diskReading(undefined,now);snapshot.disk='error' in disk?failed(now,disk.error):ok(now,'statfs Data volume', {usedFraction:disk.usedFraction});
@@ -34,6 +43,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    // Existing legacy pause events have no actor provenance. Never call them Vincent's.
    const provenance=pause?JSON.parse(pause.data):null;
    snapshot.controller=ok(now,'read-only controller snapshot',{paused,actor:provenance?.actor==='Vincent'?'Vincent':null,actorVerified:provenance?.actor==='Vincent'&&provenance?.verified===true,changedAt:pause?.at??now,changeReceipt:pause?.id??'unpaused controller readback'});
+   try{
    const sessions=db.query("SELECT * FROM sessions LIMIT 10001").all() as {id:string;status:string;pid:number|null;native_id:string|null;provider:string;started:number|null;brief:string}[];
    if(sessions.length>10000)throw Error('session inventory truncated');
    const running=[];let workUnknown=false;
@@ -60,8 +70,9 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     const refusal=/qualif/.test(reason)?'qualification':/usage/.test(reason)?'usage':/slot|capacity/.test(reason)?'capacity':/wallet|billing/.test(reason)?'billing':/approval|intake/.test(reason)?'approval':'unknown';
     snapshot.work=ok(now,'controller heartbeat plus fresh native/process readback',{complete:true as const,ready,building,claims,running,inactiveSince:claims.length?null:inactive,refusal:refusal as 'qualification'|'usage'|'capacity'|'billing'|'approval'|'unknown'});
    }
+   }catch(error){snapshot.work=failed(now,String(error));}
    try{
-   const raw=JSON.parse(readFileSync(join(dir,'qualifications.json'),'utf8')),required=new Map<string,string>();
+   const qualificationBytes=readFileSync(join(dir,'qualifications.json'),'utf8'),raw=JSON.parse(qualificationBytes),required=new Map<string,string>();
    for(const role of Object.values(c.owners)){const key=`${role.harness}:${role.effort}`;if(required.has(key)&&required.get(key)!==role.model)throw Error("conflicting required qualification models");required.set(key,role.model);}
    for(const [key,value] of Object.entries(raw)){const provider=key.split(':')[0],q=QualificationSchema.safeParse(value);if(['codex','claude'].includes(provider!)&&q.success&&!required.has(`${provider}:${q.data.effort}`))required.set(`${provider}:${q.data.effort}`,q.data.model);}
    const binding=get<{attempt:string;provider:string;qualificationId:string;expiresAt:number;nativeId:string;nativePath:string;workspace:string;pid:number;identity:string;startedAt:number;wake:string}>('codex-renewal-native');
@@ -71,7 +82,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     if(q.success&&binding?.provider===key&&binding.qualificationId===qualificationId&&binding.expiresAt===q.data.expiresAt&&slot?.id===binding.attempt&&slot.state==='running'){
      try{const observed=identity(binding.pid),receipt=new NativeReceipt('codex',binding.nativeId,binding.workspace,homedir(),binding.startedAt),accounting=new WorkerAccounting();for(let i=0;i<64;i++){receipt.poll(accounting);if(receipt.caughtUp)break;}if(observed===binding.identity&&receipt.evidence(model,effort!).verified){const at=Date.now();renewal={qualificationId,expiresAt:q.data.expiresAt,wakeId:binding.wake,sessionId:binding.attempt,nativeSessionId:binding.nativeId,receipt:binding.nativePath,process:{sessionId:binding.attempt,nativeSessionId:binding.nativeId,provider:key,purpose:'qualification-renewal',qualificationId,qualificationExpiresAt:q.data.expiresAt,wakeId:binding.wake,pid:binding.pid,startedAt:binding.startedAt,observedAt:at,recordedIdentity:binding.identity,observedIdentity:observed,receipt:binding.nativePath,state:'running'}};}}catch{/* Unknown custody never suppresses a qualification warning. */}
     }
-    return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&existsSync(q.data.evidence.split('#')[0]!),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
+    return {provider:key,qualificationId,verified:q.success&&q.data.model===model&&q.data.effort===effort&&qualificationEvidenceVerified(key.split(':')[0]!,q.data,qualificationBytes,dir),expiresAt:q.success?q.data.expiresAt:0,receipt:q.success?q.data.evidence:'missing evidence',renewal};});
    snapshot.qualifications=ok(Date.now(),'protected qualification file and exact live renewal readback',{required:[...required.keys()],records});
    }catch(error){snapshot.qualifications=failed(now,String(error));}
    try{
@@ -100,7 +111,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
      let carrier:ReturnType<typeof readReleaseBatch>|undefined;try{carrier=readReleaseBatch(dir,windows[0]!.day);}catch{/* Missing accepted carrier remains a concrete failed check. */}
      const billingRefusal=awsRefusal({db,get},c,now,b)??(releaseAvailable({db,get},c,b,rawPolicy,now)<100?'release wallet insufficient':null);
      const factorySource=(await execute(['git','rev-parse','HEAD'],join(import.meta.dir,'..'),8000)).trim();
-     const report=await collectReleaseReadiness({dir,config:c,store:{get},brake:get('paused')!==false?'factory paused':billingRefusal,billingRefusal,billingEvidence:b,factorySource,carrier,now,identity,execute:async(args,cwd,timeout)=>execute(args,cwd,Math.min(timeout??8000,8000))});
+     const report=await collectReleaseReadiness({dir,config:c,store:{get},brake:get('paused')!==false?'factory paused':billingRefusal,billingRefusal,billingEvidence:b,factorySource,carrier,now,identity,readings:freshestHealthReadings(dir,get('readings')),execute:async(args,cwd,timeout)=>execute(args,cwd,Math.min(timeout??8000,8000))});
      snapshot.readiness=ok(now,'fresh read-only effective release preflight',{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});
     }catch(error){snapshot.readiness=failed(now,String(error));}
    }

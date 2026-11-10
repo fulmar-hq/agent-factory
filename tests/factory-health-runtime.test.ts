@@ -53,3 +53,26 @@ test('monitoring windows recompute all effective readiness checks without refres
   expect(r.snapshot.readiness).toMatchObject({state:'ok',observedAt:now,value:{ready:false}});expect(calls.some(args=>args[0]==='aws')).toBe(false);expect(calls.some(args=>args.includes('actions/variables/QA_HOLD'))).toBe(false);expect(calls.some(args=>args.some(a=>a.endsWith('/actions/variables/QA_HOLD')))).toBe(true);
  }finally{s.close();f.db.close();}
 });
+
+
+test('native work observation failure leaves every independent valid controller source available',async()=>{
+ const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),now=Date.parse('2026-11-10T12:00:00-05:00');
+ try{s.set('paused',false);s.event('init','resume',{},'retain',now-86400000);s.set('heartbeat',{at:now,status:'ok',ready:0});writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(f.dir,'qualifications.json'),'{}');writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at:now,status:'ok'})+'\n');writeFileSync(join(f.dir,'release-billing.json'),JSON.stringify({observedAt:now,month:'2026-11',postedCents:0,unpostedCents:0,fixedCents:0,projectedCents:0,receipt:'fictional bill'}));
+  s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief,pid,native_id,started) VALUES(?,?,?,?,?,?,?,?,?)').run('fictional','example/demo#1','builder','codex','running',JSON.stringify({model:'gpt-6.1-sol',effort:'medium'}),123,'00000000-0000-4000-8000-000000000001',now-1000);s.set('supervisor:fictional','fictional identity');s.event('workspace:fictional','workspace',{workspace:f.dir},'retain',now-1000);
+  const r=await collectFactoryHealth(f.dir,now,null,()=>{throw Error('fictional ps denied');},async()=>{throw Error('fictional no network');});expect(r.snapshot.work?.state).toBe('unavailable');for(const source of ['controller','qualifications','releases','billing'] as const)expect(r.snapshot[source]?.state).toBe('ok');
+ }finally{s.close();f.db.close();}
+});
+
+
+test('unrelated file, empty report and directory cannot verify native qualification',async()=>{
+ const {qualification}=await import('./fixtures'),{qualificationEvidenceVerified}=await import('../launcher/qualification-evidence');const f=bridge();try{
+  for(const evidence of [f.dir,join(f.dir,'unrelated.txt'),join(f.dir,'empty.txt')]){if(evidence!==f.dir)writeFileSync(evidence,evidence.endsWith('empty.txt')?'':'fictional unrelated file');const q={...qualification(),evidence};expect(qualificationEvidenceVerified('codex',q,JSON.stringify({codex:q}))).toBe(false);}
+ }finally{f.db.close();}
+});
+
+test('preflight selects newer actual controller usage over cached import and reverses on recovery',async()=>{
+ const {meter}=await import('./fixtures'),{freshestHealthReadings}=await import('../launcher/factory-health-runtime');const f=bridge(),now=Date.now();try{
+  writeFileSync(join(f.dir,'readings.json'),JSON.stringify({codex:{...meter(.1),observedAt:now-60000}}));expect(freshestHealthReadings(f.dir,{codex:{...meter(.95),observedAt:now}}).codex?.windows[0]?.used).toBe(.95);
+  writeFileSync(join(f.dir,'readings.json'),JSON.stringify({codex:{...meter(.95),observedAt:now-60000}}));expect(freshestHealthReadings(f.dir,{codex:{...meter(.1),observedAt:now}}).codex?.windows[0]?.used).toBe(.1);
+ }finally{f.db.close();}
+});
