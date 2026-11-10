@@ -1,3 +1,4 @@
+import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
 import {claimableReady,reviewPublished} from './queue';
@@ -22,6 +23,8 @@ import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import {qualificationAlerts,watchdogAlert,diskCapacityAlert,healthOwnsAlerts} from "./alerts";
+import {scheduleCodexRenewal} from "./codex-renewal";
+
 import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
 import { qualificationFor } from "./usage-push-policy";
@@ -53,7 +56,7 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifi
   return session;
 }
 export function spawnSupervisor(id: string, dir: string) {
-  const p = Bun.spawn([process.execPath, join(import.meta.dir, "worker.ts"), id], {
+  const p = Bun.spawn([process.execPath, join(import.meta.dir, "worker-entry.ts"), id], {
     env: { ...process.env, FACTORY_PRIVATE_DIR: dir },
     // launchd terminates the tick's remaining process group when the tick exits.
     // unref alone only releases Bun's event loop; it does not create a new group.
@@ -104,6 +107,11 @@ export async function tick(dir = root) {
     }
     s.set("readings", r);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
+    try {const renewal=scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
+      mkdirSync(join(dir,"logs"),{recursive:true,mode:0o700});const fd=openSync(join(dir,"logs",`codex-renewal-${id}.log`),"ax",0o600);
+      try{const child=Bun.spawn([process.execPath,join(import.meta.dir,"../scripts/renew-codex.ts"),id],{env:{...process.env,FACTORY_PRIVATE_DIR:dir},detached:true,stdin:"ignore",stdout:fd,stderr:fd});child.unref();}finally{closeSync(fd);}
+    });s.set("codex-renewal-evaluation",renewal);}catch(error){s.set("codex-renewal-evaluation",{state:"refused",at:Date.now(),nextCheckAt:Date.now()+60000,error:String(error)});s.event(crypto.randomUUID(),"codex-renewal-scheduler-refusal",{error:String(error)},"Retain refusal; qualification and capacity gates remain closed");}
+
     observeBilling(s, c, r.billing, now);
     await autonomyEffects(s,()=>reconcileBrowsers(e,dir,nativeBrowserPorts(e,dir,id=>spawnSupervisor(id,dir)),Date.now()));
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
