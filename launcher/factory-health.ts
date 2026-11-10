@@ -68,7 +68,7 @@ const qualificationSchema = z.object({
   })),
 });
 const awsSchema = z.object({ verified: z.boolean(), credentialId: text, expiresAt: timestamp });
-const billingSchema = z.object({ verified: z.boolean(), month: z.string().regex(/^\d{4}-\d{2}$/), allowed: z.boolean() });
+const billingSchema = z.object({ verified: z.boolean(), month: z.string().regex(/^\d{4}-\d{2}$/), allowed: z.boolean(), billingObservedAt: timestamp.optional() });
 const diskSchema = z.object({ usedFraction: z.number().min(0).max(1) });
 const holdsSchema = z.object({ blocking: z.boolean() });
 const controllerSchema = z.object({
@@ -325,7 +325,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   function preflight(window: HealthReleaseWindow): Issue[] {
     releaseSources.push(billing, aws, qualifications, disk, holds);
     const issues: Issue[] = [];
-    if (!billing.ok || !billing.value.verified || billing.value.month !== window.day.slice(0, 7)) issues.push(unavailable("release billing"));
+    if (!billing.ok || !billing.value.verified || billing.value.month !== window.day.slice(0, 7) || (billing.value.billingObservedAt!==undefined && (billing.value.billingObservedAt>billing.observedAt || now-billing.value.billingObservedAt>=HEALTH_TIMING.billingMaxAge))) issues.push(unavailable("release billing"));
     else if (!billing.value.allowed) issues.push(issue("Factory release is blocked by billing"));
     if (!aws.ok || !aws.value.verified) issues.push(unavailable("release AWS access"));
     else if (aws.value.expiresAt < window.endAt) issues.push(issue("Factory AWS access will not cover the release window"));

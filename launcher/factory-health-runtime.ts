@@ -6,7 +6,9 @@ import {createHash} from 'node:crypto';
 import {z} from 'zod';
 import {ConfigSchema,QualificationSchema,BillingSchema} from './config';
 import {releaseAvailable} from '../wallet/release';
-import {originalSessionExpiry,supportedReleaseHold} from './release-readiness';
+import {awsRefusal} from '../wallet/ledger';
+import {readReleaseBatch} from './release-batch';
+import {originalSessionExpiry,supportedReleaseHold,collectReleaseReadiness} from './release-readiness';
 import {relatedFactoryAlarm} from './alerts';
 import {command} from '../adapters/github';
 import {diskReading} from './disk';
@@ -87,8 +89,21 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
     return [{windowId:`${m[1]}:${m[2]==='qa'?'qa':'production'}`,state,startedAt:started?.at??null,completedAt:done,receipt}];});
    const first=db.query('SELECT MIN(at) AS at FROM events').get() as {at:number|null};snapshot.releases=first.at===null?failed(now,'release history unavailable'):ok(now,'complete retained release executor inventory',{completeFrom:first.at,completeThrough:now,windows});
    }catch(error){snapshot.releases=failed(now,String(error));}
-   try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(b.observedAt,b.receipt,{verified:true,month:b.month,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
+   try{const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));snapshot.billing=ok(now,b.receipt,{verified:true,month:b.month,billingObservedAt:b.observedAt,allowed:releaseAvailable({db,get},c,b,rawPolicy,now)>=100});}catch(error){snapshot.billing=failed(now,String(error));}
    const day=healthReleaseWindows(now)[0]!.day,report=get<{day:string;validThrough:number;ready:boolean;missing:{input:string;reason:string}[]}>(`release-preflight-report:${day}`);if(report){const saved=db.query("SELECT at,data FROM events WHERE id=? AND kind='release-readiness'").get(`release-readiness:${day}`) as {at:number;data:string}|null;if(!saved||JSON.stringify(JSON.parse(saved.data))!==JSON.stringify(report))snapshot.readiness=failed(now,'authoritative preflight report receipt unavailable or mismatched');else snapshot.readiness=ok(saved.at,`release-preflight-report:${day}`,{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});}else snapshot.readiness=failed(now,'authoritative effective preflight report unavailable');
+   const windows=healthReleaseWindows(now);
+   if(now>=windows[0]!.startAt-3600000&&now<windows[1]!.endAt){
+    try{
+     // Recompute the effective checks through the existing read-only collector.
+     // Cached billing retains its original age; no AWS refresh is performed.
+     const b=BillingSchema.parse(JSON.parse(readFileSync(join(dir,'release-billing.json'),'utf8')));
+     let carrier:ReturnType<typeof readReleaseBatch>|undefined;try{carrier=readReleaseBatch(dir,windows[0]!.day);}catch{/* Missing accepted carrier remains a concrete failed check. */}
+     const billingRefusal=awsRefusal({db,get},c,now,b)??(releaseAvailable({db,get},c,b,rawPolicy,now)<100?'release wallet insufficient':null);
+     const factorySource=(await execute(['git','rev-parse','HEAD'],join(import.meta.dir,'..'),8000)).trim();
+     const report=await collectReleaseReadiness({dir,config:c,store:{get},brake:get('paused')!==false?'factory paused':billingRefusal,billingRefusal,billingEvidence:b,factorySource,carrier,now,identity,execute:async(args,cwd,timeout)=>execute(args,cwd,Math.min(timeout??8000,8000))});
+     snapshot.readiness=ok(now,'fresh read-only effective release preflight',{day:report.day,validThrough:report.validThrough,ready:report.ready,missing:report.missing.map(m=>m.input)});
+    }catch(error){snapshot.readiness=failed(now,String(error));}
+   }
    db.exec('COMMIT');
   }finally{db.close();}
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
@@ -115,7 +130,7 @@ export function healthBridge(path:string){
 export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports:{execute?:typeof command;identity?:typeof processIdentity}={}){
  const clock=at===undefined?Date.now:()=>at;let now=clock();
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});const db=new Database(join(dir,'health','state.sqlite'),{create:true,strict:true});
- db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER);');
+ db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER); CREATE TABLE IF NOT EXISTS delivery_links(notification TEXT NOT NULL,recipient TEXT NOT NULL,bridge_id TEXT NOT NULL,PRIMARY KEY(notification,recipient));');
  try{db.exec('BEGIN IMMEDIATE');const row=db.query('SELECT json,inactive FROM state WHERE id=1').get() as {json:string;inactive:number|null}|null;
   const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null,ports.identity??processIdentity,ports.execute??command);
   const evaluated=clock();if(evaluated<now)throw Error("health collection clock regressed");now=evaluated;collected.snapshot.capturedAt=now;
@@ -126,11 +141,13 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   try{for(const pending of pendingHealthDeliveries(state,()=>now)){
 
    db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
-   const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;save();db.exec('COMMIT');
+   const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;
    const command=begun.command,id=command.idempotencyKey,condition=state.outbox.find(n=>n.id===command.notificationId)!.condition;
-   const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release'|'work',now,id):null;
-   if(!related)bridge.send(id,command.recipient,command.message);
-   const receipt=bridge.delivered(related?.id??id,command.recipient);
+   let link=db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(command.notificationId,command.recipient) as {bridge_id:string}|null;
+   if(!link){const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release'|'work',now,id):null;link={bridge_id:related?.id??id};db.query('INSERT INTO delivery_links VALUES(?,?,?)').run(command.notificationId,command.recipient,link.bridge_id);}
+   save();db.exec('COMMIT');
+   if(link.bridge_id===id)bridge.send(id,command.recipient,command.message);
+   const receipt=bridge.delivered(link.bridge_id,command.recipient);
    if(receipt){db.exec('BEGIN IMMEDIATE');const latest=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=acknowledgeHealthDelivery(FactoryHealthStateSchema.parse(JSON.parse(latest.json)),command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
   }}finally{bridge.close();}
   const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
