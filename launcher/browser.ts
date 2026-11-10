@@ -46,8 +46,12 @@ export function readBrowserJSON(path: string): unknown {
 }
 export const browserDir = (dir:string, j:BrowserJob) => join(dir, "browser", j.id, j.nonce);
 export function isLocalPreview(url:string) {
-  const host=new URL(url).hostname.toLowerCase();
-  return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host === "0.0.0.0" || /^127\./.test(host);
+  // URL canonicalizes IPv4 aliases and IPv6 spelling, including dotted mapped
+  // addresses. A final DNS root dot does not make localhost a signed-in site.
+  const host=new URL(url).hostname.toLowerCase().replace(/\.$/,"");
+  const mapped=host.match(/^\[::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}\]$/);
+  const mappedLoopback=mapped!==null && (Number.parseInt(mapped[1]!,16) >>> 8)===127;
+  return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host === "0.0.0.0" || /^127(?:\.[0-9]{1,3}){3}$/.test(host) || mappedLoopback;
 }
 export function queueBrowser(e: Engine, parent: string, raw: unknown, now = Date.now()) {
   const request = BrowserNeeded.parse(raw);

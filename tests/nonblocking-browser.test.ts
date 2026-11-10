@@ -10,5 +10,28 @@ function fixture(){const s=new Store(':memory:'),e=new Engine(s,config());e.paus
 const request={result:'BROWSER_NEEDED',url:'https://console.example.test/status',goal:'Read status',noCliApi:'Only the signed-in console provides this status',expectedEvidence:'Exact status text'};
 test('detached real-site check never retains or recreates builder workspace or resumes author',()=>{const {s,e,x}=fixture();const j=queueBrowser(e,x.id,request,now);expect(j.detached).toBe(true);expect(e.sessions()[0].status).toBe('finished');expect(s.get(`browser-parent:${x.id}`)).toBeNull();const dir=mkdtempSync(join(tmpdir(),'detached-check-'));j.result={nonce:j.nonce,status:'done',evidence:'Status observed',tabId:1,tabClosed:true};resumeBrowser(e,j,dir,()=>{throw Error('must not resume')});expect(existsSync(join(dir,'workspaces'))).toBe(false);s.close();});
 test('local preview requests become nightly evidence without browser dispatch or parent wait',()=>{const {s,e,x}=fixture();const w=mkdtempSync(join(tmpdir(),'nightly-ui-'));mkdirSync(join(w,'.factory-tmp'));writeFileSync(join(w,'.factory-tmp/browser-needed.json'),JSON.stringify({...request,url:'http://127.0.0.1:3103'}));collectBrowserRequest(e,x.id,w,now);expect(e.sessions()[0].status).toBe('finished');expect(browserJobs(s)).toHaveLength(0);expect(s.db.query("SELECT key FROM kv WHERE key LIKE 'nightly-ui:%'").all()).toHaveLength(1);expect(()=>queueBrowser(e,x.id,{...request,url:'http://localhost:3103'})).toThrow('nightly');s.close();});
+test('rooted localhost and mapped loopback requests defer through the actual collection path',()=>{
+ for(const host of ['localhost.','ui.localhost.','[::ffff:127.0.0.1]','[0:0:0:0:0:ffff:127.255.254.253]','[::ffff:7f00:1]','[::ffff:7fff:ffff]']) {
+  const {s,e,x}=fixture(),w=mkdtempSync(join(tmpdir(),'nightly-loopback-')),url=`http://${host}:3103/`;
+  try {
+   mkdirSync(join(w,'.factory-tmp'));writeFileSync(join(w,'.factory-tmp/browser-needed.json'),JSON.stringify({...request,url}));
+   expect(collectBrowserRequest(e,x.id,w,now)).toBeUndefined();
+   expect(e.sessions()[0].status).toBe('finished');expect(s.get(`browser-parent:${x.id}`)).toBeNull();
+   expect(browserJobs(s)).toHaveLength(0);
+   const rows=s.db.query("SELECT value FROM kv WHERE key LIKE 'nightly-ui:%'").all() as {value:string}[];
+   expect(rows).toHaveLength(1);expect(JSON.parse(rows[0]!.value)).toMatchObject({parent:x.id,state:'pending',request:{url}});
+   expect(()=>queueBrowser(e,x.id,{...request,url},now)).toThrow('nightly');
+   expect(browserJobs(s)).toHaveLength(0);
+   expect(existsSync(join(w,'.factory-tmp/browser-needed.json'))).toBe(false);
+  } finally {s.close();}
+ }
+});
+test('remote rooted DNS and non-loopback mapped IPs retain their real-site browser route',()=>{
+ for(const host of ['localhost.example.test.','127.example.test.','127.0.0.1.example.test','[::ffff:192.0.2.1]','[::ffff:128.0.0.1]','[::fffe:7f00:1]']) {
+  const {s,e,x}=fixture(),url=`http://${host}:3103/`;
+  try {expect(isLocalPreview(url)).toBe(false);expect(queueBrowser(e,x.id,{...request,url},now).state).toBe('queued');expect(browserJobs(s)).toHaveLength(1);}
+  finally {s.close();}
+ }
+});
 test('loopback forms cannot occupy the signed-in queue',()=>{for(const host of ['localhost','ui.localhost','127.0.0.1','127.2.3.4','[::1]','0.0.0.0','2130706433'])expect(isLocalPreview(`http://${host}:3103/`)).toBe(true);expect(isLocalPreview(request.url)).toBe(false);});
 test('nightly checklist binds pending requests to published sources in frozen batch',()=>{const s=new Store(':memory:');for(const [id,pr] of [['a',12],['b',13]] as const){s.set(`nightly-ui:${id}`,{parent:id,repo:'fulmar-hq/alido',issue:pr,request,state:'pending'});s.event(id,'launcher-publish',{id,repo:'fulmar-hq/alido',url:`https://github.com/fulmar-hq/alido/pull/${pr}`},'retain');}const checks=nightlyUiChecklist(s,{sources:[{number:12}]} as any);expect(checks.map(x=>x.issue)).toEqual([12]);expect(checks[0].publication.url).toBe('https://github.com/fulmar-hq/alido/pull/12');s.close();});
