@@ -8,7 +8,7 @@ import {healthBridge} from './factory-health-runtime';
 import {mailPath} from './alerts';
 import {requireDiskCapacity} from './disk';
 import {builderSlots} from './capacity';
-export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts','launcher/publisher-evidence.ts','launcher/worker-entry.ts','adapters/github.ts','scripts/cache-retention.py'];
+export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/cache-provenance.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts','launcher/publisher-evidence.ts','launcher/worker-entry.ts','adapters/github.ts','scripts/cache-retention.py'];
 export const renewalDigest=(value:unknown)=>createHash('sha256').update(typeof value==='string'?value:(JSON.stringify(value)??"undefined")).digest('hex');
 export function renewalFingerprint(checkout:string,version:string){return {version,hashes:Object.fromEntries(renewalSources.map(path=>[path,renewalDigest(readFileSync(join(checkout,path),'utf8'))]))};}
 export function renewalDue(q:Record<string,unknown>,fingerprint:unknown,prior:unknown,now:number){

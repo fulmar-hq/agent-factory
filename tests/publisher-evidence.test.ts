@@ -21,7 +21,7 @@ test('publisher expiry evidence stays bound to current Codex records across an u
 
 
 test('changing only the trusted dependency helper invalidates publisher proof',()=>{
- const dir=mkdtempSync(join(tmpdir(),'publisher-helper-boundary-')),source=join(dir,'source'),helper='scripts/cache-retention.py';
+ const dir=mkdtempSync(join(tmpdir(),'publisher-helper-boundary-')),source=join(dir,'source'),helper='launcher/cache-provenance.ts';
  for(const path of publisherSources){mkdirSync(dirname(join(source,path)),{recursive:true});writeFileSync(join(source,path),'fictional original code');}writeFileSync(join(dir,'config.yaml'),'fictional policy');
  const before=publisherBoundary(source,dir,'fictional Git'),now=Date.now(),pub={id:'fictional',repo:'example/demo',head:'a'.repeat(40),tree:'b'.repeat(40),executionReceipt:join(dir,'runs/delivery/fictional/initial/publisher/implementation.json'),testedTreeReceipt:''};
  mkdirSync(dirname(pub.executionReceipt),{recursive:true});writeFileSync(pub.executionReceipt,JSON.stringify({version:1,boundary:before,startedAt:now-1000,completedAt:now,authorityExpiresAt:now+1000,head:pub.head,tree:pub.tree}));

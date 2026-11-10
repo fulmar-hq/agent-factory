@@ -347,13 +347,18 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
 
 // Tests run in the worker boundary, never with launcher credentials. The caller
 // checks clean status and the tree again after this process exits.
-export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
+export type DependencyRecorder = (checkout:string, manifest:unknown, fingerprint:string)=>void;
+export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string, recordDependencies?:DependencyRecorder) {
   executableTest(t.test);
   assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
     await copyDependencies(join(source,"node_modules"),join(checkout,"node_modules"));
     localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
+    if(recordDependencies) {
+      const manifest=JSON.parse(await command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",join(checkout,"node_modules"),"--inventory"],undefined,120000));
+      recordDependencies(checkout,manifest,manifest.fingerprint);
+    }
   }
   // Tests retain scratch receipts (including Vitest's local token). They are
   // declared non-source assets, just as in the prepared worker checkout.

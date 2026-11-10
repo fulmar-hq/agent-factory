@@ -257,12 +257,22 @@ def cache_manifest(db, root, repo, name):
     # Only node_modules has a trusted before-native baseline. Build outputs and
     # legacy/rehearsal clones without provenance remain untouched.
     sid = session_for(root, repo)
-    if name != 'node_modules' or repo != root / 'workspaces' / str(sid):
+    if name != 'node_modules' or not sid:
         return None
-    binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
-    if binding is None:
-        return None
-    fingerprint = json.loads(binding[0])
+    if repo == root / 'workspaces' / str(sid):
+        binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
+        if binding is None:
+            return None
+        fingerprint = json.loads(binding[0])
+    else:
+        key = 'publisher-dependency-installation:' + hashlib.sha256(str(repo).encode()).hexdigest()
+        binding = db.execute('select value from kv where key=?', (key,)).fetchone()
+        if binding is None:
+            return None
+        bound = json.loads(binding[0])
+        if not isinstance(bound, dict) or bound.get('version') != 1 or bound.get('session') != sid or bound.get('checkout') != str(repo) or not real(repo):
+            return None
+        fingerprint = bound.get('fingerprint')
     if not isinstance(fingerprint, str) or not re.fullmatch(r'[a-f0-9]{64}', fingerprint):
         return None
     row = db.execute('select value from kv where key=?', ('dependency-cache-manifest:' + fingerprint,)).fetchone()
@@ -270,7 +280,7 @@ def cache_manifest(db, root, repo, name):
         return None
     manifest = json.loads(row[0])
     if (not isinstance(manifest, dict) or manifest.get('version') != 1 or
-        manifest.get('fingerprint') != json.loads(binding[0]) or not isinstance(manifest.get('entries'), dict)):
+        manifest.get('fingerprint') != fingerprint or not isinstance(manifest.get('entries'), dict)):
         return None
     return manifest
 
@@ -304,6 +314,25 @@ def custody(db, root, repo):
         row = db.execute('select status,pid,provider,brief from sessions where id=?', (sid,)).fetchone()
         if row is None or row[0] not in {'finished', 'archived', 'waiting-browser'} or row[1] is not None:
             return None
+        # Native supervision clears sessions.pid before browser collection and
+        # publication. Only positive absence of the recorded original supervisor
+        # releases that interval; legacy or inaccessible custody stays retained.
+        original = db.execute("select data from events where kind='custody' and json_extract(data,'$.id')=? order by at desc,rowid desc limit 1", (sid,)).fetchone()
+        if original is None:
+            return None
+        supervisor = json.loads(original[0]).get('pid')
+        if not isinstance(supervisor, int) or supervisor < 1:
+            return None
+        try:
+            os.kill(supervisor, 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return None
+        else:
+            return None
+        if (root / 'workspaces' / sid / '.factory-tmp/browser-needed.json').exists():
+            return None
         if row[0] == 'waiting-browser' and (row[2] != 'codex' or json.loads(row[3]).get('repo') not in {'fulmar-hq/alido', 'fulmar-hq/agent-factory'}):
             return None
         if row[0] == 'waiting-browser':
@@ -313,7 +342,7 @@ def custody(db, root, repo):
         proof = db.execute('select value from kv where key=?', ('cleanup-evidence:' + sid,)).fetchone()
         if proof is None or json.loads(proof[0]).get('verified') is not True:
             return None
-        return [root / 'workspaces' / sid, root / 'runs/delivery' / sid, repo]
+        return [root / 'workspaces' / sid, root / 'runs/delivery' / sid, root / 'runs/browser-drain' / sid, repo]
     # Non-session review/rehearsal clones need a full quiet hour as well as
     # process/cwd/open-file proof. A live maintenance lease excludes them.
     lease = db.execute("select value from kv where key='launcher-maintenance-lease'").fetchone()

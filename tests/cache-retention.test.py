@@ -10,7 +10,8 @@ class Safety(unittest.TestCase):
   self.git('init','-q');self.git('config','user.name','Fixture');self.git('config','user.email','fixture@example.test')
   (self.repo/'.gitignore').write_text('node_modules/\n.next/\n.factory-tmp/\n')
   self.git('add','.gitignore');self.git('-c','commit.gpgsign=false','commit','-qm','fixture')
-  self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer,provider text,brief text);create table kv(key text,value text);')
+  self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer,provider text,brief text);create table kv(key text,value text);create table events(kind text,data text,at integer);')
+  self.db.execute('insert into events values(?,?,?)',('custody',json.dumps({'id':'a','pid':99999999}),1))
   self.db.execute("insert into sessions values(?,?,?,?,?)",('a','waiting-browser',None,'codex',json.dumps({'repo':'fulmar-hq/alido'})));self.db.execute('insert into kv values(?,?)',('cleanup-evidence:a',json.dumps({'verified':True})));self.db.commit()
   self.cache=self.repo/'node_modules';self.cache.mkdir();(self.cache/'generated.js').write_text('regenerable');(self.cache/'result.jsonl').write_text('evidence')
   self.db.execute('insert into kv values(?,?)',('dependency-installation:a',json.dumps(m.dependency_identity(self.cache))))
@@ -22,6 +23,37 @@ class Safety(unittest.TestCase):
   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
   self.assertFalse((self.cache/'generated.js').exists());self.assertEqual((self.cache/'result.jsonl').read_text(),'evidence')
   self.assertTrue((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists());self.assertEqual((self.repo/'dirty.txt').read_text(),'uncommitted');self.git('cat-file','-e','HEAD')
+ def test_null_session_pid_does_not_release_live_or_unknown_original_supervisor(self):
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  for probe in [None,PermissionError('unknown process identity')]:
+   with patch.object(m,'quiet',return_value=True),patch.object(m.os,'kill',side_effect=probe):m.sweep(self.root,True)
+   self.assertTrue((self.cache/'generated.js').exists())
+  self.db.execute("delete from events where kind='custody'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_pending_browser_request_retains_dependencies_after_supervisor_exit(self):
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  scratch=self.repo/'.factory-tmp';scratch.mkdir();(scratch/'browser-needed.json').write_text('{"result":"BROWSER_NEEDED"}')
+  with patch.object(m,'quiet',return_value=True),patch.object(m.os,'kill',side_effect=ProcessLookupError):m.sweep(self.root,True)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_publisher_clones_require_exact_pretest_binding_and_keep_new_evidence(self):
+  import hashlib
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  for area in ['delivery','browser-drain']:
+   clone=self.root/'runs'/area/'a'/'attempt'/'publish-fixture';clone.mkdir(parents=True)
+   subprocess.check_call(['git','clone','-q',str(self.repo),str(clone)])
+   cache=clone/'node_modules';cache.mkdir();(cache/'generated.js').write_text('fresh dependency')
+   manifest=m.dependency_identity(cache,True)
+   key='publisher-dependency-installation:'+hashlib.sha256(str(clone).encode()).hexdigest()
+   bound={'version':1,'session':'a','checkout':str(clone),'fingerprint':manifest['fingerprint']}
+   self.assertIsNone(m.cache_manifest(self.db,self.root,clone,'node_modules'))
+   self.db.execute('insert into kv values(?,?)',(key,json.dumps({**bound,'checkout':str(self.repo)})))
+   self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+manifest['fingerprint'],json.dumps(manifest)));self.db.commit()
+   self.assertIsNone(m.cache_manifest(self.db,self.root,clone,'node_modules'))
+   self.db.execute('update kv set value=? where key=?',(json.dumps(bound),key));self.db.commit()
+   (cache/'new-probe.bin').write_text('new test evidence');(cache/'result.jsonl').write_text('test result')
+   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+   self.assertFalse((cache/'generated.js').exists());self.assertEqual((cache/'new-probe.bin').read_text(),'new test evidence');self.assertTrue((cache/'result.jsonl').exists())
  def test_reports_and_unknown_or_modified_material_survive(self):
   reports={'junit.xml':'<testsuite failures="1"/>','results.json':'{"failed":true}', 'report.html':'failure', 'custom-receipt.js':'failed isolation probe'}
   for name,value in reports.items():(self.cache/name).write_text(value)

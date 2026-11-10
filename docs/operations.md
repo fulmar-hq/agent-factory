@@ -265,3 +265,5 @@ fresh process evidence rather than the unrelated-rehearsal age gate. All publish
 callers now default to the shared immutable source seed under their enclosing
 `runs`, including recovery scripts using the installed adapter directly. Original
 bundles, Git objects, source and exact-tree test/publication receipts remain.
+
+Publisher dependency retention records a trusted pre-test inventory for each new checkout under the session’s `runs/delivery` or `runs/browser-drain` path. The launcher binds its exact path and session to an immutable fingerprint in controller state; inventory bytes are shared by fingerprint. Worker-written receipts and legacy clones cannot establish this provenance. Cache eviction also requires the original supervisor to have exited and no unconsumed browser request, even after `sessions.pid` is cleared. Browser-drain callers must pass `publisherDependencyRecorder` to `testSnapshot`; older callers remain unbound and retained. These trusted source changes invalidate publisher and renewal fingerprints and require normal independent review and qualification before installation.
