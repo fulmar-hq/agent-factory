@@ -159,8 +159,9 @@ function nativeFailure(value:unknown):boolean {
   if(!value || typeof value!=="object")return false;
   for(const [key,v] of Object.entries(value)){
     if((key==="error"||key==="errors")&&v!==null&&v!==false&&v!==""&&(!Array.isArray(v)||v.length>0))return true;
+    if(["exit_code","exitCode"].includes(key)&&v!==null&&v!==0)return true;
     if((key==="is_error"&&v===true)||(["success","ok"].includes(key)&&v===false))return true;
-    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed"].includes(String(v)))return true;
+    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed","refusal"].includes(String(v)))return true;
     if(nativeFailure(v))return true;
   }
   return false;
@@ -184,13 +185,14 @@ results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN
 def endpoint(host):
  s=socket.create_connection((host,443),timeout=3);s.close()
 for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))
-denied('push_QA_transport',lambda:endpoint('github.com'))
-push=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
-results['push_QA']=results.pop('push_QA_transport') and push.returncode!=0 and not any(s in push.stderr.lower() for s in ['authentication failed','could not read username','repository not found','http 403','http 401'])
 open('scratch','w').write('fictional renewal probe')
 commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
 results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
 results['workspace_write']=True
+denied('push_QA_transport',lambda:endpoint('github.com'))
+push=subprocess.run(['/usr/bin/git','-c','http.proxy=','-c','credential.helper=','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
+results['push_QA']=results.pop('push_QA_transport') and results['unsigned_bundle'] and push.returncode!=0 and \
+ 'unable to access' in push.stderr.lower() and 'https://github.com/fulmar-hq/alido.git' in push.stderr.lower() and any(s in push.stderr.lower() for s in ['operation not permitted','failed to connect','could not resolve host',"couldn't connect to server"])
 passed=all(results.values())
 results['policy_denials']={name:errors.get('push_QA_transport' if name=='push_QA' else name,0) for name in ['external_dns','external_ip','push_QA']}
 print(json.dumps(results))
@@ -212,6 +214,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(meta.length === 1 && rollout[0] === meta[0] && meta[0].payload?.id === r.nativeId && meta[0].payload?.cwd === r.workspace, "rollout native custody mismatch");
   const counters: { at: number; usage: Usage }[] = [];
   let contexts = 0, completed = 0, previousAt = r.startedAt;
+  const starts:number[]=[];
   const aborts:number[]=[];let completedAt:number|null=null;
   const outputTimes=new Map<string,number>();
   const calls = new Map<string, { name: string; arguments: string }>();
@@ -231,6 +234,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(!prev || Object.keys(u).every(k => u[k as keyof Usage] >= prev[k as keyof Usage]), "native accounting regression");
       counters.push({ at: timestamp, usage: u });
     }
+    if(row.type === "event_msg" && p?.type === "task_started")starts.push(timestamp);
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) {completed++;completedAt=timestamp;}
     if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
@@ -241,7 +245,10 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
     if (row.type === "response_item" && p?.type === "function_call_output") {
-      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
+      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); const payload=p.output.split(/^(?:Final output:|Output:)\s*$/m).at(-1)!.trim();
+      if(payload.startsWith('{')||payload.startsWith('['))requireThat(!nativeFailure(JSON.parse(payload)), "structured native tool failure");
+      else for(const line of payload.split('\n'))if(line.trimStart().startsWith('{')||line.trimStart().startsWith('['))requireThat(!nativeFailure(JSON.parse(line)), "framed structured native tool failure");
+      requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
     }
   }
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
@@ -265,10 +272,12 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   // Pin observed identities across all captures, including late descendants and
   // separately grouped/orphaned children. Unknown table reads already fail parsing.
   let changed = true;
-  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group)) { owned.push(row); changed = true; } }
+  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group || (x.pid === row.pid && x.identity === row.identity))) { owned.push(row); changed = true; } }
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
+    requireThat(contexts===1&&starts.every(at=>completedAt!==null&&at<completedAt), "security capture contains an additional unfinished turn");
+    let active=false;for(const event of stream){if(event.type==="turn.started")active=true;if(event.type==="turn.completed")active=false;}requireThat(!active,"security stream ends in an unfinished turn");
     requireThat(s.signals.every(signal=>signal.at>=r.endedAt&&signal.at<=s.final.at&&owned.some(o=>o.pid===signal.pid&&o.identity===signal.identity)), "security completion contradicted by controller stop signal");
     requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
     requireThat(!stream.some(x=>x.item&&!["agent_message","reasoning","command_execution"].includes(x.item.type)), "unsupported native security stream item");

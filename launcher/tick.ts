@@ -1,6 +1,8 @@
 import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
+import {claimableReady,reviewPublished} from './queue';
+import {observeClaimProgress} from './watchdog';
 import { memoryPressure, reconcileCapacity } from "./capacity";
 import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
 import { join } from "node:path";
@@ -20,7 +22,7 @@ import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
-import {qualificationAlerts,diskCapacityAlert} from "./alerts";
+import {qualificationAlerts,watchdogAlert,diskCapacityAlert} from "./alerts";
 import {healthOwnsAlerts} from "./factory-health-runtime";
 import {scheduleCodexRenewal} from "./codex-renewal";
 import { reconcileBrowsers } from "./browser";
@@ -116,12 +118,14 @@ export async function tick(dir = root) {
     expireDecisions(s,now);
     failures(e,now);
     let autoResolved = resolveQuestions(e,now);
-    let ready = await reconcile(s, c, now);
+    let observed = await reconcile(s,c,now);
+    if(await reviewPublished(e))observed=await reconcile(s,c,now);
+    let ready = claimableReady(e,observed);
     const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
       await applyOwnerResults(e,dir,r.billing,now);
-      ready=await reconcile(s,c,now);
+      ready=claimableReady(e,await reconcile(s,c,now));
       const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
-      if(count)ready=await reconcile(s,c,now);
+      if(count)ready=claimableReady(e,await reconcile(s,c,now));
       return count;
     }) ?? 0 : 0;
     localWakes(s,c,ready,{},now);
@@ -169,6 +173,8 @@ export async function tick(dir = root) {
     autoResolved += resolveQuestions(e);
     const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
+    observeClaimProgress(e,heartbeat);
+    watchdogAlert(s,heartbeat.at);
     s.set("heartbeat", heartbeat);
     s.set("last-successful-heartbeat",heartbeat);
     return heartbeat;
