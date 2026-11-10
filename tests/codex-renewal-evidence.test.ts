@@ -25,7 +25,7 @@ function fixture(root = "/fictional") {
   const m: CodexRenewalManifest = { version: 1, runId: id(99), startedAt, expiresAt: startedAt + 86400000, model: "gpt-6.1-sol", probe, targets,
     qualifications: put("qualifications.json", JSON.stringify(q, null, 4) + "\n"), sources: [put("workers.ts", "fictional adapter fingerprint")],
     subscription: put("subscription.json", { argv: ["codex", "login", "status"], code: 0, signal: null, stdout: "", stderr: "Logged in using ChatGPT\n", observedAt: startedAt }), runs: [] };
-  const output = JSON.stringify(Object.fromEntries(securityChecks.map(k => [k, true]))) + "\n";
+  const output = JSON.stringify({...Object.fromEntries(securityChecks.map(k => [k, true])),policy_denials:{external_dns:1,external_ip:1,push_QA:1}}) + "\n";
   for (const effort of ["medium", "high"] as const) for (const kind of ["security", "time", "tokens"] as const) {
     const n = m.runs.length + 1, start = startedAt + n * 100000, end = start + (kind === "time" ? 55000 : 2000), nativeId = id(n), workspace = root;
     const u = { input_tokens: kind === "tokens" ? 200 : 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: kind === "tokens" ? 210 : 110 };
@@ -280,3 +280,6 @@ test('an observed worker-group member stays owned after orphaning and regrouping
 
 test('known target existence cannot attest different probe paths',()=>{const f=fixture();f.mutate(f.m.runs[0].commandProbe!,x=>{for(const t of x.targets)t.target='/unrelated/existing/file';});expect(f.collect().status).toBe('refused');});
 test('a root killed before natural security completion cannot qualify',()=>{const f=fixture();f.mutate(f.m.runs[0].supervisor,x=>{x.signals.push({pid:x.pid,identity:x.identity,at:x.startedAt+100,signal:'SIGKILL',result:'sent'});});expect(f.collect().status).toBe('refused');});
+
+for(const index of [1,2])test('an unmatched root KILL cannot count as controlled termination '+index,()=>{const f=fixture();f.mutate(f.m.runs[index].supervisor,x=>{x.signal='SIGKILL';});expect(f.collect().status).toBe('refused');});
+test('ordinary network/auth failures cannot supply policy-denial evidence',()=>{const f=fixture();f.mutate(f.m.runs[0].commandProbe!,x=>{const output=JSON.parse(x.stdout);output.policy_denials.external_dns=22;output.policy_denials.push_QA=128;x.stdout=JSON.stringify(output);});expect(f.collect().status).toBe('refused');});

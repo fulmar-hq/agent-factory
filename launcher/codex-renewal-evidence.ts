@@ -43,7 +43,7 @@ export const securityChecks = [
   "external_ip", "push_QA", "unsigned_bundle", "workspace_write",
 ] as const;
 const knownTargets = ["known_agent_socket", "credential", "private_sentinel", "publisher_write", "dependencies_write", "toolchain_write"] as const;
-const securityResult = z.object(Object.fromEntries(securityChecks.map(k => [k, z.literal(true)]))).strict();
+const securityResult = z.object({...Object.fromEntries(securityChecks.map(k => [k, z.literal(true)])),policy_denials:z.object({external_dns:z.union([z.literal(1),z.literal(13)]),external_ip:z.union([z.literal(1),z.literal(13)]),push_QA:z.union([z.literal(1),z.literal(13)])}).strict()}).strict();
 const commandSchema = z.object({
   runId: uuid, nativeId: uuid, workspace: text, command: text, probeSha256: hash,
   startedAt: time, endedAt: time, probeAfterSha256: hash, code: z.literal(0), signal: z.null(), stdout: text,
@@ -168,10 +168,11 @@ function nativeFailure(value:unknown):boolean {
 export function securityProbe(targets:{socket:string;credential:string;sentinel:string;publisher:string;dependencies:string;toolchain:string}){
  return `import os,socket,subprocess,json,errno
 results={}
+errors={}
 def denied(name,action):
  try:
   action();results[name]=False
- except OSError as error:results[name]=error.errno in (errno.EACCES,errno.EPERM)
+ except OSError as error:results[name]=error.errno in (errno.EACCES,errno.EPERM);errors[name]=error.errno
 def connect():
  s=socket.socket(socket.AF_UNIX);s.settimeout(2)
  try:s.connect(${JSON.stringify(targets.socket)})
@@ -180,15 +181,20 @@ denied('known_agent_socket',connect)
 for name,path,mode in [('credential',${JSON.stringify(targets.credential)},os.O_RDONLY),('private_sentinel',${JSON.stringify(targets.sentinel)},os.O_RDONLY),('publisher_write',${JSON.stringify(targets.publisher)},os.O_WRONLY),('dependencies_write',${JSON.stringify(targets.dependencies)},os.O_WRONLY),('toolchain_write',${JSON.stringify(targets.toolchain)},os.O_WRONLY)]:
  denied(name,lambda p=path,m=mode:os.close(os.open(p,m)))
 results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','FACTORY_OWNER_TOKEN'])
-for name,url in [('external_dns','https://example.com'),('external_ip','https://1.1.1.1')]:
- results[name]=subprocess.run(['/usr/bin/curl','--noproxy','*','--max-time','3','-ksSf',url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
-results['push_QA']=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0
+def endpoint(host):
+ s=socket.create_connection((host,443),timeout=3);s.close()
+for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))
+denied('push_QA_transport',lambda:endpoint('github.com'))
+push=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
+results['push_QA']=results.pop('push_QA_transport') and push.returncode!=0 and not any(s in push.stderr.lower() for s in ['authentication failed','could not read username','repository not found','http 403','http 401'])
 open('scratch','w').write('fictional renewal probe')
 commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
 results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
 results['workspace_write']=True
+passed=all(results.values())
+results['policy_denials']={name:errors.get('push_QA_transport' if name=='push_QA' else name,0) for name in ['external_dns','external_ip','push_QA']}
 print(json.dumps(results))
-raise SystemExit(0 if all(results.values()) else 1)
+raise SystemExit(0 if passed else 1)
 `;
 }
 
@@ -295,6 +301,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
+    if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");
     requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
     if(s.signal === null)requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt), "nonzero native exit has no controlled abort evidence");
     requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
