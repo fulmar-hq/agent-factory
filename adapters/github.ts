@@ -1,5 +1,5 @@
 import {githubBudget,GitHubUnavailable,retryAtFor,recordGithubHttp} from './github-budget';
-import { githubPages,openIssuePages } from './github-pages';
+import { githubPages,openIssuePages,restIssue } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
@@ -31,7 +31,13 @@ async function rawCommand(args: string[], cwd?: string, timeoutMs=30000) {
     ]);
     if(args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??'') && !args.includes('rate_limit'))recordGithubHttp(err,out);
     const diagnostic=args[0]==='gh' ? err.split('\n').filter(line=>/^(?:gh: |GraphQL: |error: |fatal: |Post |Get |HTTP )/.test(line)).slice(-3).join('\n') || 'GitHub command failed; raw debug omitted' : err;
-    if (code !== 0) throw Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);
+    if (code !== 0) {
+      const error=Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);
+      // Classify the raw diagnostic in memory before removing debug bodies.
+      // gh's ordinary offline error has no "error:" prefix.
+      if(args[0]==='gh')Object.assign(error,{githubUnavailable:timedOut || /rate limit|error connecting|internet connection|timed out|timeout|connection|network|resolve host|no such host|dial tcp|TLS handshake|EOF|HTTP 50[234]|context deadline|temporary failure/i.test(err),rateLimited:/rate limit/i.test(err)});
+      throw error;
+    }
     return out;
   } finally {
     clearTimeout(timer);
@@ -42,10 +48,11 @@ export async function command(args:string[],cwd?:string,timeoutMs=30000) {
   if(api)githubBudget('before',args);
   try{return await rawCommand(args,cwd,timeoutMs);}
   catch(error){
-    if(api && /rate limit|timed out|timeout|connection|network|resolve host|TLS handshake|EOF|HTTP 50[234]|context deadline|temporary failure/i.test(String(error))){
+    const failure=error as Error & {githubUnavailable?:boolean;rateLimited?:boolean};
+    if(api && (failure.githubUnavailable || /rate limit|timed out|timeout|connection|network|resolve host|TLS handshake|EOF|HTTP 50[234]|context deadline|temporary failure/i.test(String(error)))){
       let resets:Parameters<typeof retryAtFor>[2];
-      if(/rate limit/i.test(String(error)))try{resets=JSON.parse(await rawCommand(['gh','api','rate_limit'],undefined,10000));}catch{}
-      const retryAt=retryAtFor(error,Date.now(),resets);githubBudget('failure',args,error,retryAt);
+      if(failure.rateLimited || /rate limit/i.test(String(error)))try{resets=JSON.parse(await rawCommand(['gh','api','rate_limit'],undefined,10000));}catch{}
+      const retryAt=retryAtFor(failure.rateLimited?'rate limit':error,Date.now(),resets);githubBudget('failure',args,error,retryAt);
       throw new GitHubUnavailable(String(error),retryAt);
     }
     throw error;
@@ -99,12 +106,20 @@ export async function reconcile(
   for (const project of Object.values(c.projects)) {
     try {
       const issues = await (scope==='open'?openIssuePages(project.repo,execute):githubPages(project.repo,'issues',execute)) as Issue[];
-      s.atomic(() => {
+      const count=issues.length;
+      if(scope==='open') {
         const open=new Set(issues.map(i=>i.number));
-        for(const row of (scope==='open'?s.db.query('SELECT id,snapshot FROM tickets WHERE id LIKE ?').all(project.repo+'#%'):[]) as {id:string;snapshot:string}[]){
+        for(const row of s.db.query('SELECT id,snapshot FROM tickets WHERE id LIKE ?').all(project.repo+'#%') as {id:string;snapshot:string}[]) {
           const old=JSON.parse(row.snapshot) as Issue;
-          if(old.state==='OPEN'&&!open.has(old.number))s.db.query("UPDATE tickets SET snapshot=?,observed=?,decision='closed in complete open inventory' WHERE id=?").run(JSON.stringify({...old,state:'CLOSED'}),now,row.id);
+          if(old.state!=='OPEN'||open.has(old.number))continue;
+          // REST offset pages can shift while a different issue closes. Absence
+          // is not closure evidence. Stage fresh exact-identity closure proof.
+          const closed=restIssue(project.repo,JSON.parse(await execute(['gh','api',`repos/${project.repo}/issues/${old.number}`])));
+          if(closed.number!==old.number || closed.state!=='CLOSED')throw Error('GitHub open inventory changed; retain snapshots and retry');
+          issues.push(closed);
         }
+      }
+      s.atomic(() => {
         for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
@@ -129,7 +144,7 @@ export async function reconcile(
         }
         s.set(`github:${project.repo}`, {
           observedAt: now,
-          count: issues.length,
+          count,
           truncated: false,
           error: null,
         });

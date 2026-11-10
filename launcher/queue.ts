@@ -28,7 +28,7 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
    if(snapshot.labels.some(l=>l.name==='state:review')){
     const url=(JSON.parse(receipt.data) as {url?:string}).url;
     const pr=url?e.s.get<{at:number;review?:string}>(`board-pr:${url}`):null;
-    if(pr && Date.now()-pr.at<600000){if(pr.review==='CHANGES_REQUESTED')e.s.set(`review-returned:${x.id}:${x.approval_digest}`,{pr:url,at:Date.now()});continue;}
+    if(pr){if(pr.review==='CHANGES_REQUESTED')e.s.set(`review-returned:${x.id}:${x.approval_digest}`,{pr:url,at:Date.now()});continue;}
    }
   }
   try {
@@ -48,6 +48,7 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
    changed++;
   } catch(error) {
    e.s.event(crypto.randomUUID(),'github-review-failure',{id:x.id,error:String(error)},'Retry label reconciliation; retain published work and claim');
+   if(unavailable(error))break;
   }
  }
  return changed;

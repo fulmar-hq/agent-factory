@@ -85,3 +85,21 @@ test('changes requested in the normal review state remain returned after dismiss
 test('independent claim aging retains the actual intervening event time',()=>{const e=setup();try{observeClaimProgress(e,{at:now,claimed:0,paused:false});e.s.event('intervening-continuation','session-continuation',{},'retain',now+60000);expect(checkClaimStall(e,now+3600000)).toBeNull();expect(checkClaimStall(e,now+7260000)).toMatchObject({state:'open'});}finally{e.s.close();}});
 
 test('independent watchdog recognizes real challenge starts',()=>{const e=setup();try{observeClaimProgress(e,{at:now,claimed:0,paused:false});e.s.event('challenge','factory-challenge-started',{},'retain',now+7199000);expect(checkClaimStall(e,now+7200000)).toBeNull();}finally{e.s.close();}});
+
+test('a quota failure stops a multi-publication scan after one request and retains every session',async()=>{
+ const r=fixture();try{
+  const t={...ticket(2),approvalDigest:'ready:'+'b'.repeat(43)},x=r.e.admit(t,admission());r.e.finish(x.id,true);
+  r.e.s.event('publish-two','launcher-publish',{id:x.id,url:'https://github.com/example/demo/pull/3'},'retain');
+  let calls=0;await reviewPublished(r.e,async()=>{calls++;throw Error('gh failed: GraphQL: API rate limit already exceeded');});
+  expect(calls).toBe(1);expect(r.e.sessions().every(x=>x.status==='finished')).toBe(true);
+  expect(r.e.s.rows('events').filter((r:any)=>r.kind==='github-review-failure')).toHaveLength(1);
+ }finally{r.e.s.close();}
+});
+
+test('expired shared review evidence defers polling to the shared reader instead of rescanning every publication',async()=>{
+ const r=fixture();try{
+  r.i.labels=[{name:'state:review'}];r.e.s.db.query('INSERT INTO tickets VALUES(?,?,?,NULL)').run(r.x.ticket,JSON.stringify(r.i),now);
+  r.e.s.set('board-pr:https://github.com/example/demo/pull/2',{at:Date.now()-600001,review:'APPROVED'});
+  expect(await reviewPublished(r.e,r.execute)).toBe(0);expect(r.calls).toHaveLength(0);
+ }finally{r.e.s.close();}
+});

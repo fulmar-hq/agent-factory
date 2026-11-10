@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {recordGithubHttp} from '../adapters/github-budget';
 import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
@@ -33,8 +34,9 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge):Mainte
  verifyChallenge:c=>nativeChallenge(c,homedir()),
  signed:async(head,tree)=>{const c=await api(`commits/${head}`);return c.sha===head&&c.commit.tree.sha===tree&&c.commit.verification.verified===true&&c.commit.verification.reason==='valid';},
  merged:async number=>{const p=await api(`pulls/${number}`);if(p.base?.ref!=='main'||p.base?.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('merge reconciliation repository/base differs');if(!p.merged)return {state:p.state==='open'?'OPEN':'CLOSED',head:p.head.sha};const c=await api(`git/commits/${p.merge_commit_sha}`);return {state:'MERGED',head:p.head.sha,revision:p.merge_commit_sha,tree:c.tree.sha};},
- merge:async(number,head)=>{const child=Bun.spawn(['gh','api','--include','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash'],{stdin:'ignore',stdout:'pipe',stderr:'pipe'});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill('SIGTERM');},30000);
+ merge:async(number,head)=>{const child=Bun.spawn(['gh','api','--include','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash'],{env:{...process.env,GH_DEBUG:'api'},stdin:'ignore',stdout:'pipe',stderr:'pipe'});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill('SIGTERM');},30000);
   let raw:string,stderr:string,code:number;try{[raw,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);}finally{clearTimeout(timer);}
+  recordGithubHttp(stderr,raw);
   const framed=raw.match(/^HTTP\/[^\s]+\s+(\d{3})[^\r\n]*\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/);const status=framed?Number(framed[1]):undefined;
   if(!timedOut&&status!==undefined&&[405,409,422].includes(status)){let body:unknown;try{body=JSON.parse(framed![2]);}catch{}if(body&&typeof body==='object'&&typeof (body as {message?:unknown}).message==='string')throw new FactoryMergeRejected(status,(body as {message:string}).message.slice(0,500));}
   if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':stderr.slice(0,300)})`);

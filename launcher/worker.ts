@@ -1,4 +1,3 @@
-import {unavailable} from '../adapters/github-budget';
 import {reviewPublished} from './queue';
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { planDeliveryRetention } from "./delivery-retention";
@@ -113,7 +112,7 @@ export function recordWorkerFailure(e:Engine,id:string,error:unknown) {
   const s=e.s;
   // A failed publication/readback is not a failed native run. Retain the
   // finished tree and claim for exact-source publication recovery.
-  if(!(unavailable(error) && e.sessions().find(x=>x.id===id)?.status==='finished'))e.finish(id, false);
+  if(e.sessions().find(x=>x.id===id)?.status!=='finished')e.finish(id, false);
   else s.set(`publisher-pending:${id}`,{at:Date.now(),error:String(error)});
   s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
 }

@@ -54,15 +54,21 @@ export async function githubPages(repo:string,kind:'issues'|'pullRequests',execu
  }
 }
 
+const restIssueSchema=z.object({number:z.number().int().positive(),title:z.string(),body:z.string().nullable(),html_url:z.string(),updated_at:z.string(),closed_at:z.string().nullable(),state:z.enum(['open','closed']),labels:z.array(z.object({name:z.string()})),pull_request:z.unknown().optional()});
+export function restIssue(repo:string,raw:unknown) {
+ const i=restIssueSchema.parse(raw);
+ if(i.pull_request || i.html_url!==`https://github.com/${repo}/issues/${i.number}`)throw Error('GitHub REST issue identity mismatch');
+ return {number:i.number,title:i.title,body:i.body??'',url:i.html_url,updatedAt:i.updated_at,closedAt:i.closed_at,state:i.state.toUpperCase(),labels:i.labels};
+}
 // Scheduling needs open issues, not thousands of closed bodies/label connections.
 // gh follows REST Link headers; a late-page failure rejects the entire command.
 export async function openIssuePages(repo:string,execute=command) {
  if(!/^[\w.-]+\/[\w.-]+$/.test(repo))throw Error('invalid repository');
- const pages=z.array(z.array(z.object({number:z.number().int().positive(),title:z.string(),body:z.string().nullable(),html_url:z.string(),updated_at:z.string(),closed_at:z.string().nullable(),state:z.enum(['open','closed']),labels:z.array(z.object({name:z.string()})),pull_request:z.unknown().optional()}))).parse(JSON.parse(await execute(['gh','api','--paginate','--slurp',`repos/${repo}/issues?state=open&per_page=100`],undefined,120000)));
+ const pages=z.array(z.array(restIssueSchema)).parse(JSON.parse(await execute(['gh','api','--paginate','--slurp',`repos/${repo}/issues?state=open&per_page=100`],undefined,120000)));
  if(!pages.length || pages.some((p,n)=>p.length>100 || n<pages.length-1&&p.length!==100))throw Error('GitHub REST pagination malformed');
  const seen=new Set<number>();
  return pages.flatMap(page=>page.filter(i=>!i.pull_request).map(i=>{
-  if(seen.has(i.number)||i.html_url!==`https://github.com/${repo}/issues/${i.number}`||i.state!=='open')throw Error('GitHub REST issue identity mismatch');seen.add(i.number);
-  return {number:i.number,title:i.title,body:i.body??'',url:i.html_url,updatedAt:i.updated_at,closedAt:i.closed_at,state:'OPEN',labels:i.labels};
+  if(seen.has(i.number)||i.state!=='open')throw Error('GitHub REST issue identity mismatch');seen.add(i.number);
+  return restIssue(repo,i);
  }));
 }

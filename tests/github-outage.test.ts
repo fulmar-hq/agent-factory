@@ -1,10 +1,10 @@
 import {test,expect,spyOn} from 'bun:test';
-import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
 import {TestEngine as Engine,config,ticket,admission} from './fixtures';
-import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts} from '../adapters/github-budget';
+import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext} from '../adapters/github-budget';
 import {githubHealth} from '../launcher/github-health';
 import {recordWorkerFailure} from '../launcher/worker';
 import {recoverWorkers} from '../launcher/wake';
@@ -62,4 +62,17 @@ test('shared cooldown survives new stores and debug accounting retains only requ
   expect(githubHttpCounts('> GET /example HTTP/1.1\n> POST /graphql HTTP/2\nAuthorization: secret',JSON.stringify({data:{rateLimit:{cost:7}}}))).toEqual({requests:2,graphqlPoints:7});
   expect(githubHttpCounts('',JSON.stringify({data:{rateLimit:{cost:7}}}))).toEqual({requests:0,graphqlPoints:0});
  }finally{rmSync(dir,{recursive:true});}
+});
+
+test('the actual gh connectivity diagnostic is classified before debug sanitizing and backs off across calls',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-gh-offline-')),bin=join(dir,'bin'),calls=join(dir,'calls'),old=process.env.PATH;
+ mkdirSync(bin);writeFileSync(join(bin,'gh'),`#!/bin/sh\necho call >> '${calls}'\necho 'error connecting to api.github.com' >&2\necho 'check your internet connection or https://www.githubstatus.com' >&2\nexit 1\n`,{mode:0o700});process.env.PATH=bin;
+ try{
+  await githubContext.run(dir,async()=>{
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toBeInstanceOf(GitHubUnavailable);
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toThrow('GitHub backoff');
+  });
+  expect(readFileSync(calls,'utf8').trim().split('\n')).toHaveLength(1);
+  const s=new Store(join(dir,'controller.sqlite'));try{expect(s.get<any>('github-backoff').retryAt).toBeGreaterThan(Date.now());}finally{s.close();}
+ }finally{process.env.PATH=old;rmSync(dir,{recursive:true});}
 });
