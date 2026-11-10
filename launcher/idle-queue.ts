@@ -43,23 +43,32 @@ export function watchIdleQueue(dir:string,mail:string,now=Date.now()) {
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});
  const state=new Database(join(dir,'health','idle-queue.sqlite'),{create:true,strict:true});
  try{
-  state.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS observations(at INTEGER PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS incidents(id TEXT PRIMARY KEY,opened INTEGER NOT NULL,queued INTEGER,wake TEXT);');
+  state.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS observations(at INTEGER PRIMARY KEY,json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS incidents(id TEXT PRIMARY KEY,opened INTEGER NOT NULL,queued INTEGER,wake TEXT,evidence TEXT);');
+  if(!(state.query('PRAGMA table_info(incidents)').all() as {name:string}[]).some(x=>x.name==='evidence'))state.exec('ALTER TABLE incidents ADD COLUMN evidence TEXT');
   state.query('INSERT OR IGNORE INTO observations VALUES(?,?)').run(now,JSON.stringify(observation));
-  if(!observation.eligible||now-observation.lastActivity<=20*60000)return {...observation,alert:null};
-  const id=`factory-idle-queue:${observation.lastActivity}`;
-  state.query('INSERT OR IGNORE INTO incidents(id,opened) VALUES(?,?)').run(id,now);
+  const current=observation.eligible&&now-observation.lastActivity>20*60000?`factory-idle-queue:${observation.lastActivity}`:null;
+  if(current)state.query('INSERT OR IGNORE INTO incidents(id,opened,evidence) VALUES(?,?,?)').run(current,now,JSON.stringify({source:'watcher',observation}));
+  const pending=state.query('SELECT id,evidence FROM incidents WHERE wake IS NULL ORDER BY opened LIMIT 100').all() as {id:string;evidence:string|null}[];
+  if(!pending.length){const prior=current?state.query('SELECT wake FROM incidents WHERE id=?').get(current) as {wake:string|null}|null:null;return {...observation,alert:current,wake:prior?.wake??null};}
   if(!existsSync(mail))throw Error('existing Alido Mail bridge unavailable');
   const bridge=new Database(mail,{readwrite:true,strict:true});
   try{
    bridge.exec('PRAGMA busy_timeout=1000');
-   const summary='Factory queue is empty and builders have been idle over 20 minutes while usage permits high-benefit work.';
-   const body='Restore useful product-only supply and verify actual builder claims. Inspect the intake result and named blockers; an empty queue is not a healthy outcome.';
+   const summary='Factory had an empty queue and idle builders for over 20 minutes while usage allowed high-benefit work.';
+   const body='Restore useful product-only supply and verify actual builder claims. If work has resumed, confirm the product-only top-up remains loaded. Retained incident evidence is in health/idle-queue.sqlite.';
    const hash=createHash('sha256').update(summary+'\n'+body).digest('hex');
+   let alert:string|null=current,wake:string|null=null;
+   for(const incident of pending){
+   if(!incident.evidence)throw Error('retained idle incident needs original evidence; do not manufacture an observation');
+   JSON.parse(incident.evidence);
+   const id=incident.id;
    bridge.query(`INSERT OR IGNORE INTO messages(id,send_id,created_at,sender,sender_app,sender_ref,recipient,recipient_app,kind,reply,summary,body,thread_id,depth,hash,state,wake_state) VALUES(?,?,?,'Factory Desk','codex','factory-idle-queue','Coordinator','claude','action','none',?,?,?,0,?,'unread','pending')`).run(id,id,now,summary,body,id,hash);
    const row=bridge.query('SELECT kind,hash,wake_state,wake_id FROM messages WHERE id=?').get(id) as {kind:string;hash:string;wake_state:string;wake_id:string|null}|null;
    if(row?.kind!=='action'||row.hash!==hash)throw Error('idle alert identity conflicts; retain for reconciliation');
    state.query('UPDATE incidents SET queued=COALESCE(queued,?),wake=? WHERE id=?').run(now,row.wake_state==='woken'?row.wake_id:null,id);
-   return {...observation,alert:id,wake:row.wake_state==='woken'?row.wake_id:null};
+   alert=id;wake=row.wake_state==='woken'?row.wake_id:null;
+   }
+   return {...observation,alert,wake};
   }finally{bridge.close();}
  }finally{state.close();}
 }

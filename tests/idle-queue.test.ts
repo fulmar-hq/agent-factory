@@ -31,6 +31,13 @@ test('source errors and incomplete or stale inventories cannot prove an empty qu
   f.s.set(`github:${p.repo}`,state);expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);
  }
 }finally{f.s.close();f.db.close();}});
+test('an incident retained before bridge failure still wakes after builders resume',()=>{const f=fixture();try{
+ expect(()=>watchIdleQueue(f.dir,join(f.dir,'missing-mail.sqlite'),f.now)).toThrow('bridge unavailable');
+ f.s.set('heartbeat',{at:f.now+1,status:'ok',ready:3});
+ const r=watchIdleQueue(f.dir,f.mail,f.now+1);expect(r.eligible).toBe(false);expect(r.alert).toBeTruthy();
+ expect(f.db.query('SELECT kind,recipient FROM messages').all()).toEqual([{kind:'action',recipient:'Coordinator'}]);
+ expect(watchIdleQueue(f.dir,f.mail,f.now+2).alert).toBe(r.alert);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);
+}finally{f.s.close();f.db.close();}});
 test('finished custody still requires positive cleanup and a cleared PID',()=>{const f=fixture();try{
  f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('finished','example/demo#1','product','codex','finished','{}');
  f.s.set('cleanup-evidence:finished',{verified:false});expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);
