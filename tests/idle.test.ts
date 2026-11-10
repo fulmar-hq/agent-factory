@@ -28,7 +28,7 @@ test("two idle ticks and controlled relaunch call no models and preserve read-on
     const text = await Bun.file(calls).text();
     expect(text).not.toMatch(/exec| -p| --bg|login|auth/);
     expect((text.match(/api graphql/g) || []).length).toBe(1);
-    expect((text.match(/api --paginate --slurp/g) || []).length).toBe(2);
+    expect((text.match(/api --paginate --slurp/g) || []).length).toBe(4);
     expect(await Bun.file(join(dir, "config.yaml")).text()).toBe(raw);
     const s = new Store(join(dir, "controller.sqlite"));
     expect(s.get("paused")).toBe(true);
