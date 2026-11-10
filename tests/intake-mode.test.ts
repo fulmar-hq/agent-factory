@@ -3,7 +3,7 @@ import {mkdtempSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ConfigSchema} from '../launcher/config';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {Store} from '../tracking/store';
 import {applyOwnerResults,autoApprove,supply} from '../launcher/autonomy';
 import {enforceIntakeMode,intakeInstructions} from '../launcher/intake-policy';

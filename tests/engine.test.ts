@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { available } from "../wallet/ledger";
 import {
   config,

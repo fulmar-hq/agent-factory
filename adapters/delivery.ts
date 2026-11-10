@@ -59,6 +59,31 @@ export function verifyDependencyObjects(target:string, io = {lstatSync,readdirSy
   visit(target);
 }
 
+// Setup is launcher-only. On APFS, replace the temporary reference clone's
+// object directory with independent copy-on-write files BEFORE any model or
+// test process gets custody. No alternates, hardlinks or copied source config.
+export async function cloneStandalone(source:string,target:string,execute=command,platform:NodeJS.Platform=process.platform) {
+  if(platform!=="darwin") {
+    await execute(["git","-c","core.hooksPath=/dev/null","clone","--no-hardlinks","--no-checkout",source,target]);return;
+  }
+  const objects=(await execute(["git","-C",source,"rev-parse","--path-format=absolute","--git-path","objects"])).trim();
+  if(!isAbsolute(objects) || realpathSync(objects)!==objects || existsSync(join(objects,"info/alternates")))throw Error("standalone source objects required");
+  const verify=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
+    const p=join(dir,entry.name),s=lstatSync(p);
+    if(s.isSymbolicLink() || (!s.isFile() && !s.isDirectory()))throw Error("nonlocal Git objects refused");
+    if(s.isDirectory())verify(p);
+  }};verify(objects);
+  await execute(["git","-c","core.hooksPath=/dev/null","clone","--shared","--no-checkout",source,target]);
+  const metadata=join(realpathSync(target),".git"),copied=join(metadata,"objects-independent");
+  await copyDependencies(objects,copied,undefined,execute,platform);
+  verify(copied);
+  // Retain the small setup receipt; Git only reads the new independent objects.
+  renameSync(join(metadata,"objects"),join(metadata,"reference-setup"));
+  renameSync(copied,join(metadata,"objects"));
+  if(existsSync(join(metadata,"objects/info/alternates")))throw Error("shared Git objects refused");
+  await execute(["git","-C",target,"cat-file","-e","HEAD^{commit}"]);
+}
+
 export const deliveryRepo = "fulmar-hq/alido";
 export const isDeliveryRepo = (repo:string) => [deliveryRepo,"fulmar-hq/agent-factory"].includes(repo);
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
@@ -133,7 +158,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     const branch=(await git("branch","--show-current")).trim();
     if (branch !== branchFor(id)) throw Error("worker branch mismatch");
     const clone=join(archive,"local-clone");
-    await command(["git","clone","--no-hardlinks","--no-checkout",source,clone]);
+    await cloneStandalone(source,clone);
     await command(["git","-C",clone,"checkout","-b",branch,head]);
     renameSync(join(workspace,".git"),join(archive,"original-gitfile"));
     renameSync(join(clone,".git"),join(workspace,".git"));
@@ -202,7 +227,7 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   const snapshot=join(dir,`incoming-${crypto.randomUUID()}.bundle`);
   snapshotBundle(join(workspace,".factory-delivery.bundle"),snapshot);
   const checkout=join(dir,`publish-${crypto.randomUUID()}`);
-  await execute(["git","-c","core.hooksPath=/dev/null","clone","--no-hardlinks","--no-checkout",trustedSource,checkout]);
+  await cloneStandalone(trustedSource,checkout,execute);
   const git=(...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","user.name=Vincent Messina","-c","user.email=72951696+vincentmessina@users.noreply.github.com","-c","core.attributesFile=/dev/null","-C",checkout,...args]);
   await git("config","core.hooksPath","/dev/null");
   await git("fetch","--no-tags",snapshot,"HEAD");
