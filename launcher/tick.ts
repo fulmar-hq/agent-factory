@@ -28,6 +28,7 @@ import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
 import { qualificationFor } from "./usage-push-policy";
 export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifications?: unknown }, spawn: (id: string) => void, execute = command, clock = Date.now) {
+  if(!e.slots().free)throw Error('slots full');
   if(isDeliveryRepo(t.repo))executableTest(t.test);
   const prior = e.retryPrior(t);
   const retryNoPr: string[] = [];
@@ -145,6 +146,7 @@ async function tickOnce(dir:string) {
     const refusals: { ticket: string; reason: string }[] = [];
     let claimed = 0;
     for (const t of ready) {
+      if(!e.slots().free)break;
       try {
         if (!installations[t.repo])
           throw Error("repository workspace not configured");

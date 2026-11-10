@@ -3,7 +3,7 @@ import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {TestEngine as Engine,config,ticket,admission} from './fixtures';
+import {TestEngine as Engine,config,ticket,admission,githubPage} from './fixtures';
 import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext,githubDiagnostic} from '../adapters/github-budget';
 import {githubHealth} from '../launcher/github-health';
 import {recordWorkerFailure} from '../launcher/worker';
@@ -81,4 +81,20 @@ test('merge diagnostics retain the actual failure without raw headers or body',(
  const raw='* Request at fictional time\n> Authorization: token fictional-secret\n> PUT /repos/example/demo/pulls/1 HTTP/1.1\n{"fictionalBody":"private"}\ngh: HTTP 503 service unavailable';
  expect(githubDiagnostic(raw)).toBe('gh: HTTP 503 service unavailable');
  expect(githubDiagnostic('error connecting to api.github.com\ncheck your internet connection')).toContain('error connecting');
+});
+
+test('a full tick with occupied capacity does not reread every queued issue or call a model',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-full-capacity-')),c=config(),now=Date.now();writeFileSync(join(dir,'config.yaml'),JSON.stringify(c));
+ const s=new Store(join(dir,'controller.sqlite')),e=new Engine(s,c);e.pause(false,'owner');
+ const a={...admission(),now,meter:{...admission().meter,observedAt:now,windows:admission().meter.windows.map(w=>({...w,resetsAt:now+3600000}))},qualification:{...admission().qualification,expiresAt:now+3600000}};
+ e.admit(ticket(1),a);e.admit(ticket(2),a);
+ const t=ticket(3),i={number:3,title:t.title,body:'```factory\n'+JSON.stringify(t)+'\n```',url:'https://github.com/example/demo/issues/3',state:'OPEN',updatedAt:'2026-11-10',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:ready'}]};i.labels.push({name:github.intakeLabel('example/demo',i)});
+ let validationReads=0;const command=spyOn(github,'command').mockImplementation(async args=>{
+  if(args[1]==='--version')return 'fictional-version';if(args[0]==='sysctl')return '1';
+  if(args.includes('--paginate'))return JSON.stringify([[{...i,state:'open',html_url:i.url,updated_at:i.updatedAt,closed_at:null}]]);
+  if(args.includes('graphql'))return githubPage('pullRequests',[]);
+  validationReads++;throw Error('full capacity must not run per-ticket GitHub/native commands');
+ });
+ try{expect(await tick(dir)).toMatchObject({status:'ok',ready:1,claimed:0});expect(validationReads).toBe(0);expect(e.sessions()).toHaveLength(2);}
+ finally{command.mockRestore();s.close();rmSync(dir,{recursive:true});}
 });
