@@ -59,7 +59,7 @@ const supervisorSchema = z.object({
   stopAt: time.nullable(),
   timeBudget: z.object({ estimateSeconds: z.literal(25), pauseSeconds: z.literal(50) }).strict().nullable(),
   tokenBudget: z.object({ estimateTokens: z.literal(100), pauseTokens: z.literal(200) }).strict().nullable(),
-  samples: z.array(z.object({ at: time, alive: z.literal(true), usage }).strict()).min(1),
+  samples: z.array(z.object({ at: time, alive: z.literal(true), usage, prefixBytes:integer.positive().optional(),prefixSha256:hash.optional() }).strict().refine(s=>(s.prefixBytes===undefined)===(s.prefixSha256===undefined),'paired observed prefix witness required')).min(1),
   // Full trusted ps captures, not a caller's `cleanup: true` assertion.
   before: snapshot, afterTerm: snapshot.nullable(), final: snapshot,
   signals: z.array(z.object({ pid: time, identity: text, at: time, signal: z.enum(["SIGTERM", "SIGKILL"]), result:z.literal("sent") }).strict()),
@@ -155,7 +155,14 @@ export function probeInvocation(command: string, workspace: string, probe: strin
 }
 export function qualificationCodeCommand(command:string){return `text(await tools.exec_command(${JSON.stringify({cmd:command})}));`;}
 function compactCode(source:string){let quoted=false,escaped=false,out='';for(const c of source){if(quoted){out+=c;if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;}else if(c==='"'){quoted=true;out+=c;}else if(!/\s/.test(c))out+=c;}return out.replace(/;$/,'');}
-function codeCall(source:string){const m=compactCode(source).match(/^text\(awaittools\.(exec_command|write_stdin)\((\{.*\})\)\)$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:JSON.parse(m[2]!)};}
+function literalArguments(source:string){
+ let out='',quoted=false,escaped=false;
+ for(let i=0;i<source.length;i++){const c=source[i]!;out+=c;if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue;}if(c==='"'){quoted=true;continue;}
+  if(c==='{'||c===','){const key=source.slice(i+1).match(/^(cmd|workdir|session_id|chars|yield_time_ms|max_output_tokens)(?=:)/);if(key){out+=JSON.stringify(key[1]);i+=key[1]!.length;}}
+ }return JSON.parse(out);
+}
+const codeSyntax=new Bun.Transpiler({loader:'js'});
+function codeCall(source:string){const normalized=codeSyntax.transformSync(source);const m=normalized.match(/^text\(\s*await\s+tools\.(exec_command|write_stdin)\(\s*(\{[\s\S]*\})\s*\)\s*\)\s*;?\s*$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:literalArguments(compactCode(m[2]!))};}
 function codeOutput(raw:unknown){const blocks=z.array(z.object({type:z.literal('input_text'),text:z.string()}).strict()).length(2).parse(raw);requireThat(/^Script completed\nWall time [0-9.]+ seconds?\nOutput:\n$/.test(blocks[0]!.text),'incomplete or failed code tool');const result=z.object({output:z.string(),exit_code:integer.nullable().optional(),session_id:integer.optional()}).passthrough().parse(JSON.parse(blocks[1]!.text));requireThat(!nativeFailure(result)&&(result.exit_code===0||result.session_id!==undefined),'code command failed or unknown');return result;}
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
@@ -216,7 +223,7 @@ raise SystemExit(0 if passed else 1)
 
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
-  const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
+  const rolloutBytes=load(r.rollout),stream = lines(load(r.stream), true), rollout = lines(rolloutBytes);
   const s = supervisorSchema.parse(json(load(r.supervisor)));
   requireThat(!stream.some(nativeFailure)&&!rollout.some(nativeFailure), "explicit native failure receipt");
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
@@ -291,10 +298,17 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
   const total = counters.at(-1)!.usage;
   requireThat(total.total_tokens > 0, "positive native accounting required");
-  let sampleAt = r.startedAt;
+  let sampleAt = r.startedAt,observedBytes=0;
   for (const sample of s.samples) {
     requireThat(sample.at >= sampleAt && sample.at < (s.stopAt ?? r.endedAt), "invalid live sample interval"); sampleAt = sample.at;
-    const counter = counters.findLast(c => c.at <= sample.at);
+    let counter=counters.findLast(c=>c.at<=sample.at);
+    if(sample.prefixBytes!==undefined){
+      requireThat(sample.prefixBytes>=observedBytes&&sample.prefixBytes<=rolloutBytes.length,'observed native prefix regressed or exceeded receipt');observedBytes=sample.prefixBytes;
+      const prefix=rolloutBytes.subarray(0,sample.prefixBytes);requireThat(prefix.at(-1)===10&&sha256(prefix)===sample.prefixSha256,'observed native prefix hash/line boundary differs');
+      const visible=lines(prefix).filter(row=>row.type==='event_msg'&&row.payload?.type==='token_count'&&row.payload.info!==null&&row.payload.info!==undefined).at(-1);
+      counter=visible?{at:at(visible,r),usage:tokenUsage(visible.payload!.info!.total_token_usage)}:undefined;
+      requireThat(counter&&counter.at<=sample.at,'observed prefix has no available accounting');
+    }
     requireThat(counter && sameUsage(counter.usage, tokenUsage(sample.usage)), "live accounting differs from native receipt");
   }
   requireThat(s.samples.some(x => x.usage.total_tokens > 0 && x.at <= s.before.at && s.before.at - x.at <= STOP_POLL_GRACE_MS), "no correlated positive accounting while alive");
@@ -342,14 +356,18 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(executed.length === 1 && executed[0].item?.exit_code === 0 && probeInvocation(executed[0].item.command ?? "", r.workspace, m.probe.path), "native command exit unverified");
     securityOutput(text.parse(executed[0].item?.aggregated_output));
   } else {
-    requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode > 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
+    requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode >= 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
     requireThat(s.stopAt! >= s.before.at && s.stopAt! < r.endedAt && s.signals.length > 0, "stop timing unverified");
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= s.final.at && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
     if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");
     requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
-    if(s.signal === null)requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt), "nonzero native exit has no controlled abort evidence");
+    for(const snapshot of [s.before,s.afterTerm,s.final])if(snapshot&&snapshot.at>=r.endedAt)requireThat(!snapshot.rows.some(row=>owner(row)&&alive(row)),'live root contradicts reported exit');
+    if(s.signal===null){
+      if(s.exitCode===0)requireThat(r.endedAt-firstTerm.at<=STOP_POLL_GRACE_MS,'graceful native exit was not prompt after actual TERM');
+      else requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt),'nonzero native exit has no controlled abort evidence');
+    }
     requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
     requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS && s.final.at - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {

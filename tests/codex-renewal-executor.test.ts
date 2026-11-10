@@ -20,3 +20,8 @@ test('owned detached startup configuration failure releases known pre-native cus
 for(const kind of ['time','tokens'] as const)test(`${kind} brief contains the actual executable lifecycle command and wrapper`,()=>{
  const python='/Library/Developer/CommandLineTools/usr/bin/python3',brief=codexRenewalBrief(kind,python,`${python} /fictional/probe.py`);expect(brief).toContain(`Run ${python} lifecycle.py once`);expect(brief).toContain(`text(await tools.exec_command({"cmd":"${python} lifecycle.py"}));`);expect(brief).not.toContain('${');
 });
+
+test('live reader seals complete bytes actually visible, not a later emitter timestamp',async()=>{
+ const {readLiveUsage}=await import('../adapters/codex-renewal'),{createHash}=await import('node:crypto'),dir=mkdtempSync(join(tmpdir(),'live-prefix-')),path=join(dir,'native.jsonl'),first=JSON.stringify({timestamp:new Date(100).toISOString(),type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:2,output_tokens:1,cached_input_tokens:0,total_tokens:3}}}})+'\n';writeFileSync(path,first+'{"incomplete":');const captured=readLiveUsage(path,()=>200)!;expect(captured.usage.total_tokens).toBe(3);expect(captured.prefixBytes).toBe(Buffer.byteLength(first));expect(captured.prefixSha256).toBe(createHash('sha256').update(first).digest('hex'));
+ const second=JSON.stringify({timestamp:new Date(150).toISOString(),type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:4,output_tokens:1,cached_input_tokens:0,total_tokens:5}}}})+'\n';writeFileSync(path,first+second);expect(readLiveUsage(path,()=>201)?.usage.total_tokens).toBe(5);expect(captured.usage.total_tokens).toBe(3);
+});

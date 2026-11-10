@@ -128,7 +128,7 @@ const rejectionCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["unbound signal identity", f => f.mutate(f.m.runs[1].supervisor, x => { x.signals[0].identity = "other"; })],
   ["task_completed before token stop", f => f.mutate(f.m.runs[2].rollout, x => { x.push({ ...x.at(-1), payload: { type: "task_completed" } }); }, true)],
   ["stop after natural completion", f => f.mutate(f.m.runs[2].rollout, x => { x.push({ ...x.at(-1), payload: { type: "task_complete" } }); }, true)],
-  ["successful token completion", f => f.mutate(f.m.runs[2].supervisor, x => { x.exitCode = 0; x.signal = null; })],
+  ["successful token completion", f => {const r=f.m.runs[2];f.mutate(r.supervisor,x=>{x.exitCode=0;x.signal=null;});f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1900).toISOString(),type:"event_msg",payload:{type:"task_complete"}});},true);}],
   ["unknown token exit", f => f.mutate(f.m.runs[2].supervisor, x => { x.exitCode = null; x.signal = null; })],
   ["mocked SIGABRT is not a stop receipt", f => f.mutate(f.m.runs[2].supervisor, x => { x.signal = "SIGABRT"; })],
   ["expired proof", f => { f.m.expiresAt = now; }],
@@ -322,3 +322,31 @@ test('unrelated kernel rows with zero process/group IDs do not invalidate comple
 test('known-address probe binds real network policy denials without treating a resolver error as permission denial',()=>{
  const f=fixture(),network={githubIPv4:'192.0.2.1',exampleIPv4:'192.0.2.2',dnsIPv4:'1.1.1.1' as const,observedAt:startedAt};f.m.network=network;const b=bytes(securityProbe(f.m.targets,network));f.files.set(f.m.probe.path,b);f.m.probe.sha256=digest(b);for(const r of f.m.runs){f.mutate(r.supervisor,s=>{s.probeBeforeSha256=f.m.probe.sha256;s.probeAfterSha256=f.m.probe.sha256;});if(r.commandProbe)f.mutate(r.commandProbe,c=>{c.probeSha256=f.m.probe.sha256;c.probeAfterSha256=f.m.probe.sha256;});}expect(f.collect().status).toBe('verified');f.m.network.githubIPv4='192.0.2.3';expect(f.collect().status).toBe('refused');
 });
+
+
+function gracefulFixture(){
+ const f=fixture();for(const r of f.m.runs.filter(r=>r.kind!=='security')){const s=JSON.parse(Buffer.from(f.read(r.supervisor.path)).toString()),end=s.stopAt+20;r.endedAt=end;f.mutate(r.supervisor,x=>{x.endedAt=end;x.exitCode=0;x.signal=null;});
+  if(r.kind==='time')f.mutate(r.rollout,rows=>{const counter=rows.findIndex((x:any)=>x.payload?.type==='token_count'),at=r.startedAt+60;rows.splice(counter,0,{timestamp:new Date(at).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'wait',input:`text(await tools.write_stdin({session_id:${r===f.m.runs[1]?2:5},chars:"",yield_time_ms:1000}));`}},{timestamp:new Date(at+1).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'wait',output:[{type:'input_text',text:'Script completed\nWall time 0.1 seconds\nOutput:\n'},{type:'input_text',text:JSON.stringify({session_id:r===f.m.runs[1]?2:5,output:''})}]}});},true);
+ }return f;}
+test('literal lifecycle wait keys and prompt graceful zero exits retain positive OS stop proof',()=>{
+ const f=gracefulFixture();expect(f.collect().status).toBe('verified');const r=f.m.runs[2];f.mutate(r.supervisor,s=>{s.signals=[];});expect(f.collect().status).toBe('refused');
+});
+test('a zero exit without prompt verified root termination remains refused',()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.supervisor,s=>{s.exitCode=0;s.signal=null;});expect(f.collect().status).toBe('refused');});
+
+
+test('a live bound root after its claimed graceful exit cannot qualify',()=>{
+ const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+50020;f.mutate(r.supervisor,s=>{s.endedAt=r.endedAt;s.exitCode=0;s.signal=null;s.afterTerm.rows.push({...s.before.rows.find((row:any)=>row.pid===s.pid)});});expect(f.collect().status).toBe('refused');
+});
+
+
+for(const bad of ['split key','split number','missing await token'] as const)test('native code grammar rejects '+bad,()=>{const f=gracefulFixture(),r=f.m.runs[1];f.mutate(r.rollout,rows=>{const p=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload;if(bad==='split key')p.input=p.input.replace('session_id:','session_ id:');if(bad==='split number')p.input=p.input.replace('yield_time_ms:1000','yield_time_ms:1 000');if(bad==='missing await token')p.input=p.input.replace('await tools.','awaittools.');},true);expect(f.collect().status).toBe('refused');});
+
+function delayedCounterFixture(){
+ const f=fixture(),r=f.m.runs[0],rows=Buffer.from(f.read(r.rollout.path)).toString().trim().split('\n').map(line=>JSON.parse(line)),index=rows.findIndex(x=>x.payload?.type==='token_count'),prefix=bytes(jsonl(rows.slice(0,index+1))),u=rows[index].payload.info.total_token_usage;
+ f.mutate(r.supervisor,s=>{for(const sample of s.samples){sample.prefixBytes=prefix.length;sample.prefixSha256=digest(prefix);}});
+ f.mutate(r.rollout,x=>{x.splice(index+1,0,{timestamp:new Date(r.startedAt+400).toISOString(),type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{...u,input_tokens:u.input_tokens+5,total_tokens:u.total_tokens+5}}}});},true);
+ const stream=Buffer.from(f.read(r.stream.path)).toString().split('\n').filter(Boolean).map(line=>{if(!line.startsWith('{'))return line;const x=JSON.parse(line);if(x.type==='turn.completed'){x.usage.input_tokens+=5;x.usage.total_tokens+=5;}return JSON.stringify(x);}).join('\n')+'\n',raw=bytes(stream);f.files.set(r.stream.path,raw);r.stream.sha256=digest(raw);
+ return {f,r};
+}
+test('live usage binds the actual observed prefix before a delayed earlier-timestamp counter was flushed',()=>{const {f,r}=delayedCounterFixture();expect(f.collect().status).toBe('verified');f.mutate(r.supervisor,s=>{for(const x of s.samples){delete x.prefixBytes;delete x.prefixSha256;}});expect(f.collect().status).toBe('refused');});
+for(const bad of ['hash','length','partial line','different latest counter','unpaired witness'] as const)test('observed accounting prefix refuses '+bad,()=>{const {f,r}=delayedCounterFixture();f.mutate(r.supervisor,s=>{const x=s.samples[0];if(bad==='hash')x.prefixSha256='0'.repeat(64);if(bad==='length')x.prefixBytes=99999999;if(bad==='partial line')x.prefixBytes--;if(bad==='different latest counter'){const raw=f.read(r.rollout.path);x.prefixBytes=raw.length;x.prefixSha256=digest(raw);}if(bad==='unpaired witness')delete x.prefixSha256;});expect(f.collect().status).toBe('refused');});
