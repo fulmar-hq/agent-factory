@@ -77,7 +77,7 @@ async function probe(deps = {}) {
         check('sessionExpired',result.rows.length === 1 && result.rows[0].expired === true);
       } catch { check('sessionExpired',false); }
     }
-    if (client) { try { await client.end(); } catch { check('databaseClosed',false); } }
+    if (client) { try { await client.end(); check('databaseClosed',true); } catch { check('databaseClosed',false); } }
   }
   return report;
 }

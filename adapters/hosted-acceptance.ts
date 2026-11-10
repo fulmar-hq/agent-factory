@@ -19,7 +19,7 @@ export function hostCommand(context:HostedContext,script=readFileSync(join(impor
  return `python3 -c "import base64;exec(base64.b64decode('${Buffer.from(program).toString('base64')}'))"`;
 }
 export function validHostedResult(raw:any) {
- const expected=['qaSafety','qaDatabase','runtimeRole','syntheticUser','syntheticMembership','ownFixture','otherFixture','health','unsignedDenied','workspace','preferences','tenantDenied','screen:inbox','screen:follow-ups','screen:leads','screen:bookings','screen:learning','screen:settings','sessionExpired'];
+ const expected=['qaSafety','qaDatabase','runtimeRole','syntheticUser','syntheticMembership','ownFixture','otherFixture','health','unsignedDenied','workspace','preferences','tenantDenied','screen:inbox','screen:follow-ups','screen:leads','screen:bookings','screen:learning','screen:settings','sessionExpired','databaseClosed'];
  const hostChecks=['alido-qa-web:source','alido-qa-web:running','alido-qa-web:artifact','alido-qa-web:rollback','alido-qa-worker:source','alido-qa-worker:running','alido-qa-worker:artifact','alido-qa-worker:rollback','webHealthy'];
  return !!raw && hostChecks.every(k=>raw.checks?.[k]===true) && raw.probe?.version===1 && raw.probe?.method==='synthetic-http' && !raw.probe.failure && expected.every(k=>raw.probe.checks?.[k]===true);
 }
@@ -44,7 +44,7 @@ export async function collectHostedAcceptance(c:HostedContext,o:Options={}) {
   if(['Pending','InProgress','Delayed'].includes(invocation.Status))continue;
   let result;
   if(invocation.Status==='Success')try{result=JSON.parse(invocation.StandardOutputContent);}catch{}
-  return {version:1,method:'synthetic-http',browser:false,...c,startedAt,completedAt:now(),account:ACCOUNT,instance:INSTANCE,commandId:id,status:invocation.Status,publicHttps:{status:publicStatus,reachable:[200,302,303].includes(publicStatus),healthProven:publicStatus===200},passed:invocation.Status==='Success'&&[200,302,303].includes(publicStatus)&&validHostedResult(result),result:result??{failure:'ssm_probe_failed'}};
+  return {version:1,method:'synthetic-http',browser:false,...c,startedAt,completedAt:now(),account:ACCOUNT,instance:INSTANCE,commandId:id,status:invocation.Status,publicHttps:{status:publicStatus,reachable:[200,302,303].includes(publicStatus),bodyInspected:false},passed:invocation.Status==='Success'&&[200,302,303].includes(publicStatus)&&validHostedResult(result),result:result??{failure:'ssm_probe_failed'}};
  }
  throw Error(`SSM hosted probe unresolved: ${id}; retain custody, never redispatch automatically`);
 }
