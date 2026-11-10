@@ -25,7 +25,7 @@ async function git(args:string[],cwd:string){
 }
 // One immutable, credential-free, read-only native reviewer. This is trusted
 // launcher custody, not a worker's self-asserted review or a different GitHub login.
-export async function runFactoryChallenge(s:Store,p:FactoryPull,dir:string,checkout=resolve(import.meta.dir,'..')):Promise<Challenge|undefined>{
+export async function runFactoryChallenge(s:Store,p:FactoryPull,dir:string,checkout=resolve(import.meta.dir,'..'),onClaimed?:()=>void):Promise<Challenge|undefined>{
  if(!Number.isSafeInteger(p.number)||p.number<1||!/^[a-f0-9]{40}$/.test(p.head))throw Error('immutable factory PR identity required');
  const key=`factory-challenge:${p.number}:${p.head}`;
  if(s.get(key))return;
@@ -36,6 +36,7 @@ export async function runFactoryChallenge(s:Store,p:FactoryPull,dir:string,check
  const id=crypto.randomUUID(),run=join(dir,'runs','factory-challenges',`${p.number}-${p.head}-${id}`),work=join(run,'source'),scratch=join(work,'.factory-tmp');
  const claimed=s.atomic(()=>{const lease=s.get<{kind:string;state:string;pid:number;identity:string}>('launcher-maintenance-lease');if(lease?.kind!=='integration'||lease.state!=='active'||lease.pid!==process.pid||lease.identity!==processIdentity(process.pid))throw Error('integration maintenance custody required');if(s.get(key))return false;const old=s.get<{state:string}>('factory-challenge-slot');if(old&&old.state!=='released')throw Error('prior challenge custody unresolved');gate(true);if(!builderSlots(s,c).free)return false;s.set(key,{id,state:'starting',pr:p.number,head:p.head,run,at:Date.now()});s.set('factory-challenge-slot',{id,state:'starting',at:Date.now()});return true;});
  if(!claimed)return;
+ onClaimed?.();
  let child:ReturnType<typeof spawnWorker>|undefined,fd:number|undefined,timer:ReturnType<typeof setInterval>|undefined,native:NativeReceipt|undefined,nativeId:string|undefined,stopped=false,done=false;const startedAt=Date.now(),accounting=new WorkerAccounting();let failure:string|undefined;
  const onSignal=(signal:string)=>{stopped=true;failure=`maintenance interrupted by ${signal}`;const lease=s.get<{id:string}>('launcher-maintenance-lease');s.set('factory-maintenance-stop',{id:lease?.id,signal,at:Date.now()});if(child)void child.stop().catch(()=>{});};
  const onTerm=()=>onSignal('SIGTERM'),onInt=()=>onSignal('SIGINT');process.on('SIGTERM',onTerm);process.on('SIGINT',onInt);

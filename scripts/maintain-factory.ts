@@ -7,7 +7,7 @@ import {root} from '../launcher/config';
 import {processIdentity} from '../launcher/process';
 import {Store} from '../tracking/store';
 import {runFactoryChallenge} from '../adapters/factory-challenge';
-import {maintainFactory,nativeChallenge,factoryRepository,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
+import {maintainFactory,FactoryMergeRejected,nativeChallenge,factoryRepository,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
 const repo=resolve(import.meta.dir,'..');
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
 const git=(...args:string[])=>command(['git','-C',repo,...args]);
@@ -19,15 +19,20 @@ async function pull(number:number):Promise<FactoryPull>{
  const verify=checks.check_runs.filter((r:{name:string;app?:{id:number}})=>r.name==='Verify'&&r.app?.id===15368).sort((a:{id:number},b:{id:number})=>b.id-a.id)[0];
  return {number:p.number,head:p.head.sha,tree:commit.tree.sha,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
 }
-export function maintenancePort(s:Store):MaintenancePort{let newChallenge=false;return {
+export function maintenancePort(s:Store,runChallenge=runFactoryChallenge):MaintenancePort{let newChallenge=false;return {
  pulls:async()=>{const list=await api('pulls?state=open&sort=created&direction=asc&per_page=100');if(!Array.isArray(list)||list.length>=100)throw Error('factory PR inventory truncated');return list.filter(p=>p.base?.ref==='main'&&p.base?.repo?.full_name===factoryRepository&&p.head?.repo?.full_name===factoryRepository).map(p=>({number:p.number,head:p.head.sha,createdAt:p.created_at,draft:p.draft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
  pull,
  update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
- challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}if(!newChallenge){newChallenge=true;return runFactoryChallenge(s,p,root,repo);}},
+ challenge:async p=>{const rows=s.db.query("SELECT data FROM events WHERE kind='codex-challenge' ORDER BY at DESC").all() as {data:string}[];for(const row of rows){const c=JSON.parse(row.data);if(Number(c.pr)===p.number&&c.head===p.head){c.pr=Number(c.pr);return c as Challenge;}}if(!newChallenge&&!s.get(`factory-challenge:${p.number}:${p.head}`))return runChallenge(s,p,root,repo,()=>{newChallenge=true;});},
  verifyChallenge:c=>nativeChallenge(c,homedir()),
  signed:async(head,tree)=>{const c=await api(`commits/${head}`);return c.sha===head&&c.commit.tree.sha===tree&&c.commit.verification.verified===true&&c.commit.verification.reason==='valid';},
  merged:async number=>{const p=await api(`pulls/${number}`);if(p.base?.ref!=='main'||p.base?.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('merge reconciliation repository/base differs');if(!p.merged)return {state:p.state==='open'?'OPEN':'CLOSED',head:p.head.sha};const c=await api(`git/commits/${p.merge_commit_sha}`);return {state:'MERGED',head:p.head.sha,revision:p.merge_commit_sha,tree:c.tree.sha};},
- merge:async(number,head)=>{const merged=JSON.parse(await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash']));if(merged.merged!==true)throw Error('protected squash was not accepted');const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
+ merge:async(number,head)=>{const child=Bun.spawn(['gh','api','--include','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash'],{stdin:'ignore',stdout:'pipe',stderr:'pipe'});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill('SIGTERM');},30000);
+  let raw:string,stderr:string,code:number;try{[raw,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);}finally{clearTimeout(timer);}
+  const framed=raw.match(/^HTTP\/[^\s]+\s+(\d{3})[^\r\n]*\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/);const status=framed?Number(framed[1]):undefined;
+  if(!timedOut&&status!==undefined&&[405,409,422].includes(status)){let body:unknown;try{body=JSON.parse(framed![2]);}catch{}if(body&&typeof body==='object'&&typeof (body as {message?:unknown}).message==='string')throw new FactoryMergeRejected(status,(body as {message:string}).message.slice(0,500));}
+  if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':stderr.slice(0,300)})`);
+  const merged=JSON.parse(framed[2]);if(merged.merged!==true)throw Error('protected squash was not accepted');const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
  install:async target=>{
   if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');
   if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');

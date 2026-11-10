@@ -1,6 +1,6 @@
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
-import {maintainFactory,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
+import {maintainFactory,FactoryMergeRejected,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
 const p:FactoryPull={number:1,head:'a'.repeat(40),tree:'b'.repeat(40),createdAt:'2026-01-01',draft:false,state:'OPEN',mergeState:'CLEAN',verify:true};
 function setup(){const s=new Store(':memory:'),effects:string[]=[];const c:Challenge={pr:1,head:p.head,ok:true,review:{head:p.head,verdict:'PASS',findings:[]},native:{id:'fictional',path:'/fictional',verified:true,models:['gpt-6.1-sol'],efforts:['medium']},cleanup:{verified:true},workspace:'/fictional',startedAt:1};const port:MaintenancePort={pulls:async()=>[p],pull:async()=>({...p}),challenge:async()=>c,verifyChallenge:()=>true,signed:async()=>true,merged:async()=>({state:'MERGED',head:p.head,revision:'c'.repeat(40),tree:p.tree}),merge:async(number,head)=>{effects.push(`merge:${number}:${head}`);return {head:'c'.repeat(40),tree:p.tree};},install:async head=>{effects.push(`install:${head}`);return head;}};return {s,effects,c,port};}
 test('exact independently challenged green signed tree merges then installs',async()=>{const {s,port,effects}=setup();try{expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','installed']);expect(effects).toEqual([`merge:1:${p.head}`,`install:${'c'.repeat(40)}`]);}finally{s.close();}});
@@ -18,3 +18,12 @@ test('failed installation retains its target and stops before another merge',asy
 test('behind heads update once and wait for fresh exact-head CI and challenge',async()=>{const {s,port,effects}=setup();port.pull=async()=>({...p,mergeState:'BEHIND'});let updates=0;port.update=async()=>{updates++;};try{expect((await maintainFactory(s,port))[0].state).toBe('branch-update-requested');expect((await maintainFactory(s,port))[0].state).toBe('branch-update-pending');expect(updates).toBe(1);expect(effects).toEqual([]);}finally{s.close();}});
 
 test('an unresolved challenge consumes a normal builder slot without changing capacity',async()=>{const {Engine}=await import('../launcher/engine'),{builderSlots}=await import('../launcher/capacity'),{config}=await import('./fixtures');const s=new Store(':memory:'),e=new Engine(s,config());try{const before=builderSlots(s,e.c);s.set('factory-challenge-slot',{state:'unknown'});expect(builderSlots(s,e.c).used).toBe(before.used+1);expect(builderSlots(s,e.c).max).toBe(before.max);s.set('factory-challenge-slot',{state:'released'});expect(builderSlots(s,e.c).used).toBe(before.used);}finally{s.close();}});
+
+
+test('definitive HTTP rejection releases only merge intent and fresh gates can retry',async()=>{const {s,port,effects}=setup();const normal=port.merge;let tries=0;port.merge=async(n,h)=>{tries++;if(tries===1)throw new FactoryMergeRejected(405,'required checks changed');return normal(n,h);};try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(s.get('factory-merge-intent')).toBeNull();expect(s.get(`factory-merge-rejected:1:${p.head}`)).toMatchObject({status:405});expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','installed']);expect(tries).toBe(2);expect(effects).toHaveLength(2);}finally{s.close();}});
+
+test('retained failed review does not consume a fresh attempt allowance',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');const s=new Store(':memory:');let attempts:number[]=[];
+ const run:typeof import('../adapters/factory-challenge').runFactoryChallenge=async(store,pull,dir,checkout,claimed)=>{attempts.push(pull.number);if(pull.number===2)claimed?.();return undefined;};
+ try{s.set(`factory-challenge:1:${p.head}`,{state:'blocked'});const port=maintenancePort(s,run);await port.challenge(p);await port.challenge({...p,number:2});await port.challenge({...p,number:3});expect(attempts).toEqual([2]);}finally{s.close();}
+});

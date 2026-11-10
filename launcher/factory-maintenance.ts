@@ -2,6 +2,9 @@ import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
 import type {Store} from '../tracking/store';
 
+// Only an authenticated HTTP rejection is definitive. Timeouts, malformed replies
+// and failed readback retain uncertain merge custody for read-only reconciliation.
+export class FactoryMergeRejected extends Error{constructor(readonly status:number,detail:string){super(`protected merge rejected (${status}): ${detail}`);}}
 export const factoryRepository='fulmar-hq/agent-factory';
 export type FactoryPull={number:number;head:string;tree:string;createdAt:string;draft:boolean;state:string;mergeState:string;verify:boolean};
 export type Challenge={pr:number;head:string;ok:boolean;native:{id:string;path:string;verified:boolean;models:string[];efforts:string[]};cleanup:{verified:boolean};review:{head:string;verdict:string;findings:unknown[]};workspace:string;startedAt:number};
@@ -58,7 +61,12 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
    if(interrupted())return result;
    const intent={pr:p.number,head:p.head,tree:p.tree};s.set('factory-merge-intent',intent);
    s.event(`factory-merge-intent:${p.number}:${p.head}`,'factory-merge-intent',intent,'Reconcile this exact PR after an uncertain response; never re-merge or substitute remote main');
-   const merged=await port.merge(p.number,p.head);await approve(intent,merged);
+   let merged:{head:string;tree:string};
+   try{merged=await port.merge(p.number,p.head);}catch(error){
+    if(error instanceof FactoryMergeRejected){s.set(`factory-merge-rejected:${p.number}:${p.head}`,{...intent,status:error.status,error:String(error),at:Date.now()});s.event(crypto.randomUUID(),'factory-merge-rejected',{...intent,status:error.status,error:String(error)},'Definitive no-effect response; a later pass must reread every gate');s.set('factory-merge-intent',null);}
+    throw error;
+   }
+   await approve(intent,merged);
    record(p.number,'merged',undefined,merged.head);
    const installed=await port.install(merged.head);record(p.number,'installed',undefined,installed);s.set('factory-install-pending',null);
   }catch(error){record(initial.number,'blocked',String(error),initial.head);return result;}
