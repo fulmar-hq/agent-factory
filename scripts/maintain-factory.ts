@@ -27,6 +27,7 @@ export function maintenancePort(s:Store):MaintenancePort{return {
   if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');
   await git('fetch','origin','main');const remote=(await git('rev-parse','origin/main')).trim();
   if(target!=='main')await git('merge-base','--is-ancestor',target,remote);
+  const verified=await api(`commits/${remote}`);if(verified.sha!==remote||verified.commit.verification.verified!==true||verified.commit.verification.reason!=='valid')throw Error('installed revision signature unverified');
   const before=(await git('rev-parse','HEAD')).trim();await git('merge','--ff-only','origin/main');const after=(await git('rev-parse','HEAD')).trim();
   if(after!==remote)throw Error('installed readback differs');s.event(`factory-install:${before}:${after}`,'factory-install',{before,after,checkout:repo},'Use a reviewed signed revert; preserve runtime state and all branches');return after;
  }
