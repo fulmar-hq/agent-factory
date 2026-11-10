@@ -26,10 +26,12 @@ export function maintenancePort(s:Store):MaintenancePort{return {
   if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');
   if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');
   await git('fetch','origin','main');const remote=(await git('rev-parse','origin/main')).trim();
-  if(target!=='main')await git('merge-base','--is-ancestor',target,remote);
-  const verified=await api(`commits/${remote}`);if(verified.sha!==remote||verified.commit.verification.verified!==true||verified.commit.verification.reason!=='valid')throw Error('installed revision signature unverified');
-  const before=(await git('rev-parse','HEAD')).trim();await git('merge','--ff-only','origin/main');const after=(await git('rev-parse','HEAD')).trim();
-  if(after!==remote)throw Error('installed readback differs');s.event(`factory-install:${before}:${after}`,'factory-install',{before,after,checkout:repo},'Use a reviewed signed revert; preserve runtime state and all branches');return after;
+  if(target==='main')throw Error('explicit verified install revision required');
+  const approval=s.get<{state:string;tree:string}>(`factory-merge-outcome:${target}`);if(approval?.state!=='verified')throw Error('install revision has no verified merge approval');
+  await git('merge-base','--is-ancestor',target,remote);
+  const verified=await api(`commits/${target}`);if(verified.sha!==target||verified.commit.tree.sha!==approval.tree||verified.commit.verification.verified!==true||verified.commit.verification.reason!=='valid')throw Error('installed revision signature unverified');
+  const before=(await git('rev-parse','HEAD')).trim();await git('merge','--ff-only',target);const after=(await git('rev-parse','HEAD')).trim();
+  if(after!==target)throw Error('installed readback differs');s.event(`factory-install:${before}:${after}`,'factory-install',{before,after,checkout:repo},'Use a reviewed signed revert; preserve runtime state and all branches');return after;
  }
 };}
 if(import.meta.main){

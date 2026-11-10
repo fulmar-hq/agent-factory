@@ -12,6 +12,7 @@ test("publisher refuses retained macOS abort fixtures without changing the snaps
  mkdirSync(join(checkout,"infra/ci"),{recursive:true});writeFileSync(path,"os.abort()");
  const command="python3 -m unittest discover -s infra/ci -p 'test_*.py'";
  expect(()=>assertMacCrashSafe(checkout,command,"darwin")).toThrow("crash-producing");
+ expect(()=>assertMacCrashSafe(checkout,"test -d infra/ci && cd infra/ci && python3 -m unittest -v","darwin")).toThrow("crash-producing");
  expect(()=>assertMacCrashSafe(checkout,command,"linux")).not.toThrow();
  if(process.platform==="darwin")await expect(testSnapshot({...ticket(),test:command},checkout,"unused","unused")).rejects.toThrow("crash-producing");
  expect(readFileSync(path,"utf8")).toBe("os.abort()");

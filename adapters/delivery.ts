@@ -52,7 +52,7 @@ export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c"
 // Retained snapshots may predate the macOS-safe diagnostic test. Refuse the
 // known crashing suite rather than changing a frozen tree or skipping a test.
 export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
-  if(platform!=="darwin" || !/test_calendar_build_diagnostic|unittest\s+discover/.test(test))return;
+  if(platform!=="darwin")return;
   const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
   if(existsSync(path) && readFileSync(path,"utf8").includes("os.abort()"))
     throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");

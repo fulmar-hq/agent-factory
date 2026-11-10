@@ -27,7 +27,8 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
  const record=(p:number,state:string,reason?:string,head?:string)=>{const r={pr:p,state,reason,head};result.push(r);s.event(`factory-maintenance:${p}:${state}:${head??''}:${crypto.randomUUID()}`,'factory-maintenance',r,'Retain PRs and branches; undo installed source with a signed revert');};
  // First adopt previously merged source, including a merge whose install was
  // interrupted. Installation never resets, cleans or stashes local changes.
- try {await port.install('main');}catch(error){record(0,'install-blocked',String(error));return result;}
+ const pending=s.get<{head:string;tree:string}>('factory-install-pending');
+ if(pending){try{const approval=s.get<{state:string;tree:string}>(`factory-merge-outcome:${pending.head}`);if(approval?.state!=='verified'||approval.tree!==pending.tree||!await port.signed(pending.head,pending.tree))throw Error('pending install has no verified exact-tree approval');await port.install(pending.head);s.set('factory-install-pending',null);}catch(error){record(0,'install-blocked',String(error));return result;}}
  for(const initial of (await port.pulls()).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.number-b.number)) {
   try {
    if(initial.draft){record(initial.number,'draft');continue;}
@@ -38,9 +39,12 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
    const fresh=await port.pull(p.number);
    if(fresh.head!==p.head||fresh.tree!==p.tree||fresh.state!=='OPEN'||!fresh.verify||fresh.mergeState!=='CLEAN')throw Error('head/check/base changed before merge');
    const merged=await port.merge(p.number,p.head);
+   s.set(`factory-merge-outcome:${merged.head}`,{state:'blocked',expected:p.tree,tree:merged.tree,pr:p.number});
    if(merged.tree!==p.tree||!await port.signed(merged.head,merged.tree))throw Error('merged signature or exact tested tree differs; install refused');
+   s.set(`factory-merge-outcome:${merged.head}`,{state:'verified',tree:merged.tree,pr:p.number});
+   s.set('factory-install-pending',{head:merged.head,tree:merged.tree});
    record(p.number,'merged',undefined,merged.head);
-   const installed=await port.install(merged.head);record(p.number,'installed',undefined,installed);
+   const installed=await port.install(merged.head);record(p.number,'installed',undefined,installed);s.set('factory-install-pending',null);
   }catch(error){record(initial.number,'blocked',String(error),initial.head);}
  }
  return result;
