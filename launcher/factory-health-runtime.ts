@@ -48,7 +48,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
    if(!h||h.status!=='ok'||now-h.at>300000||h.at>now||!Number.isSafeInteger(h.ready)||workUnknown)snapshot.work=failed(now,'complete current work custody unavailable');
    else {
     const ready=h.ready!,building=sessions.filter(x=>['starting','running'].includes(x.status)).length;
-    const progress=db.query("SELECT id,at,kind FROM events WHERE (kind IN ('reservation','start-attempt','native-start-attempt','session-continuation') OR (kind='worker-cleanup' AND json_extract(data,'$.verified')=1)) AND at<=? ORDER BY at DESC,rowid DESC LIMIT 1").get(now) as {id:string;at:number;kind:string}|null;
+    const progress=db.query("SELECT id,at,kind FROM events WHERE (kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') OR (kind='worker-cleanup' AND json_extract(data,'$.verified')=1)) AND at<=? ORDER BY at DESC,rowid DESC LIMIT 1").get(now) as {id:string;at:number;kind:string}|null;
     const claim=db.query("SELECT id,at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') AND at<=? AND at>? ORDER BY at DESC,rowid DESC LIMIT 1").get(now,now-20*60000) as {id:string;at:number}|null;
     const claims=claim?[{id:claim.id,heldSince:claim.at,receipt:`controller event ${claim.id}`}]:[];
     const floor=previousInactive??(claim?progress?.at??claim.at:now);
