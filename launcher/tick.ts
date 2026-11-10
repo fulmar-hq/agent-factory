@@ -1,5 +1,5 @@
-import {githubContext} from '../adapters/github-budget';
-import {githubHealth} from './github-health';
+import {githubContext,unavailable} from '../adapters/github-budget';
+import {githubHealth,recordLateGithubFailure} from './github-health';
 import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
 import { resolveQuestions } from "./questions";
@@ -54,6 +54,7 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifi
   try {
     await setBuilding(t, e.s, execute);
   } catch (error) {
+    if(unavailable(error))recordLateGithubFailure(e.s,error);
     e.s.event(`label-failure:${session.id}`, "github-state-failure", { error: String(error) }, "Reconcile labels; retain the stable launch claim.");
   }
   return session;
@@ -72,6 +73,7 @@ export async function tick(dir=root){return githubContext.run(dir,()=>tickOnce(d
 async function tickOnce(dir:string) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite"));
+  let claimed = 0;
   try {
     const e = new Engine(s, c),
       now = Date.now();
@@ -144,7 +146,9 @@ async function tickOnce(dir:string) {
     localWakes(s,c,ready,{},now);
     let ownerReconciled=true;
     try {await githubWakes(s,c,command,now);}
-    catch(error){ownerReconciled=false;s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
+    catch(error){ownerReconciled=false;recordLateGithubFailure(s,error);s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
+    health=githubHealth(s,c,Date.now());
+    if(health){s.set('heartbeat',health);return health;}
     if(ownerReconciled && Object.values(c.projects).every(p=>{
       const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
     }))s.set("last-successful-reconciliation",Date.now());
@@ -156,7 +160,6 @@ async function tickOnce(dir:string) {
     // Reconciliation may outlive a worker cohort. Reserve renewal before new
     // ordinary claims consume the slots that became free during those reads.
     evaluateRenewal();
-    let claimed = 0;
     for (const t of ready) {
       if(!e.slots().free)break;
       try {
@@ -182,11 +185,25 @@ async function tickOnce(dir:string) {
         s.db
           .query("UPDATE tickets SET decision=? WHERE id=?")
           .run(String(error), `${t.repo}#${t.number}`);
+        if(unavailable(error)){recordLateGithubFailure(s,error);break;}
       }
+      if(githubHealth(s,c,Date.now()))break;
     }
-    // Observe actual admission outcomes: refused ready labels cannot conceal idle.
-    await autonomyEffects(s,async()=>supply(e,ready,Date.now(),{claimed,refusals}));
-    if(s.get("paused")===false)for(const w of pendingWakes(s))dispatchWake(s,w,id=>spawnOwner(id,dir));
+    const degraded=()=>{
+      const health=githubHealth(s,c,Date.now());
+      if(!health)return;
+      const heartbeat={...health,claimed,refusals,autoApproved,autoResolved};
+      s.set('heartbeat',heartbeat);return heartbeat;
+    };
+    let failed=degraded();if(failed)return failed;
+    // The lease may wait; recheck immediately inside its effects boundary too.
+    await autonomyEffects(s,async()=>{if(!githubHealth(s,c,Date.now()))supply(e,ready,Date.now(),{claimed,refusals});});
+    failed=degraded();if(failed)return failed;
+    if(s.get("paused")===false)for(const w of pendingWakes(s)){
+      failed=degraded();if(failed)return failed;
+      dispatchWake(s,w,id=>spawnOwner(id,dir));
+    }
+    failed=degraded();if(failed)return failed;
     autoResolved += resolveQuestions(e);
     const heartbeat = { at: Date.now(), status: ownerReconciled ? "ok" : "degraded", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
@@ -195,6 +212,11 @@ async function tickOnce(dir:string) {
     s.set("heartbeat", heartbeat);
     s.set("last-successful-heartbeat",heartbeat);
     return heartbeat;
+  } catch(error) {
+    if(!unavailable(error))throw error;
+    recordLateGithubFailure(s,error);
+    const health=githubHealth(s,c,Date.now())!;
+    const heartbeat={...health,claimed};s.set('heartbeat',heartbeat);return heartbeat;
   } finally {
     s.close();
   }
