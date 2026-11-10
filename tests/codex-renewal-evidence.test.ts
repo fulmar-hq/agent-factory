@@ -30,7 +30,7 @@ function fixture(root = "/fictional") {
     const u = { input_tokens: kind === "tokens" ? 200 : 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: kind === "tokens" ? 210 : 110 };
     const row = (offset: number, type: string, payload: unknown) => ({ timestamp: new Date(start + offset).toISOString(), type, payload });
     const command = `/usr/bin/python3 ${probe.path}`;
-    const rollout: unknown[] = [row(0, "session_meta", { id: nativeId, cwd: workspace }), row(1, "turn_context", { model: m.model, effort })];
+    const rollout: unknown[] = [row(0, "session_meta", { id: nativeId, cwd: workspace }), row(1, "turn_context", { model: m.model, effort, cwd: workspace })];
     if (kind === "security") rollout.push(row(20, "response_item", { type: "function_call", name: "exec_command", call_id: "tool-1", arguments: JSON.stringify({ cmd: command }) }),
       row(50, "response_item", { type: "function_call_output", call_id: "tool-1", output: "Wall time: 0.1 seconds\nOutput:\n" + output }));
     rollout.push(row(100, "event_msg", { type: "token_count", info: { total_token_usage: { ...u, reasoning_output_tokens: 2 } } }));
@@ -256,3 +256,6 @@ test("installed CLI shell wrapper still binds the exact immutable probe",()=>{co
 
 test("turn context cwd cannot redirect a relative probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x[1].payload.cwd="/unrelated-workspace";},true);expect(f.collect().status).toBe("refused");});
 test("an aborted native turn before the budget stop cannot qualify",()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+200).toISOString(),type:"event_msg",payload:{type:"turn_aborted"}});},true);expect(f.collect().status).toBe("refused");});
+
+test("a failed earlier tool attempt cannot be hidden by a later passing probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:"response_item",payload:{type:"function_call",name:"exec_command",call_id:"failed",arguments:JSON.stringify({cmd:"/usr/bin/python3 probe.py"})}},{timestamp:new Date(r.startedAt+6).toISOString(),type:"response_item",payload:{type:"function_call_output",call_id:"failed",output:"failed security probe"}});},true);expect(f.collect().status).toBe("refused");});
+test("missing turn cwd is unknown rather than workspace evidence",()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{delete x[1].payload.cwd;},true);expect(f.collect().status).toBe("refused");});

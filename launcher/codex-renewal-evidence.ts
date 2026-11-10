@@ -170,7 +170,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat((p?.model === undefined || p.model === m.model) && (p?.effort === undefined || p.effort === r.effort), "conflicting native model/effort");
     requireThat(row.type !== "error" && p?.type !== "error", "native receipt error");
     if (row.type === "turn_context") {
-      requireThat(p?.model === m.model && p.effort === r.effort && (p.cwd === undefined || p.cwd === r.workspace), "native model/effort/cwd mismatch"); contexts++;
+      requireThat(p?.model === m.model && p.effort === r.effort && p.cwd === r.workspace, "native model/effort/cwd mismatch"); contexts++;
     }
     if (row.type === "event_msg" && p?.type === "token_count" && p.info !== null) {
       requireThat(contexts > 0, "accounting before native context");
@@ -225,6 +225,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(target.length === 1 && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
     }
     securityOutput(c.stdout);
+    requireThat(calls.size === 1 && outputs.size === 1, "exactly one security probe tool attempt required; no retries");
     const matching = [...calls].filter(([, call]) => {
       if (!["exec_command", "functions.exec_command"].includes(call.name)) return false;
       const args = z.object({cmd:text,workdir:text.optional()}).parse(JSON.parse(call.arguments));
@@ -232,8 +233,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     });
     requireThat(matching.length === 1 && outputs.has(matching[0][0]), "actual native security invocation missing");
     securityOutput(outputs.get(matching[0][0])!);
-    const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution" && probeInvocation(x.item.command ?? "", r.workspace, m.probe.path));
-    requireThat(executed.length === 1 && executed[0].item?.exit_code === 0, "native command exit unverified");
+    const executed = stream.filter(x => x.type === "item.completed" && x.item?.type === "command_execution");
+    requireThat(executed.length === 1 && executed[0].item?.exit_code === 0 && probeInvocation(executed[0].item.command ?? "", r.workspace, m.probe.path), "native command exit unverified");
     securityOutput(text.parse(executed[0].item?.aggregated_output));
   } else {
     requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode > 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
