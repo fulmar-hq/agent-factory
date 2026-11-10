@@ -1,4 +1,5 @@
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
+import { planDeliveryRetention } from "./delivery-retention";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker, type WorkerObservation } from "./child";
 import { processIdentity } from "./process";
@@ -94,6 +95,9 @@ export async function runWorker(id: string) {
       };
       const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
       s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+      // Only plan here. The trusted archive API is also the missed-cleanup path;
+      // no timer, native deletion or automatic archival runs in a supervisor.
+      await planDeliveryRetention(s,root,id,process.env.FACTORY_DELIVERY_ARCHIVE);
     }
   } catch (error) {
     e.finish(id, false);
