@@ -56,7 +56,7 @@ test("transcript catchup cannot redirect the active streamed message delta",()=>
 });
 
 for(const reason of ["tokens","identity"]) test(`supervisor polls silent Codex rollout and stops on ${reason}`,async()=>{
- const {Store}=await import("../tracking/store"),{Engine}=await import("../launcher/engine");
+ const {Store}=await import("../tracking/store"),{TestEngine:Engine}=await import("./fixtures");
  const {claimSupervisor,superviseSession}=await import("../launcher/worker"),{ticket,config}=await import("./fixtures");
  const home=mkdtempSync(join(tmpdir(),"factory-poll-")),workspace=join(home,"workspace"),bin=join(home,"bin");
  mkdirSync(workspace);mkdirSync(bin);

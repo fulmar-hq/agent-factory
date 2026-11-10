@@ -19,7 +19,7 @@ import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
 import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
-import { qualificationAlerts } from "./alerts";
+import { qualificationAlerts,diskCapacityAlert } from "./alerts";
 import { reconcileBrowsers } from "./browser";
 import { nativeBrowserPorts } from "../adapters/browser";
 import { qualificationFor } from "./usage-push-policy";
@@ -66,7 +66,8 @@ export async function tick(dir = root) {
   try {
     const e = new Engine(s, c),
       now = Date.now();
-    observeDisk(s,diskReading(undefined,now));
+    observeDisk(s,diskReading(dir,now));
+    diskCapacityAlert(s,now);
     s.set("heartbeat", { at: now, status: "reconciling" });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     qualificationAlerts(s, qualifications, now);

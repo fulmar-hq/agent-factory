@@ -2,7 +2,7 @@ import { expect, test, spyOn } from "bun:test";
 import { QualificationSchema } from "../launcher/config";
 import { WorkerAccounting } from "../adapters/workers";
 import { qualification, admission, ticket, config } from "./fixtures";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { tickSummary } from "../launcher/tick";
 
