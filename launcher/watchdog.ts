@@ -1,5 +1,7 @@
 import {Engine} from './engine';
 export type ClaimProgress={since:number;at:number;free:boolean;claimed:number};
+const progressKinds="'reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started'";
+function lastClaim(e:Engine,at:number){return e.s.db.query(`SELECT MAX(at) AS at FROM events WHERE kind IN (${progressKinds}) AND at<=?`).get(at) as {at:number|null};}
 const undo='Retain incident evidence; progress closes the incident without another notification';
 // State changes, reconciliation heartbeats, labels and owner wakes are not
 // worker claims. An empty/poisoned queue must not conceal a work-supply stall.
@@ -7,7 +9,7 @@ export function observeClaimProgress(e:Engine,h:{at:number;claimed:number;paused
  return e.s.atomic(()=>{
   const free=!h.paused && e.slots().free>0;
   const prior=e.s.get<ClaimProgress>('claim-progress');
-  const last=e.s.db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation','factory-challenge-started') AND at<=?").get(h.at) as {at:number|null};
+  const last=lastClaim(e,h.at);
   const since=free&&h.claimed===0&&prior?.free ? (last.at!==null&&last.at>prior.at?last.at:prior.since) : h.at;
   const p={since,at:h.at,free,claimed:h.claimed};
   e.s.set('claim-progress',p);
@@ -21,7 +23,7 @@ export function checkClaimStall(e:Engine,now:number) {
   const free=e.s.get('paused')===false&&e.slots().free>0;
   if(!p){p={since:now,at:now,free,claimed:0};e.s.set('claim-progress',p);}
   else if(now>p.at){
-   const last=e.s.db.query("SELECT MAX(at) AS at FROM events WHERE kind IN ('reservation','start-attempt','native-start-attempt','session-continuation') AND at<=?").get(now) as {at:number|null};
+   const last=lastClaim(e,now);
    p={...p,since:!free||!p.free?now:Math.max(p.since,last.at??p.since),at:now,free,claimed:0};e.s.set('claim-progress',p);
   }
   const old=e.s.get<{id:string;state:string}>('watchdog-stall');
