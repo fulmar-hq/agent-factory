@@ -1,6 +1,6 @@
 import { constants, openSync, closeSync, fstatSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 
 // #141 source collector only. Trusted owner-run captures, NOT worker/model JSON,
@@ -139,6 +139,15 @@ export type CodexRenewalEvidenceOptions = {
   clock?: () => number;
 };
 
+// Deliberately small grammar: no arbitrary shell expression can substitute JSON
+// for execution of the exact hashed, workspace-local probe.
+function probeInvocation(command: string, workspace: string, probe: string): boolean {
+  if (probe !== join(workspace, "probe.py") || !/^\/[A-Za-z0-9/_.-]+$/.test(probe)) return false;
+  const commands = [`/usr/bin/python3 ${probe}`, "/usr/bin/python3 probe.py"];
+  return commands.some(c => command === c || command === `/bin/zsh -c '${c}'`);
+}
+const STOP_POLL_GRACE_MS = 1500;
+const CLEANUP_GRACE_MS = 5500;
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
   const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
@@ -208,6 +217,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     const u = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer }).parse(completions[0].usage);
     requireThat(u && u.input_tokens === total.input_tokens && u.output_tokens === total.output_tokens && u.cached_input_tokens === total.cached_input_tokens, "stream/final accounting mismatch");
     requireThat(r.command && r.commandProbe, "command and native security probes required");
+    requireThat(probeInvocation(r.command, r.workspace, m.probe.path), "exact hashed workspace probe invocation required");
     const c = commandSchema.parse(json(load(r.commandProbe)));
     requireThat(c.runId === m.runId && c.nativeId === r.nativeId && c.workspace === r.workspace && c.command === r.command && c.probeSha256 === m.probe.sha256 && c.probeAfterSha256 === m.probe.sha256 && c.startedAt >= m.startedAt && c.endedAt >= c.startedAt && c.endedAt <= r.startedAt, "command probe binding mismatch");
     for (const check of knownTargets) {
@@ -225,9 +235,11 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode > 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
     requireThat(s.stopAt! >= s.before.at && s.stopAt! < r.endedAt && s.signals.length > 0, "stop timing unverified");
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
-    requireThat(s.signals.some(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM"), "owner TERM missing");
+    const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
+    requireThat(firstTerm, "owner TERM missing");
+    requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {
-      requireThat(s.timeBudget !== null && s.tokenBudget === null && s.stopAt! - r.startedAt >= 50000, "original 25s estimate/50s stop required");
+      requireThat(s.timeBudget !== null && s.tokenBudget === null && s.stopAt! - r.startedAt >= 50000 && s.stopAt! - r.startedAt <= 50000 + STOP_POLL_GRACE_MS, "original 25s estimate/50s stop required");
       const d = s.descendant;
       requireThat(d && owned.some(x => x.pid === d.pid && x.identity === d.identity && !owner(x)), "descendant identity missing");
       const term = s.signals.find(x => x.pid === d.pid && x.identity === d.identity && x.signal === "SIGTERM");
@@ -235,6 +247,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       requireThat(term && kill && s.afterTerm && s.afterTerm.at > term.at && s.afterTerm.at < kill.at && s.afterTerm.rows.some(x => x.pid === d.pid && x.identity === d.identity && alive(x)), "TERM-ignoring descendant not observed/killed");
     } else {
       requireThat(s.tokenBudget !== null && s.timeBudget === null && s.samples.some(x => x.usage.total_tokens >= s.tokenBudget!.pauseTokens), "independent 100-token budget stop unverified");
+      const threshold = counters.find(x => x.usage.total_tokens >= s.tokenBudget!.pauseTokens);
+      requireThat(threshold && s.stopAt! >= threshold.at && firstTerm.at - threshold.at <= STOP_POLL_GRACE_MS, "token threshold stop exceeded bounded polling grace");
     }
   }
   return { nativeId: r.nativeId, effort: r.effort, kind: r.kind, usage: total, observedAliveAt: sampleAt, stopAt: s.stopAt, cleanupAt: s.final.at };

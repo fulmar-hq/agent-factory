@@ -228,3 +228,23 @@ test("all six fictional captures pass the production filesystem reader", () => {
   expect(result.reason).toBeUndefined(); expect(result.status).toBe("verified"); expect(result.verifiedRuns).toHaveLength(6);
   expect(readFileSync(f.m.qualifications.path)).toEqual(original);
 });
+
+
+test("consistent printf receipts cannot replace the hashed probe", () => {
+  const f=fixture(),r=f.m.runs[0],command="printf fake-security-success";r.command=command;
+  f.mutate(r.commandProbe!,x=>{x.command=command;});
+  f.mutate(r.rollout,x=>{x[2].payload.arguments=JSON.stringify({cmd:command});},true);
+  const stream=Buffer.from(f.read(r.stream.path)).toString().replace(`/usr/bin/python3 ${f.m.probe.path}`,command);
+  const b=bytes(stream);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);
+  expect(f.collect().reason).toContain("hashed workspace probe");
+});
+test("a late frozen time stop cannot qualify", () => {
+  const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+305000;
+  f.mutate(r.supervisor,x=>{x.endedAt=r.endedAt;x.stopAt=r.startedAt+300000;x.afterTerm.at=r.startedAt+302000;x.final.at=r.endedAt;for(const signal of x.signals)signal.at=r.startedAt+(signal.signal==="SIGKILL"?303000:300000);});
+  expect(f.collect().status).toBe("refused");
+});
+test("delaying token TERM after observed threshold cannot qualify", () => {
+  const f=fixture(),r=f.m.runs[2];r.endedAt=r.startedAt+305000;
+  f.mutate(r.supervisor,x=>{x.endedAt=r.endedAt;x.final.at=r.endedAt;x.signals[0].at=r.startedAt+300000;});
+  expect(f.collect().status).toBe("refused");
+});
