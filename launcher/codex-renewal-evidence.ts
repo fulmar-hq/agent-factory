@@ -231,7 +231,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   // Pin observed identities across all captures, including late descendants and
   // separately grouped/orphaned children. Unknown table reads already fail parsing.
   let changed = true;
-  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent)) { owned.push(row); changed = true; } }
+  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group)) { owned.push(row); changed = true; } }
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
