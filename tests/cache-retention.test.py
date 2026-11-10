@@ -58,6 +58,19 @@ class Safety(unittest.TestCase):
   from subprocess import CompletedProcess
   with patch.object(m.subprocess,'run',return_value=CompletedProcess([],0,'valid-looking output','warning: incomplete inventory')):
    with self.assertRaises(RuntimeError):m.command(['lsof'])
+ def test_sqlite_recovery_evidence_remains_usable(self):
+  import sys
+  path=self.cache/'captured.ledger'
+  child=subprocess.Popen([sys.executable,'-c',"import sqlite3,sys,time;c=sqlite3.connect(sys.argv[1]);c.execute('pragma journal_mode=wal');c.execute('pragma wal_autocheckpoint=0');c.execute('create table events(value text)');c.execute(\"insert into events values('retained')\");c.commit();print('ready',flush=True);time.sleep(60)",str(path)],stdout=subprocess.PIPE,text=True)
+  try:self.assertEqual(child.stdout.readline().strip(),'ready')
+  finally:child.terminate();child.wait(timeout=5);child.stdout.close()
+  self.assertTrue(pathlib.Path(str(path)+'-wal').exists())
+  (self.cache/'other.sqlite-journal').write_text('recovery');(self.cache/'other.db-shm').write_text('recovery')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,True)
+  self.assertTrue(path.exists());self.assertTrue(pathlib.Path(str(path)+'-wal').exists());self.assertTrue((self.cache/'other.sqlite-journal').exists());self.assertTrue((self.cache/'other.db-shm').exists())
+  recovered=sqlite3.connect(path)
+  try:self.assertEqual(recovered.execute('select value from events').fetchone()[0],'retained')
+  finally:recovered.close()
  def test_hardlinked_marker_cannot_modify_source(self):
   scratch=self.repo/'.factory-tmp';scratch.mkdir();source=self.repo/'dirty-source';source.write_text('preserve')
   os.link(source,scratch/'dependencies-evicted.jsonl')

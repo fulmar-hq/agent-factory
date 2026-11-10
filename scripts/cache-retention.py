@@ -32,7 +32,7 @@ def real(p):
 def evidence(name):
     n = name.lower()
     return (n in PROTECTED or n in {'log', 'trace', 'traces'} or
-            n.endswith(('.log', '.jsonl', '.bundle', '.receipt', '.sqlite', '.db')) or
+            n.endswith(('.log', '.jsonl', '.bundle', '.receipt', '.sqlite', '.sqlite3', '.db', '.db3', '.sqlitedb', '-wal', '-shm', '-journal')) or
             any(s in n for s in ('receipt', 'transcript', 'evidence', '.log.', 'trace')))
 
 
@@ -151,10 +151,19 @@ def eligible(repo, cache):
     return True
 
 
+def retained_entry(p):
+    if evidence(p.name):
+        return True
+    if p.is_file() and not p.is_symlink():
+        with p.open('rb') as data:
+            return data.read(16) == b'SQLite format 3\x00'
+    return False
+
+
 def has_generated(cache):
     with os.scandir(cache) as entries:
         for item in entries:
-            if evidence(item.name):
+            if retained_entry(pathlib.Path(item.path)):
                 continue
             if item.is_dir(follow_symlinks=False):
                 if has_generated(pathlib.Path(item.path)):
@@ -168,7 +177,7 @@ def remove(cache):
     # Preserve in-cache evidence at its exact location; never follow links.
     for item in os.scandir(cache):
         p = pathlib.Path(item.path)
-        if evidence(item.name):
+        if retained_entry(p):
             continue
         if item.is_dir(follow_symlinks=False):
             remove(p)
