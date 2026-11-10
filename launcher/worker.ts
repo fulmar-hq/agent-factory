@@ -1,11 +1,14 @@
+import {reviewPublished} from './queue';
 import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
+import { planDeliveryRetention } from "./delivery-retention";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker } from "./child";
 import { processIdentity } from "./process";
 import { join } from "node:path";
 import { mkdirSync, openSync, closeSync, writeSync } from "node:fs";
 import { Engine } from "./engine";
-import { configAt, root, optionalJSON, QualificationSchema, type Ticket, type Meter } from "./config";
+import { configAt, root, optionalJSON, type Ticket, type Meter } from "./config";
+import { qualificationFor } from "./usage-push-policy";
 import { Store } from "../tracking/store";
 import {
   workerSpec,
@@ -14,6 +17,7 @@ import {
   materializeSettings,
 } from "../adapters/workers";
 import { command } from "../adapters/github";
+import { collectBrowserRequest } from "./browser";
 export function claimSupervisor(e: Engine, id: string) {
   // BEGIN IMMEDIATE waits for the launch reservation to commit before reading it.
   return e.s.atomic(() => {
@@ -25,6 +29,11 @@ export function claimSupervisor(e: Engine, id: string) {
     return current;
   });
 }
+export function requireWorkerQualification(e: Engine, t: Ticket, raw: unknown, now = Date.now()) {
+  const q = qualificationFor(raw, e.c, t, now);
+  if (!t.model || !t.effort || !q || e.s.get("paused") !== false) throw Error("qualification expired or paused");
+  return q;
+}
 export async function runWorker(id: string) {
   const c = await configAt(), s = new Store(join(root, "controller.sqlite")), e = new Engine(s, c);
   const x = claimSupervisor(e, id);
@@ -34,14 +43,7 @@ export async function runWorker(id: string) {
     const qs = (await optionalJSON(
       join(root, "qualifications.json"),
     )) as Record<string, unknown> | null;
-    const q = QualificationSchema.parse(qs?.[t.provider]);
-    if (
-      q.expiresAt <= Date.now() ||
-      q.model !== t.model ||
-      q.effort !== t.effort ||
-      s.get("paused") !== false
-    )
-      throw Error("qualification expired or paused");
+    requireWorkerQualification(e, t, qs);
     const readings = s.get<Record<string, Meter>>("readings");
     e.workerUsage(id, readings?.[t.provider], Date.now());
     await verifySubscription(t.provider);
@@ -83,7 +85,8 @@ export async function runWorker(id: string) {
     mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
     const baselineKey=`publish-base:${id}`;
     if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());
-    await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery ? {native:continuation?.native} : undefined);
+    await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery || continuation ? {native:continuation?.native} : undefined);
+    if(e.sessions().find(x=>x.id===id)?.status==="finished")collectBrowserRequest(e,id,workspace);
     if(delivery && e.sessions().find(x=>x.id===id)?.status==="finished") {
       const verifyClaim=()=>{
         const current=e.sessions().find(x=>x.id===id);
@@ -93,6 +96,10 @@ export async function runWorker(id: string) {
       };
       const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
       s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+      await reviewPublished(e);
+      // Only plan here. The trusted archive API is also the missed-cleanup path;
+      // no timer, native deletion or automatic archival runs in a supervisor.
+      await planDeliveryRetention(s,root,id,process.env.FACTORY_DELIVERY_ARCHIVE);
     }
   } catch (error) {
     e.finish(id, false);
