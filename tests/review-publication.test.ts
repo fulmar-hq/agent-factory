@@ -78,3 +78,9 @@ test('original-PR verdicts retain severity, actionable reproduction and required
  const f=fixture(false,result=>{result.evidenceScope='source-review';result.review.verdict='CHANGES_REQUESTED';result.review.findings=[{severity:'P1',title:'Fence concurrent saves',file:'src/save.ts',line:42,detail}];result.review.installedGaps=['Run the dedicated consent concurrency regression with the synthetic tenant fixture.'];});f.certain();
  try{expect((await f.run())?.review.verdict).toBe('CHANGES_REQUESTED');const body=f.remote[0].body;expect(body).toContain('[P1]');expect(body).toContain('src/save.ts:42');expect(body).toContain('selecting Save twice before the first response');expect(body).toContain('dedicated consent concurrency regression');expect(body).not.toContain('/Users/vincent');expect(body).not.toContain('private@example.invalid');expect(body).not.toContain('private-credential-material');}finally{f.s.close();}
 });
+
+test('standalone synthetic GitHub tokens are centrally redacted from finding details and evidence gaps',async()=>{
+ const classic='ghp_'+'A'.repeat(36),fine='github_pat_'+'B'.repeat(22)+'_'+'C'.repeat(59);
+ const f=fixture(false,result=>{result.evidenceScope='source-review';result.review.verdict='CHANGES_REQUESTED';result.review.findings=[{severity:'P1',title:'Synthetic credential handling',file:'src/synthetic.ts',line:1,detail:`Synthetic reproduction ${classic} and ${fine}.`}];result.review.installedGaps=[`Synthetic evidence ${classic} and ${fine}.`];});f.certain();
+ try{await f.run();const body=f.remote[0].body;expect(body).not.toContain(classic);expect(body).not.toContain(fine);expect(body).not.toContain('ghp_');expect(body).not.toContain('github_pat_');expect(body.match(/\[redacted credential\]/g)).toHaveLength(4);expect(body).toContain('Synthetic reproduction');expect(body).toContain('Synthetic evidence');}finally{f.s.close();}
+});

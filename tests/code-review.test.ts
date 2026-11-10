@@ -7,8 +7,11 @@ import {config,ticket,now,TestEngine} from './fixtures';
 import {ConfigSchema} from '../launcher/config';
 import {enforceIntakeMode,intakeInstructions} from '../launcher/intake-policy';
 import {reviewProductChanges,importHistoricalReviews,reviewDepth,reviewChecksGreen,type CodeReviewPort} from '../launcher/code-review';
+import {ReleaseBatchSchema} from '../launcher/release-batch';
+import {toronto} from '../launcher/release';
 import type {BoardPull} from '../board/pulls';
-const reviewDir=(prefix:string)=>{const dir=mkdtempSync(join(tmpdir(),prefix));writeFileSync(join(dir,'release-batch.json'),JSON.stringify({pr:2901,sources:[]}));return dir;};
+const frozenBatch=(sources=[9999])=>ReleaseBatchSchema.parse({version:1,day:toronto(now).day,base:'b'.repeat(40),revision:'c'.repeat(40),tree:'d'.repeat(40),pr:2901,ref:'feat/fictional-frozen-batch',holdId:'fictional-hold',sources:sources.map(number=>({number,head:'e'.repeat(40),ref:'feat/fictional-source-'+number,title:'Fictional product source'})),overlaps:[],review:'Fictional accepted source and overlap review'});
+const reviewDir=(prefix:string)=>{const dir=mkdtempSync(join(tmpdir(),prefix));writeFileSync(join(dir,'release-batch.json'),JSON.stringify(frozenBatch()));return dir;};
 const policy={review_process:{rule:'one independent exact-head review on the same ticket and PR after green checks; never refill work',standard_minutes:15,deep_minutes:30,deep_when:'tenant separation, consent, sends, bookings, permissions, money or migrations'},refill:{rule:'product tasks only from the real backlog; never review or acceptance tickets',report_mix:true}};
 const setup=()=>new TestEngine(new Store(':memory:'),ConfigSchema.parse({...config(),...policy,projects:{alido:{repo:'fulmar-hq/alido',owners:['builder'],tests:'bun test'}}}));
 const p=(n=1):BoardPull=>({number:n,url:`https://github.com/fulmar-hq/alido/pull/${n}`,headRefOid:'a'.repeat(40),baseRefName:'QA',reviews:[],statusCheckRollup:['Verify','Secret scan'].map(name=>({name,status:'COMPLETED',conclusion:'SUCCESS'}))});
@@ -26,7 +29,7 @@ test('deep review follows one written risk rule across paths and changed content
 test('automatic review reuses exact-head receipts and protects the frozen carrier and sources',async()=>{
  const e=setup(),dir=reviewDir('code-review-');let runs=0;
  try {
-  writeFileSync(join(dir,'release-batch.json'),JSON.stringify({pr:2901,sources:[{number:1}]}));
+  writeFileSync(join(dir,'release-batch.json'),JSON.stringify(frozenBatch([1])));
   const port:CodeReviewPort={pulls:async()=>[p(1),p(2),p(3),p(2901)],files:async()=>[{filename:'src/booking.ts'}],review:async(pr,checkout,target,claimed)=>{if(e.s.get(`code-review:${target.repo}:${pr.number}:${pr.head}`))return undefined;runs++;expect(pr.number).toBe(2);expect(target.depth).toBe('deep');expect(checkout).toBe('/fake/source');claimed();e.s.set(`code-review:${target.repo}:${pr.number}:${pr.head}`,{state:'done'});return undefined;}};
   await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake/source'},port,now);expect(runs).toBe(1);
   port.pulls=async()=>[p(1),p(2),p(2901)];
@@ -164,5 +167,26 @@ test('missing or malformed frozen release evidence refuses the Alido sweep befor
    await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);
   }
   expect(reads).toBe(0);expect(reviews).toBe(0);expect(e.s.db.query("SELECT id FROM events WHERE kind='code-review-frozen-refused'").all().length).toBeGreaterThan(0);
+ }finally{e.s.close();}
+});
+
+test('Alido frozen protection uses the complete canonical batch schema and current-day identity',async()=>{
+ const e=setup();let reads=0;
+ try {
+  const port:CodeReviewPort={pulls:async()=>{reads++;return [p(2901),p(2502)];},files:async()=>{throw Error('protected frozen source must never be read');},review:async()=>{throw Error('protected source must never be reviewed');}};
+  const valid=frozenBatch([2502]);
+  const malformed=[{pr:2901,sources:[]},{...valid,sources:[]},{...valid,revision:undefined},{...valid,tree:'bad'},{...valid,day:'2000-01-01'},{...valid,sources:[{number:2502}]},{...valid,sources:[valid.sources[0],valid.sources[0]]}];
+  for(const packet of malformed){const dir=mkdtempSync(join(tmpdir(),'full-frozen-guard-'));writeFileSync(join(dir,'release-batch.json'),JSON.stringify(packet));await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);}
+  expect(reads).toBe(0);
+  const dir=reviewDir('complete-frozen-guard-');writeFileSync(join(dir,'release-batch.json'),JSON.stringify(valid));await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake'},port,now);expect(reads).toBe(1);
+ }finally{e.s.close();}
+});
+
+test('unavailable frozen Alido evidence does not block another enrolled product repository',async()=>{
+ const e=setup(),dir=mkdtempSync(join(tmpdir(),'independent-product-review-'));let actual=0;
+ e.c.projects.demo={repo:'example/demo',owners:['builder'],tests:'bun test'};
+ try {
+  const port:CodeReviewPort={pulls:async repo=>{expect(repo).toBe('example/demo');return [{...p(9),baseRefName:'main',url:'https://github.com/example/demo/pull/9'}];},files:async()=>[{filename:'src/widget.ts'}],review:async(pr,source,target,claim)=>{expect(target.repo).toBe('example/demo');actual++;claim();return undefined;}};
+  await reviewProductChanges(e.s,e.c,dir,{'fulmar-hq/alido':'/fake','example/demo':'/fake'},port,now);expect(actual).toBe(1);
  }finally{e.s.close();}
 });

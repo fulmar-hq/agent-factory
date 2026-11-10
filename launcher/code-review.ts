@@ -3,6 +3,8 @@ import {createHash} from 'node:crypto';
 import {readFileSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import type {Config} from './config';
+import {readReleaseBatch} from './release-batch';
+import {toronto} from './release';
 import type {Store} from '../tracking/store';
 import type {BoardPull,PullSnapshot} from '../board/pulls';
 import type {FactoryPull,Challenge} from './factory-maintenance';
@@ -63,10 +65,8 @@ export async function reviewProductChanges(s:Store,c:Config,dir:string,repositor
  // Missing legacy provenance grants no approval and must not prevent an actual
  // independent review of a current green product change.
  const protectedPRs=new Set<number>();let protectedBatch=false,batchError='frozen release packet unavailable';
- const batchPath=join(dir,'release-batch.json');
  try {
-  const batch=JSON.parse(readFileSync(batchPath,'utf8'));
-  if(!Number.isSafeInteger(batch.pr)||batch.pr<1||!Array.isArray(batch.sources)||batch.sources.length>1000||batch.sources.some((p:{number?:number})=>!Number.isSafeInteger(p.number)||p.number! < 1))throw Error('frozen release packet malformed');
+  const batch=readReleaseBatch(dir,toronto(now).day);
   protectedPRs.add(batch.pr);for(const p of batch.sources)protectedPRs.add(p.number);protectedBatch=true;
  }catch(error){batchError=String(error);}
  let claimed=false;

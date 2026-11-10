@@ -3,12 +3,13 @@ import type {Store} from '../tracking/store';
 import {normalizeChallenge,type Challenge} from '../launcher/factory-maintenance';
 import {command} from './github';
 export type RetainedReview=Challenge&{repo?:string;depth?:'standard'|'deep';review:Challenge['review']&{installedGaps?:string[]}};
+export function redactReviewText(value:unknown){return String(value??'').replace(/\/(?:Users|home)\/[^/\n]+/g,'~').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[redacted email]').replace(/\b(?:AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,'[redacted credential]').replace(/\bBearer\s+[A-Za-z0-9._~-]+/gi,'Bearer [redacted]').replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'$1[redacted]');}
 // Native execution and publication are separate durable facts. An unknown POST
 // is reconciled by complete exact-marker readback before another attempt.
 export async function publishRetainedReview(s:Store,repo:string,baseRef:string,eventId:string,result:RetainedReview,execute=command):Promise<boolean> {
  result={...result,...normalizeChallenge(result)};
- const clean=(value:unknown)=>String(value??'').replace(/\/(?:Users|home)\/[^/\n]+/g,'~').replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[redacted email]').replace(/\b(?:AKIA[A-Z0-9]{16}|sk-[A-Za-z0-9_-]{20,})\b/g,'[redacted credential]').replace(/\bBearer\s+[A-Za-z0-9._~-]+/gi,'Bearer [redacted]').replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,'$1[redacted]');
- const excerpt=(value:unknown,limit:number)=>{const text=clean(value);return text.length<=limit?text:text.slice(0,Math.floor(limit*0.7))+' … [excerpt] … '+text.slice(-Math.floor(limit*0.25));};
+
+ const excerpt=(value:unknown,limit:number)=>{const text=redactReviewText(value);return text.length<=limit?text:text.slice(0,Math.floor(limit*0.7))+' … [excerpt] … '+text.slice(-Math.floor(limit*0.25));};
  const findings=Array.isArray(result.review.findings)?result.review.findings:[],gaps=Array.isArray(result.review.installedGaps)?result.review.installedGaps:[];
  const verdict=!result.ok||!result.native?.verified||!result.cleanup?.verified||result.review.verdict==='BLOCKED'?'BLOCKED':result.review.verdict==='PASS'&&findings.length===0&&Array.isArray(result.review.installedGaps)&&gaps.length===0?'PASS':findings.length?'DEFECT':'BLOCKED';
  const budget=Math.floor(54000/Math.max(1,findings.length+gaps.length));
