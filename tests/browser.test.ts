@@ -5,9 +5,17 @@ import { tmpdir } from "node:os";
 import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { config, ticket, admission, now } from "./fixtures";
-import { BrowserNeeded, BrowserResult, queueBrowser, browserJobs, browserDir, reconcileBrowsers, readBrowserJSON, resumeBrowser, type BrowserPorts, type BrowserJob } from "../launcher/browser";
+import { BrowserNeeded, BrowserResult, queueBrowser as queueDetachedBrowser, browserJobs, browserDir, reconcileBrowsers, readBrowserJSON, resumeBrowser, type BrowserPorts, type BrowserJob } from "../launcher/browser";
 import { browserArgs, queueBrowserMail, browserMailAnswer, browserNativeEvidence, verifyBrowserPageReceipt } from "../adapters/browser";
 import { Database } from "bun:sqlite";
+
+// Pre-upgrade fixture: legacy waiting parents must still reconcile safely.
+function queueBrowser(...args:Parameters<typeof queueDetachedBrowser>) {
+ const j=queueDetachedBrowser(...args);delete j.detached;
+ args[0].s.set(`browser-job:${j.id}`,j);
+ args[0].s.db.query("UPDATE sessions SET status='waiting-browser' WHERE id=?").run(j.parent);
+ args[0].s.set(`browser-parent:${j.parent}`,{child:j.id,state:"RW",deadline:j.deadline,default:"not done"});return j;
+}
 
 const request={result:"BROWSER_NEEDED",url:"https://console.example.test/settings",goal:"Read status",noCliApi:"This console exposes no CLI or API for status.",expectedEvidence:"Exact status text"};
 function setup() {

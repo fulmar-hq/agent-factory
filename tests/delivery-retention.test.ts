@@ -262,3 +262,8 @@ for(const lsof of ["p9\ncfixture\nfcwd\n", "p9\ncfixture\nfNOFD\nn/proc/9/fd (op
  f.ports.custody=c=>verifyProcessCustody(c,[f.workspace],processRun([idle],lsof),f.transcript);
  const result=await f.plan();expect(result.result).toBe("blocked");expect(f.files.has(f.workspace)).toBe(true);expect(f.calls.some(c=>c.startsWith("rename:"))).toBe(false);f.s.close();
 });
+
+test("detached local browser check cannot retain a published project copy",async()=>{
+ const f=fixture();f.s.set('browser-job:detached',{parent:f.id,detached:true,state:'running',nativePending:true});
+ expect((await f.plan()).result).toBe('planned');f.s.close();
+});
