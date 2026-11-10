@@ -192,7 +192,7 @@ results['workspace_write']=True
 denied('push_QA_transport',lambda:endpoint('github.com'))
 push=subprocess.run(['/usr/bin/git','-c','http.proxy=','-c','credential.helper=','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
 results['push_QA']=results.pop('push_QA_transport') and results['unsigned_bundle'] and push.returncode!=0 and \
- 'unable to access' in push.stderr.lower() and 'https://github.com/fulmar-hq/alido.git' in push.stderr.lower() and any(s in push.stderr.lower() for s in ['operation not permitted','failed to connect','could not resolve host','couldn\'t connect to server'])
+ 'unable to access' in push.stderr.lower() and 'https://github.com/fulmar-hq/alido.git' in push.stderr.lower() and any(s in push.stderr.lower() for s in ['operation not permitted','failed to connect','could not resolve host',"couldn't connect to server"])
 passed=all(results.values())
 results['policy_denials']={name:errors.get('push_QA_transport' if name=='push_QA' else name,0) for name in ['external_dns','external_ip','push_QA']}
 print(json.dumps(results))
