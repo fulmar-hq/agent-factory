@@ -1,4 +1,4 @@
-"""Protected factory release operations. Never uses workstation credentials.
+"""Protected factory release operations. Deployments never use workstation credentials.
 
 Every external mutation has a unique workflow run; a failed/unknown mutation is
 not retried. The Mini retains its dispatch claim and reconciles this run only.
@@ -280,6 +280,75 @@ def deployed(run, revision):
 
 
 
+
+def production_readiness_json(c, service, operation, arguments=()):
+    """Exact existing read-only SSO profile; never renew or deploy with it."""
+    validate(c, effect=False)
+    remaining = c['deadline'] / 1000 - time.time()
+    if remaining <= 0:
+        raise TimeoutError('Release deadline expired before Production readiness read')
+    allowed = {('sts', 'get-caller-identity'), ('ec2', 'describe-instances'),
+               ('rds', 'describe-db-instances'), ('ssm', 'describe-instance-information')}
+    if (service, operation) not in allowed:
+        raise ValueError('Production readiness permits only exact read operations')
+    command = ['aws', service, operation, '--profile', 'fulmar-production',
+               '--region', 'ca-central-1', '--output', 'json', *arguments]
+    result = subprocess.run(command, text=True, capture_output=True,
+                            timeout=min(15, remaining), check=False)
+    if result.returncode:
+        raise RuntimeError('Production readiness read failed: ' + service + '/' + operation)
+    validate(c, effect=False)
+    return json.loads(result.stdout)
+
+
+def production_readiness(c):
+    """Wait only within the admitted promotion deadline for cold-host recovery.
+
+    This is metadata readiness, never deployment/source/health acceptance. No
+    start, SSM command, fallback deployment credential or sign-in is supplied.
+    """
+    account, instance, database = '329195319812', 'i-07ecd4144f6823c7a', 'alido-production-db'
+    def read():
+        identity = production_readiness_json(c, 'sts', 'get-caller-identity')
+        if identity.get('Account') != account:
+            raise ValueError('Production readiness account differs')
+        ec2 = production_readiness_json(c, 'ec2', 'describe-instances',
+                                        ['--instance-ids', instance])
+        reservations = ec2.get('Reservations')
+        if not isinstance(reservations, list) or any(not isinstance(row, dict) or not isinstance(row.get('Instances'), list) for row in reservations):
+            raise ValueError('Production readiness EC2 inventory malformed')
+        hosts = [host for row in reservations for host in row['Instances']]
+        if len(hosts) != 1 or not isinstance(hosts[0], dict) or hosts[0].get('InstanceId') != instance:
+            raise ValueError('Production readiness exact host missing or ambiguous')
+        host_state = hosts[0].get('State', {}).get('Name')
+        if host_state not in ('stopped', 'pending', 'running', 'stopping'):
+            raise ValueError('Production readiness host state invalid')
+        rds = production_readiness_json(c, 'rds', 'describe-db-instances',
+                                        ['--db-instance-identifier', database])
+        databases = rds.get('DBInstances')
+        if not isinstance(databases, list) or len(databases) != 1 or not isinstance(databases[0], dict) or databases[0].get('DBInstanceIdentifier') != database:
+            raise ValueError('Production readiness exact database missing or ambiguous')
+        db_state = databases[0].get('DBInstanceStatus')
+        if db_state not in ('stopped', 'starting', 'available', 'stopping', 'configuring-enhanced-monitoring', 'modifying', 'backing-up', 'maintenance', 'rebooting'):
+            raise ValueError('Production readiness database state invalid')
+        ssm = production_readiness_json(c, 'ssm', 'describe-instance-information',
+                                        ['--filters', json.dumps([{'Key': 'InstanceIds', 'Values': [instance]}])])
+        agents = ssm.get('InstanceInformationList')
+        if not isinstance(agents, list) or len(agents) > 1 or any(not isinstance(row, dict) or row.get('InstanceId') != instance for row in agents):
+            raise ValueError('Production readiness SSM inventory differs')
+        ping = agents[0].get('PingStatus') if agents else 'not-registered'
+        if ping not in ('Online', 'ConnectionLost', 'Inactive', 'not-registered'):
+            raise ValueError('Production readiness SSM state invalid')
+        ready = host_state == 'running' and db_state == 'available' and ping == 'Online'
+        validate(c, effect=False)
+        proof = {'account': account, 'instance': instance, 'database': database,
+                 'ec2': host_state, 'rds': db_state, 'ssm': ping,
+                 'ready': ready, 'observedAt': int(time.time() * 1000)}
+        journal('production-readiness', proof)
+        return proof if ready else None
+    return wait(c, read)
+
+
 def accepted(c):
     a = c['acceptance']
     if not isinstance(a, dict) or any(a.get(k) != c[k] for k in ('day', 'revision', 'tree')) or a.get('verdict') != 'ACCEPT':
@@ -445,13 +514,15 @@ def run(c):
                 raise RuntimeError('Promotion check failed')
             return current
         wait(c, checks)
+        readiness = production_readiness(c)
         validate(c, effect=False)
         guard(c, c['hold_id'], True)
+        validate(c, effect=False)
         merged = api('pulls/' + str(pull['number']) + '/merge', 'PUT', {'sha': c['revision'], 'merge_method': 'squash'})
         main = merged['sha']
         if not merged['merged'] or tree(main) != c['tree']:
             raise RuntimeError('Protected promotion tree differs')
-        result = {'main': main, 'promotion': pull['number'], 'artifact': a['artifact']}
+        result = {'main': main, 'promotion': pull['number'], 'artifact': a['artifact'], 'productionReadiness': readiness}
     else:
         raise ValueError('Remote readback only')
     validate({**c, 'revision': original_revision}, effect=False)

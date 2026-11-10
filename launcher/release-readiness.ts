@@ -1,3 +1,4 @@
+import {ownerRuntimeKey} from './wake';
 import {Database} from 'bun:sqlite';
 import {createHash} from 'node:crypto';
 import {existsSync} from 'node:fs';
@@ -46,8 +47,8 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
  const now=o.now??Date.now(),day=toronto(now).day,validThrough=deadlineAt(now,1350);
  const report:ReleaseReadiness={day,at:now,validThrough,ready:false,missing:[],evidence:{}};
  const execute=o.execute??command,readJSON=o.readJSON??optionalJSON;
- let effectiveQuality=o.config.owners.quality;
- try{effectiveQuality=(await acceptanceProfile(o.config,o.dir,day,validThrough,readJSON)).role;}catch(error){report.missing.push({input:'quality qualification',reason:String(error)});}
+ let effectiveQuality=o.config.owners.quality,acceptanceOverride=false;
+ try{const effective=await acceptanceProfile(o.config,o.dir,day,validThrough,readJSON);effectiveQuality=effective.role;acceptanceOverride=!!effective.ticket;}catch(error){report.missing.push({input:'quality qualification',reason:String(error)});}
  const missing=(input:string,reason:string)=>report.missing.push({input,reason});
  const check=async(input:string,f:()=>unknown|Promise<unknown>)=>{try{report.evidence[input]=await f();}catch(error){missing(input,String(error));}};
  const api=async(path:string)=>JSON.parse(await execute(['gh','api','--method','GET',`repos/${repo}/${path}`]));
@@ -89,7 +90,7 @@ export async function collectReleaseReadiness(o:ReadinessOptions):Promise<Releas
    return {checkedAt:now};
   }),
   check('Quality runner',()=>{
-   const r=o.store.get<{workspace?:string;wake?:string;pid?:number;identity?:string}>('owner-runtime:quality');
+   const r=o.store.get<{workspace?:string;wake?:string;pid?:number;identity?:string}>(acceptanceOverride?ownerRuntimeKey({owner:'quality',kind:'qa-deployed'}):'owner-runtime:quality');
    if(!r||!r.workspace||!existsSync(r.workspace))throw Error('Quality has no registered existing workspace');
    // Match dispatchWake's start-identity gate. A missing identity cannot
    // prove an old owner exited; a same-identity PID still owns the runtime.

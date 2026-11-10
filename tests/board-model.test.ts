@@ -1,7 +1,7 @@
 import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { boardModel, plainText } from "../board/model";
 import { intakeLabel, reconcile, type Issue } from "../adapters/github";
 import { githubWakes } from "../launcher/wake";

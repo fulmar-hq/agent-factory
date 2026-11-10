@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ConfigSchema} from '../launcher/config';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {Store} from '../tracking/store';
 import {supply,expireDecisions,type IntakeRound} from '../launcher/autonomy';
 import {observeSupplyIdle,type SupplyIdle} from '../launcher/supply-idle';

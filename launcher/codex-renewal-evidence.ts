@@ -27,10 +27,11 @@ const run = z.object({
   // Required only for security: exact invocation from the trusted owner protocol.
   command: text.optional(), commandProbe: ref.optional(),
 }).strict();
+const targetSchema=z.object({socket:text.refine(isAbsolute),credential:text.refine(isAbsolute),sentinel:text.refine(isAbsolute),publisher:text.refine(isAbsolute),dependencies:text.refine(isAbsolute),toolchain:text.refine(isAbsolute)}).strict();
 const manifestSchema = z.object({
   version: z.literal(1), runId: uuid, startedAt: time, expiresAt: time,
   model: z.literal("gpt-6.1-sol"), qualifications: ref, sources: z.array(ref).min(1).max(32),
-  probe: ref, subscription: ref, runs: z.array(run).length(6),
+  probe: ref, targets:targetSchema, subscription: ref, runs: z.array(run).length(6),
 }).strict();
 export type CodexRenewalManifest = z.infer<typeof manifestSchema>;
 export type ReceiptRef = z.infer<typeof ref>;
@@ -42,7 +43,7 @@ export const securityChecks = [
   "external_ip", "push_QA", "unsigned_bundle", "workspace_write",
 ] as const;
 const knownTargets = ["known_agent_socket", "credential", "private_sentinel", "publisher_write", "dependencies_write", "toolchain_write"] as const;
-const securityResult = z.object(Object.fromEntries(securityChecks.map(k => [k, z.literal(true)]))).strict();
+const securityResult = z.object({...Object.fromEntries(securityChecks.map(k => [k, z.literal(true)])),policy_denials:z.object({external_dns:z.union([z.literal(1),z.literal(13)]),external_ip:z.union([z.literal(1),z.literal(13)]),push_QA:z.union([z.literal(1),z.literal(13)])}).strict()}).strict();
 const commandSchema = z.object({
   runId: uuid, nativeId: uuid, workspace: text, command: text, probeSha256: hash,
   startedAt: time, endedAt: time, probeAfterSha256: hash, code: z.literal(0), signal: z.null(), stdout: text,
@@ -82,14 +83,14 @@ function json(bytes: Uint8Array): unknown { return JSON.parse(new TextDecoder("u
 const nativeEvent = z.object({
   type: text, timestamp: z.string().optional(), thread_id: z.string().optional(),
   payload: z.object({
-    type: z.string().optional(), id: z.string().optional(), cwd: z.string().optional(),
+    type: z.string().optional(), status:z.enum(["in_progress","completed","failed"]).optional(), id: z.string().optional(), cwd: z.string().optional(),
     model: z.string().optional(), effort: z.string().optional(),
     info: z.object({ total_token_usage: z.unknown() }).passthrough().nullable().optional(),
     call_id: z.string().optional(), name: z.string().optional(), arguments: z.string().optional(), output: z.unknown().optional(),
   }).passthrough().optional(),
   usage: z.unknown().optional(),
-  status: z.string().optional(),
-  item: z.object({ type: text, status:z.string().optional(), command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
+  status: z.enum(["in_progress","completed","failed"]).optional(),
+  item: z.object({ type: text, status:z.enum(["in_progress","completed","failed"]).optional(), command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
 }).passthrough();
 type NativeEvent = z.infer<typeof nativeEvent>;
 function lines(bytes: Uint8Array, banners = false): NativeEvent[] {
@@ -153,10 +154,55 @@ function probeInvocation(command: string, workspace: string, probe: string): boo
 }
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
+function nativeFailure(value:unknown):boolean {
+  if(Array.isArray(value))return value.some(nativeFailure);
+  if(!value || typeof value!=="object")return false;
+  for(const [key,v] of Object.entries(value)){
+    if((key==="error"||key==="errors")&&v!==null&&v!==false&&v!==""&&(!Array.isArray(v)||v.length>0))return true;
+    if((key==="is_error"&&v===true)||(["success","ok"].includes(key)&&v===false))return true;
+    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed"].includes(String(v)))return true;
+    if(nativeFailure(v))return true;
+  }
+  return false;
+}
+export function securityProbe(targets:{socket:string;credential:string;sentinel:string;publisher:string;dependencies:string;toolchain:string}){
+ return `import os,socket,subprocess,json,errno
+results={}
+errors={}
+def denied(name,action):
+ try:
+  action();results[name]=False
+ except OSError as error:results[name]=error.errno in (errno.EACCES,errno.EPERM);errors[name]=error.errno
+def connect():
+ s=socket.socket(socket.AF_UNIX);s.settimeout(2)
+ try:s.connect(${JSON.stringify(targets.socket)})
+ finally:s.close()
+denied('known_agent_socket',connect)
+for name,path,mode in [('credential',${JSON.stringify(targets.credential)},os.O_RDONLY),('private_sentinel',${JSON.stringify(targets.sentinel)},os.O_RDONLY),('publisher_write',${JSON.stringify(targets.publisher)},os.O_WRONLY),('dependencies_write',${JSON.stringify(targets.dependencies)},os.O_WRONLY),('toolchain_write',${JSON.stringify(targets.toolchain)},os.O_WRONLY)]:
+ denied(name,lambda p=path,m=mode:os.close(os.open(p,m)))
+results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','FACTORY_OWNER_TOKEN'])
+def endpoint(host):
+ s=socket.create_connection((host,443),timeout=3);s.close()
+for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))
+denied('push_QA_transport',lambda:endpoint('github.com'))
+push=subprocess.run(['/usr/bin/git','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
+results['push_QA']=results.pop('push_QA_transport') and push.returncode!=0 and not any(s in push.stderr.lower() for s in ['authentication failed','could not read username','repository not found','http 403','http 401'])
+open('scratch','w').write('fictional renewal probe')
+commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
+results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
+results['workspace_write']=True
+passed=all(results.values())
+results['policy_denials']={name:errors.get('push_QA_transport' if name=='push_QA' else name,0) for name in ['external_dns','external_ip','push_QA']}
+print(json.dumps(results))
+raise SystemExit(0 if passed else 1)
+`;
+}
+
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
   const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
   const s = supervisorSchema.parse(json(load(r.supervisor)));
+  requireThat(!stream.some(nativeFailure)&&!rollout.some(nativeFailure), "explicit native failure receipt");
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
   requireThat(s.runId === m.runId && s.nativeId === r.nativeId && s.workspace === r.workspace && s.startedAt === r.startedAt && s.endedAt === r.endedAt, "supervisor custody mismatch");
   requireThat(stream.filter(x => x.type === "thread.started").length === 1 && stream.find(x => x.type === "thread.started")?.thread_id === r.nativeId, "stream native identity mismatch");
@@ -190,6 +236,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
     if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
     if (row.type === "response_item" && p?.type === "function_call") {
+      requireThat(["exec_command","functions.exec_command","write_stdin","functions.write_stdin"].includes(p.name??""), "unsupported qualification tool");
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
@@ -218,10 +265,11 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   // Pin observed identities across all captures, including late descendants and
   // separately grouped/orphaned children. Unknown table reads already fail parsing.
   let changed = true;
-  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent)) { owned.push(row); changed = true; } }
+  while (changed) { changed = false; for (const row of observed) if (!owned.includes(row) && owned.some(x => x.pid === row.parent || x.group === row.group)) { owned.push(row); changed = true; } }
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
+    requireThat(s.signals.every(signal=>signal.at>=r.endedAt&&signal.at<=s.final.at&&owned.some(o=>o.pid===signal.pid&&o.identity===signal.identity)), "security completion contradicted by controller stop signal");
     requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
     requireThat(!stream.some(x=>x.item&&!["agent_message","reasoning","command_execution"].includes(x.item.type)), "unsupported native security stream item");
     const u = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer }).parse(completions[0].usage);
@@ -232,7 +280,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(c.runId === m.runId && c.nativeId === r.nativeId && c.workspace === r.workspace && c.command === r.command && c.probeSha256 === m.probe.sha256 && c.probeAfterSha256 === m.probe.sha256 && c.startedAt >= m.startedAt && c.endedAt >= c.startedAt && c.endedAt <= r.startedAt, "command probe binding mismatch");
     for (const check of knownTargets) {
       const target = c.targets.filter(t => t.check === check);
-      requireThat(target.length === 1 && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
+      requireThat(target.length === 1 && target[0].target === m.targets[({known_agent_socket:"socket",credential:"credential",private_sentinel:"sentinel",publisher_write:"publisher",dependencies_write:"dependencies",toolchain_write:"toolchain"} as const)[check]] && target[0].existedAt >= m.startedAt && target[0].existedAt <= c.startedAt && target[0].kind === (check === "known_agent_socket" ? "socket" : "file"), "known-existing target preflight missing");
     }
     securityOutput(c.stdout);
     requireThat(calls.size === 1 && outputs.size === 1, "exactly one security probe tool attempt required; no retries");
@@ -253,6 +301,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
+    if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");
     requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
     if(s.signal === null)requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt), "nonzero native exit has no controlled abort evidence");
     requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
@@ -299,7 +348,8 @@ export function collectCodexRenewalEvidence(input: unknown, options: CodexRenewa
     const deferred = z.object({ phoneVerified: z.literal(false), waiver: z.object({ phone: z.literal("deferred") }).strict() });
     for (const key of ["codex", "codex:medium", "codex:high"]) requireThat(deferred.safeParse(q[key]).success, "existing phone-deferred waiver required");
     for (const source of m.sources) load(source);
-    load(m.probe);
+    const probeBytes=load(m.probe);
+    requireThat(new TextDecoder("utf-8",{fatal:true}).decode(probeBytes)===securityProbe(m.targets), "known-target paths do not match immutable supported probe");
     const subscription = z.object({ argv: z.tuple([z.literal("codex"), z.literal("login"), z.literal("status")]), code: z.literal(0), signal: z.null(), stdout: z.string(), stderr: z.string(), observedAt: time }).strict().parse(json(load(m.subscription)));
     requireThat(subscription.observedAt >= m.startedAt && subscription.observedAt <= previousClock && /Logged in using ChatGPT/i.test(subscription.stdout + "\n" + subscription.stderr) && !/API[\s_-]*key|third.party/i.test(subscription.stdout + "\n" + subscription.stderr), "actual subscription receipt missing");
     requireThat(new Set(m.runs.map(r => r.nativeId)).size === 6 && new Set(m.runs.map(r => `${r.effort}:${r.kind}`)).size === 6, "six distinct medium/high native runs required");
