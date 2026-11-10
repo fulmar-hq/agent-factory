@@ -17,6 +17,14 @@ export const ConfigSchema = z.object({
     missed_window: z.literal("next_day"),
   }),
   owners: z.record(z.string(), role),
+  review_process: z.object({
+    rule: z.literal("one independent exact-head review on the same ticket and PR after green checks; never refill work"),
+    historical_receipts: z.enum(["pending","verified"]).optional(),
+    standard_minutes: z.literal(15),
+    deep_minutes: z.literal(30),
+    deep_when: z.literal("tenant separation, consent, sends, bookings, permissions, money or migrations"),
+  }).optional(),
+  refill: z.object({rule:z.literal("product tasks only from the real backlog; never review or acceptance tickets"), report_mix:z.literal(true)}).optional(),
   model_override: z.literal("per_ticket_wins_then_per_role").optional(),
   usage_gates: z.object({
     admit_below: z.literal(0.7),

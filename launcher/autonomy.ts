@@ -126,7 +126,7 @@ export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObs
   return {id:r.id,title:i.title.slice(0,180),state:i.state,labels:i.labels.filter(l=>/^(state|area|kind):/.test(l.name)).slice(0,8).map(l=>({name:l.name.slice(0,80)})),scope:i.body?.match(/```factory\s*\n([\s\S]*?)\n```/)?.[1].slice(0,1200),pr,checks:pr ? e.s.get(`board-pr:${pr}`) : undefined};
  }).filter(i=>i.state==='OPEN');
  const review=existing.filter(i=>i.labels.some(l=>l.name==='state:review'));
- const brief='Free capacity is work to staff. Review-state issues need bounded review, challenge or fix-up tasks tied to their existing issue/PR; do not wait for the whole review queue or invent new scope. Inspect current evidence, avoid duplicate/occupied paths, and return source-backed factory briefs with executable checks. A rejected/defaulted proposal stays unapproved. Report concrete blockers if no safe leaf exists; the launcher retries with backoff.';
+ const brief=e.c.refill ? 'Free capacity goes to product tasks from the existing real backlog only: multi-staff and mixed-calendar booking, Outlook, Leads, onboarding, Settings and reply quality first. No review, challenge or acceptance issues. Review is automatic on the original PR after green checks. Return product/other mix; empty intake is valid.' : 'Free capacity is work to staff. Review-state issues need bounded review, challenge or fix-up tasks tied to their existing issue/PR; do not wait for the whole review queue or invent new scope. Inspect current evidence, avoid duplicate/occupied paths, and return source-backed factory briefs with executable checks. A rejected/defaulted proposal stays unapproved. Report concrete blockers if no safe leaf exists; the launcher retries with backoff.';
  queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,brief,idleSince:idle?.since,free:e.slots().free,refusals:observation?.refusals.slice(0,20).map(r=>({...r,reason:r.reason.slice(0,500)})),reviewCount:review.length,existing:[...review,...existing.filter(i=>!review.includes(i))].slice(0,50),existingCount:existing.length,occupied:e.active().slice(0,12).map(x=>({id:x.id,ticket:x.ticket,paths:(JSON.parse(x.brief) as Ticket).paths.slice(0,30)}))}},now);
  markIdleWake(round.wake);
 }
@@ -170,7 +170,7 @@ function artifact(scratch:string,name:string):unknown {
  const fd=openSync(join(scratch,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
  try {const stat=fstatSync(fd);if(!stat.isFile() || stat.size>128*1024)throw Error('bounded regular result required');return JSON.parse(readFileSync(fd,'utf8'));}finally{closeSync(fd);}
 }
-const Intake=z.object({tickets:z.array(z.object({repo:z.string(),title:z.string().min(1).max(100),brief:z.record(z.string(),z.unknown())})).max(15)}).strict();
+const Intake=z.object({tickets:z.array(z.object({repo:z.string(),title:z.string().min(1).max(100),brief:z.record(z.string(),z.unknown())})).max(15),mix:z.object({product:z.number().int().nonnegative(),other:z.number().int().nonnegative()}).strict().optional()}).strict();
 const Retry=z.object({session:z.string(),diagnosis:z.string().min(20),estimateBasis:z.string().min(20),test:z.string().min(1),outcome:z.string().min(1)}).strict();
 // Only a completed, native-verified wake with independently verified cleanup can
 // propose effects. Files are data, never controller commands or credentials.
@@ -179,14 +179,21 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
  const wakes=(e.s.db.query("SELECT value FROM kv WHERE key LIKE 'owner-wake:%'").all() as {value:string}[]).map(r=>JSON.parse(r.value) as Wake & {state:string;cleanupVerified?:boolean;scratch?:string});
  for(const w of wakes) {
   if(w.state!=='done' || !w.cleanupVerified || !w.scratch || !['product-intake','failure-diagnosis'].includes(w.kind) || e.s.get(`owner-result:${w.id}`))continue;
+  let resultMix:{product:number;other:number}|undefined;
   try {
    if(w.kind==='product-intake') {
     const data=Intake.parse(artifact(w.scratch,'intake.json'));
     const round=(w.payload as {round:string}).round;
+    resultMix=data.mix;
+    if(e.c.refill) {
+     if(!data.mix || data.mix.product!==data.tickets.length || data.mix.other!==0)throw Error('refill product/other mix must match product-only tickets');
+     for(const proposal of data.tickets)await enforceIntakeMode(e,proposal.repo,{...proposal.brief,title:proposal.title},dir,execute);
+     e.s.event(`refill-mix:${w.id}`,'refill-mix',{id:w.id,round,mix:data.mix},undo,now);
+    }
     for(let n=0;n<data.tickets.length;n++) {
      const proposal=data.tickets[n],key=`proposal:${w.id}:${n}`;
      const project=Object.values(e.c.projects).find(p=>p.repo===proposal.repo && p.owners.includes(w.owner));if(!project)throw Error('proposal project/owner not enrolled');
-     const brief:Record<string,unknown>={...proposal.brief,owner:w.owner,creator:`launcher:${w.id}`,source:`factory-event:${w.id}`,approved:true};
+     const brief:Record<string,unknown>={...proposal.brief,title:proposal.title,owner:w.owner,creator:`launcher:${w.id}`,source:`factory-event:${w.id}`,approved:true};
      const fake:Issue={number:1,title:proposal.title,body:'```factory\n'+JSON.stringify(brief,null,2)+'\n```',url:'',updatedAt:'',state:'OPEN',labels:[{name:`kind:${String(brief.kind)}`},{name:`area:${String(brief.area)}`} ]};
      const t=prospective(proposal.repo,fake);executableTest(t.test);
      await enforceIntakeMode(e,proposal.repo,brief,dir,execute);
@@ -213,10 +220,10 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
     if(data.session!==payload.session)throw Error('diagnosis session mismatch');
     await retryFailure(e,data,now,execute);
    }
-   e.s.set(`owner-result:${w.id}`,{at:now,applied:true});
+   e.s.set(`owner-result:${w.id}`,{at:now,applied:true,...(resultMix?{mix:resultMix}:{})});
   } catch(error) {
    e.s.event(`owner-result-refused:${w.id}:${hash(String(error))}`,'owner-result-refused',{id:w.id,error:String(error)},undo,now);
-   if(w.kind!=='failure-diagnosis')e.s.set(`owner-result:${w.id}`,{at:now,applied:false});
+   if(w.kind!=='failure-diagnosis')e.s.set(`owner-result:${w.id}`,{at:now,applied:false,...(resultMix?{mix:resultMix}:{})});
    ownerDecision(e.s,e.c,`result:${w.id}`,w.owner,'Owner result could not be applied',{wake:w.id,error:String(error)},now);
   }
  }
@@ -274,7 +281,7 @@ export async function autoApprove(e:Engine,ready:Ticket[],billing:Billing|undefi
   const r=e.s.get<string>(`proposal-round:${row.id}`) ?? round;
   try {
    t=prospective(repo,i);
-   await enforceIntakeMode(e,repo,block(i),dir,execute);
+   await enforceIntakeMode(e,repo,{...block(i),title:i.title},dir,execute);
    if(e.s.db.query("SELECT id FROM events WHERE id=?").get(`auto-approved:${row.id}:${t.approvalDigest}`)){others.push(t);continue;}
    const refusal=policyRefusal(e,t,block(i),r,billing,now,others);
    if(refusal)throw Error(refusal);
