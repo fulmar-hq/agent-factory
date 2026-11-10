@@ -42,6 +42,8 @@ class Safety(unittest.TestCase):
   def run(files,process=ps):
    with patch.object(m,'command',side_effect=[process,files,process]):return m.quiet([self.repo])
   self.assertTrue(run(complete))
+  self.assertTrue(run(complete+'ftwd\ntDIR\nn/other-thread-cwd\nffp.\ntREG\nn/other-fileport\n'))
+  self.assertFalse(run(complete+'ftwd\ntDIR\nn'+str(self.repo)+'\n'))
   for kind in ['PIPE','NPOLICY','NEXUS']:
    self.assertTrue(run(complete+f'f9\nt{kind}\nn\n'))
   for kind in ['REG','DIR','unknown']:

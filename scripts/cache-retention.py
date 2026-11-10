@@ -77,7 +77,7 @@ def quiet(paths):
             cmd = True
         elif line.startswith('f'):
             finish_file()
-            if not cmd or not re.fullmatch(r'f(?:cwd|rtd|txt|mem|DEL|[0-9]+[a-z]*)', line):
+            if not cmd or not re.fullmatch(r'f(?:cwd|twd|fp\.|rtd|txt|mem|DEL|[0-9]+[a-z]*)', line):
                 raise RuntimeError('unavailable descriptor inventory')
             descriptor, kind, named = line[1:], None, False
         elif line.startswith('t'):
