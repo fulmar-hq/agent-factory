@@ -7,7 +7,7 @@ import {workerSpec,materializeSettings,WorkerAccounting,claudeSettings} from '..
 import {NativeReceipt} from '../adapters/native';
 import {spawnWorker} from './child';
 import {processIdentity} from './process';
-import {type Wake,type OwnerRuntime} from './wake';
+import {ownerRuntimeKey,type Wake,type OwnerRuntime} from './wake';
 import {recordAcceptance} from './release';
 import {admitAcceptance,assertIndependent} from './acceptance-profile';
 import {collectHostedAcceptance,type HostedContext} from '../adapters/hosted-acceptance';
@@ -43,8 +43,8 @@ export async function runOwner(id:string,dir=root) {
  try {
   const claimed=s.atomic(()=>{
    const w=s.get<Wake & {state:string}>(`owner-wake:${id}`);if(w?.state!=='starting')return null;
-   const r=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);if(!r || r.wake!==id || r.pid)return null;
-   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(`owner-runtime:${w.owner}`,{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
+   const r=s.get<OwnerRuntime>(ownerRuntimeKey(w));if(!r || r.wake!==id || r.pid)return null;
+   s.set(`owner-wake:${id}`,{...w,state:'running'});s.set(ownerRuntimeKey(w),{...r,pid:process.pid,identity:processIdentity(process.pid)});return {w,r};
   });
   if(!claimed)return;
   wake=claimed.w;runtime=claimed.r;
@@ -99,7 +99,7 @@ export async function runOwner(id:string,dir=root) {
   timer=setInterval(sample,500);
   let pending='';for await(const chunk of child.stdout){writeSync(fd,chunk);pending+=new TextDecoder().decode(chunk);let end:number;
    while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);const event=accounting.ingest(t.provider,line);
-    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,Date.now());s.set(`owner-runtime:${wake.owner}`,{...s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`),native});}
+    if(event.native){if(native && native!==event.native)throw Error('owner native ID changed');native=event.native;receipt ??=new NativeReceipt(t.provider,native,runtime.workspace,spec.env.HOME,Date.now());s.set(ownerRuntimeKey(wake),{...s.get<OwnerRuntime>(ownerRuntimeKey(wake)),native});}
     if(event.done)done=true;sample();
    }
   }
@@ -121,7 +121,7 @@ export async function runOwner(id:string,dir=root) {
   if(timer)clearInterval(timer);
   if(onSignal){process.off("SIGTERM",onSignal);process.off("SIGINT",onSignal);}
   try{if(child){await child.stop();await child.exited;}}
-  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(`owner-runtime:${wake.owner}`);if(r?.wake===id)s.set(`owner-runtime:${wake.owner}`,{...r,pid:undefined,identity:undefined});}s.close();}
+  finally{if(fd!==undefined)closeSync(fd);if(wake && (!child || child.cleanup.verified)){s.set(`owner-wake:${id}`,{...s.get(`owner-wake:${id}`) as object,cleanupVerified:true});const r=s.get<OwnerRuntime>(ownerRuntimeKey(wake));if(r?.wake===id)s.set(ownerRuntimeKey(wake),{...r,pid:undefined,identity:undefined});}s.close();}
  }
 }
 if(import.meta.main)await runOwner(process.argv[2]);
