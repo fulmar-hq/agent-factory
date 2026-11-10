@@ -29,7 +29,7 @@ async function rawCommand(args: string[], cwd?: string, timeoutMs=30000) {
       new Response(p.stderr).text(),
       p.exited,
     ]);
-    if(args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??'') && !args.includes('rate_limit'))recordGithubHttp(err,out);
+    if(args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??''))recordGithubHttp(err,out);
     const diagnostic=args[0]==='gh' ? githubDiagnostic(err) : err;
     if (code !== 0) {
       const error=Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);

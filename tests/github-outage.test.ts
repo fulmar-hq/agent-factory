@@ -64,6 +64,24 @@ test('shared cooldown survives new stores and debug accounting retains only requ
  }finally{rmSync(dir,{recursive:true});}
 });
 
+test('rate-limit recovery accounts for the quota-reset HTTP request without blocking it',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'factory-gh-quota-count-')),bin=join(dir,'bin'),calls=join(dir,'calls'),prior=process.env.PATH;
+ mkdirSync(bin);writeFileSync(join(bin,'gh'),`#!/bin/sh\necho call >> '${calls}'\nif [ "$2" = rate_limit ]; then\n echo '> GET /rate_limit HTTP/1.1' >&2\n echo '{"resources":{"core":{"remaining":0,"reset":2000000000}}}'\nelse\n echo '> GET /repos/example/demo/issues HTTP/1.1' >&2\n echo 'gh: API rate limit exceeded (HTTP 403)' >&2\n exit 1\nfi\n`,{mode:0o700});process.env.PATH=bin;
+ try{
+  await githubContext.run(dir,async()=>{
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toBeInstanceOf(GitHubUnavailable);
+   await expect(github.command(['gh','api','repos/example/demo/issues'])).rejects.toThrow('GitHub backoff');
+  });
+  const physical=readFileSync(calls,'utf8').trim().split('\n').length;
+  expect(physical).toBe(2);
+  const s=new Store(join(dir,'controller.sqlite'));try{
+   const rows=s.db.query("SELECT value FROM kv WHERE key LIKE 'github-calls:%'").all() as {value:string}[];
+   expect(rows.reduce((sum,row)=>sum+Number(JSON.parse(row.value).requests??0),0)).toBe(physical);
+   expect(s.get<{retryAt:number}>('github-backoff')?.retryAt).toBe(2000000000000+1000);
+  }finally{s.close();}
+ }finally{process.env.PATH=prior;rmSync(dir,{recursive:true});}
+});
+
 test('the actual gh connectivity diagnostic is classified before debug sanitizing and backs off across calls',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'factory-gh-offline-')),bin=join(dir,'bin'),calls=join(dir,'calls'),old=process.env.PATH;
  mkdirSync(bin);writeFileSync(join(bin,'gh'),`#!/bin/sh\necho call >> '${calls}'\necho 'error connecting to api.github.com' >&2\necho 'check your internet connection or https://www.githubstatus.com' >&2\nexit 1\n`,{mode:0o700});process.env.PATH=bin;
