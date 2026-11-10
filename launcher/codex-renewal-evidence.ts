@@ -160,7 +160,7 @@ function nativeFailure(value:unknown):boolean {
   for(const [key,v] of Object.entries(value)){
     if((key==="error"||key==="errors")&&v!==null&&v!==false&&v!==""&&(!Array.isArray(v)||v.length>0))return true;
     if((key==="is_error"&&v===true)||(["success","ok"].includes(key)&&v===false))return true;
-    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed"].includes(String(v)))return true;
+    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed","refusal"].includes(String(v)))return true;
     if(nativeFailure(v))return true;
   }
   return false;
@@ -241,7 +241,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
     if (row.type === "response_item" && p?.type === "function_call_output") {
-      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
+      requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); try{requireThat(!nativeFailure(JSON.parse(p.output)), "structured native tool failure");}catch(error){if(!(error instanceof SyntaxError))throw error;}
+      requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
     }
   }
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
