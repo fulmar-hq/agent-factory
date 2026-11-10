@@ -7,7 +7,17 @@ PROTECTED = {'.git', '.factory-tmp', 'receipts', 'evidence', 'transcripts', 'log
              'test-results', 'playwright-report', 'coverage', 'artifacts'}
 
 
-def command(args, allowed=(0,)):
+def command(args, allowed=(0,), with_pid=False):
+    if with_pid:
+        child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill(); child.communicate()
+            raise RuntimeError("process inventory timed out")
+        if child.returncode != 0 or err.strip() or not out.strip():
+            raise RuntimeError("process inventory unavailable")
+        return out, child.pid
     p = subprocess.run(args, capture_output=True, text=True, timeout=5 if args[0] in {'/bin/ps', '/usr/sbin/lsof'} else 120,
                        env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
     if p.returncode not in allowed or p.stderr.strip():
@@ -28,7 +38,7 @@ def evidence(name):
 
 def quiet(paths):
     def processes():
-        out = command(['/bin/ps', '-ww', '-axo', 'uid=,pid=,stat=,command='])
+        out, probe_pid = command(['/bin/ps', '-ww', '-axo', 'uid=,pid=,stat=,command='], with_pid=True)
         if not out.strip():
             raise RuntimeError('empty process inventory')
         rows = {}
@@ -37,7 +47,7 @@ def quiet(paths):
             if len(fields) != 4 or not fields[0].isdigit() or not fields[1].isdigit():
                 raise RuntimeError('partial process inventory')
             uid, pid, state, args = fields
-            if int(uid) != os.getuid() or state.startswith('Z'):
+            if int(uid) != os.getuid() or state.startswith('Z') or int(pid) == probe_pid:
                 continue
             rows[int(pid)] = args
             if int(pid) != os.getpid() and any(str(p) in args for p in paths):
@@ -56,21 +66,23 @@ def quiet(paths):
     kind = None
     named = False
     cwd = False
+    executable = False
+    ordinary_fd = False
     def finish_file():
         if descriptor is not None and not named:
             raise RuntimeError('incomplete descriptor name')
     def finish_process():
         finish_file()
         if pid is not None:
-            if not cmd or not cwd:
-                raise RuntimeError('incomplete command/cwd evidence')
+            if not cmd or not cwd or not executable or not ordinary_fd:
+                raise RuntimeError('incomplete command/cwd/descriptor evidence')
             seen.add(pid)
     for line in files.splitlines():
         if line.startswith('p'):
             finish_process()
             if not re.fullmatch(r'p[1-9][0-9]*', line):
                 raise RuntimeError('partial file process identity')
-            pid, cmd, descriptor, kind, named, cwd = int(line[1:]), False, None, None, False, False
+            pid, cmd, descriptor, kind, named, cwd, executable, ordinary_fd = int(line[1:]), False, None, None, False, False, False, False
         elif line.startswith('c'):
             if pid is None or cmd or descriptor is not None or len(line) < 2:
                 raise RuntimeError('partial file command')
@@ -93,6 +105,8 @@ def quiet(paths):
                 raise RuntimeError('unavailable descriptor name')
             named = True
             cwd = cwd or descriptor == 'cwd'
+            executable = executable or descriptor == 'txt'
+            ordinary_fd = ordinary_fd or bool(re.fullmatch(r'[0-9]+[a-z]*', descriptor))
             name = line[1:].removesuffix(' (deleted)')
             if any(name == str(p) or name.startswith(str(p) + '/') for p in paths):
                 return False
@@ -102,8 +116,8 @@ def quiet(paths):
     after = processes()
     if after is None:
         return False
-    if (set(before) & set(after)) - seen:
-        raise RuntimeError('stable process missing cwd/descriptor evidence')
+    if set(after) - seen:
+        raise RuntimeError('final live process missing cwd/descriptor evidence')
     return True
 
 

@@ -38,10 +38,13 @@ class Safety(unittest.TestCase):
   self.assertTrue((self.cache/'generated.js').exists())
  def test_incomplete_process_inventories_refuse(self):
   uid=os.getuid();ps=f'{uid} 4242 S python3\n'
-  complete='p4242\ncpython3\nfcwd\nn/other\nf0\nn/dev/null\n'
+  complete='p4242\ncpython3\nfcwd\nn/other\nftxt\ntREG\nn/usr/bin/python3\nf0\nn/dev/null\n'
   def run(files,process=ps):
-   with patch.object(m,'command',side_effect=[process,files,process]):return m.quiet([self.repo])
+   with patch.object(m,'command',side_effect=[(process,99999),files,(process,99998)]):return m.quiet([self.repo])
   self.assertTrue(run(complete))
+  with patch.object(m,'command',side_effect=[(ps,99999),complete,(ps+f'{uid} 4343 S node server.js\n',99998)]):
+   with self.assertRaises(RuntimeError):m.quiet([self.repo])
+  with self.assertRaises(RuntimeError):run('p4242\ncpython3\nfcwd\ntDIR\nn/other\n')
   self.assertTrue(run(complete+'ftwd\ntDIR\nn/other-thread-cwd\nffp.\ntREG\nn/other-fileport\n'))
   self.assertFalse(run(complete+'ftwd\ntDIR\nn'+str(self.repo)+'\n'))
   for kind in ['PIPE','NPOLICY','NEXUS']:
@@ -50,7 +53,7 @@ class Safety(unittest.TestCase):
    with self.assertRaises(RuntimeError):run(complete+f'f9\nt{kind}\nn\n')
   for files in ['p4242\nn/proc/4242/fd (opendir: Permission denied)\n','p4242\ncpython3\nf0\nn/dev/null\n',complete[:-1],complete.replace('n/dev/null','n/proc/fd (stat: Permission denied)'),complete.replace('fcwd\nn/other\n','')]:
    with self.assertRaises(RuntimeError):run(files)
-  with patch.object(m,'command',side_effect=['partial\n']):
+  with patch.object(m,'command',side_effect=[('partial\n',99999)]):
    with self.assertRaises(RuntimeError):m.quiet([self.repo])
   from subprocess import CompletedProcess
   with patch.object(m.subprocess,'run',return_value=CompletedProcess([],0,'valid-looking output','warning: incomplete inventory')):
