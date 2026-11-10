@@ -66,6 +66,7 @@ export function healthOwnsAlerts(dir:string,now:number){try{const value=JSON.par
 export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'|'release',now:number,except='',healthOnly=false):{id:string;summary:string}|null{
  if(!existsSync(path))return null;const db=new Database(path,{readonly:true,strict:true});
  try{const legacy=healthOnly?'0':condition==='qualification'?"id LIKE 'qualification-expiry:%'":condition==='disk'?"sender_ref='factory-disk'":"id LIKE 'release-preflight-missing:%'";
- return db.query(`SELECT id,summary FROM messages m WHERE recipient='Vincent' AND recipient_app='telegram' AND id<>? AND created_at<=? AND (created_at>=? OR NOT EXISTS(SELECT 1 FROM telegram_messages t WHERE t.mail_id=m.id)) AND (id LIKE ? OR (${legacy})) ORDER BY created_at DESC LIMIT 1`).get(except,now,now-2*3600000,`factory-health:${condition}:%:opening:Vincent`) as {id:string;summary:string}|null;
+ const rows=db.query(`SELECT id,summary,created_at FROM messages WHERE recipient='Vincent' AND recipient_app='telegram' AND id<>? AND created_at<=? AND (id LIKE ? OR (${legacy})) ORDER BY created_at DESC LIMIT 32`).all(except,now,`factory-health:${condition}:%:opening:Vincent`) as {id:string;summary:string;created_at:number}[];
+ for(const row of rows){if(row.created_at>=now-2*3600000)return row;const table=db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_messages'").get();if(!table||!db.query('SELECT 1 FROM telegram_messages WHERE mail_id=? LIMIT 1').get(row.id))return row;}return null;
  }finally{db.close();}
 }
