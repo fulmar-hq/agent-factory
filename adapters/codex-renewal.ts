@@ -31,7 +31,9 @@ function lastUsage(path:string,at:number):Usage|undefined{
 export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..')){
  const live=new Store(join(dir,'controller.sqlite')),policyBytes=readFileSync(join(dir,'config.yaml'),'utf8'),c=ConfigSchema.parse(Bun.YAML.parse(policyBytes));
  const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown}>(`codex-renewal-attempt:${id}`);
- const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false;
+ const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false,interrupted:string|undefined,activePreflight:ReturnType<typeof spawnWorker>|undefined,activeProbe:Store|undefined,activeSession:string|undefined;
+ const onSignal=(signal:string)=>{interrupted=signal;if(activePreflight)void activePreflight.stop().catch(()=>{});if(activeProbe&&activeSession)activeProbe.set(`stop:${activeSession}`,{reason:`renewal interrupted by ${signal}`});};
+ const onTerm=()=>onSignal('SIGTERM'),onInt=()=>onSignal('SIGINT');process.on('SIGTERM',onTerm);process.on('SIGINT',onInt);
  const status=(state:string,detail:unknown)=>{live.set(`codex-renewal-attempt:${id}`,{...claim,state,detail,at:Date.now()});live.event(`codex-renewal:${id}:${state}`,'codex-renewal',{id,state,detail,run},'Retain native/probe/custody receipts; no automatic replay of an attempt');};
  try{
   if(!claim||claim.state!=='starting'||claim.id!==id||live.get<{id:string}>('codex-renewal-slot')?.id!==id||live.get<{id:string}>('launcher-maintenance-lease')?.id!==id)throw Error('detached renewal claim mismatch');
@@ -43,7 +45,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(renewalDigest(original)!==claim.qualificationSha256)throw Error('qualification bytes changed before renewal');
   const version=(await command(['codex','--version'])).trim(),fingerprint=renewalFingerprint(checkout,version);
   if(renewalDigest(fingerprint)!==renewalDigest(claim.fingerprint))throw Error('boundary or CLI changed before renewal');
-  const guard=()=>{clock();if(live.get('paused')!==false)throw Error('factory paused');usageGate(live.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');if(renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('private policy changed during renewal');};
+  const guard=()=>{if(interrupted)throw Error(`renewal interrupted by ${interrupted}`);clock();if(live.get('paused')!==false)throw Error('factory paused');usageGate(live.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');if(renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('private policy changed during renewal');};
   guard();requireDiskCapacity(()=>diskReading(dir));await verifySubscription('codex');
   const subscription=Bun.spawnSync(['codex','login','status'],{env:Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG'].flatMap(k=>process.env[k]?[[k,process.env[k]!]]:[]))});
   if(subscription.exitCode!==0)throw Error('subscription status failed');
@@ -69,17 +71,17 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
     const known=names.map(([check,target])=>{const stat=statSync(target);return {check,target,existedAt:Date.now(),kind:stat.isSocket()?'socket':'file',dev:stat.dev,ino:stat.ino};});
     const before=clock(),priorCleanup:boolean=allCleanup;allCleanup=false;
     const err=openSync(join(leaf,'command.stderr'),'ax',0o600),child=spawnWorker({...spec,argv:['codex','sandbox',...overrides,'-P','factory','-C',workspace,'/usr/bin/python3',probePath]},workspace,err);
-    let timedOut=false,stdout='',code:number|null=null;
+    activePreflight=child;let timedOut=false,stdout='',code:number|null=null;
     const timer=setTimeout(()=>{timedOut=true;void child.stop();},60000);
     try{for await(const chunk of child.stdout){stdout+=chunk.toString();if(stdout.length>16*1024*1024)throw Error('command probe output bound');}code=await child.exited;await child.stop();allCleanup=priorCleanup&&child.cleanup.verified;}
-    finally{clearTimeout(timer);try{await child.stop();}finally{closeSync(err);}}
+    finally{clearTimeout(timer);try{await child.stop();}finally{activePreflight=undefined;closeSync(err);}}
     if(timedOut||code!==0)throw Error('command security probe failed');
     const checks=JSON.parse(stdout.trim());if(securityChecks.some(k=>checks[k]!==true))throw Error('actual command security denial failed');
     for(const target of known){const after=statSync(target.target);if(after.dev!==target.dev||after.ino!==target.ino)throw Error('known probe target changed');}
     // Native ID is bound after spawn below; the original raw command capture is retained.
     durable(join(leaf,'command.raw.json'),json({startedAt:before,endedAt:Date.now(),stdout,targets:known.map(({dev,ino,...rest})=>rest)}));
    }
-   const s=new Store(join(leaf,'rehearsal.sqlite')),e=new Engine(s,c),sessionId=`qualification-${effort}-${kind}`;
+   const s=new Store(join(leaf,'rehearsal.sqlite')),e=new Engine(s,c),sessionId=`qualification-${effort}-${kind}`;activeProbe=s;activeSession=sessionId;
    let captureError:string|undefined,exit:{code:number|null;signal:NodeJS.Signals|null;at:number}|undefined,before:Snapshot|undefined,afterTerm:Snapshot|null=null,final:Snapshot|undefined;
    const samples:{at:number;alive:true;usage:Usage}[]=[],signals:{pid:number;identity:string;signal:'SIGTERM'|'SIGKILL';at:number;result:'sent'}[]=[];
    // These are isolated rehearsal custody rows, never admitted production work or fabricated qualifications.
@@ -110,7 +112,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
    const path=join(leaf,'supervisor.json');durable(path,json({runId,nativeId:native.id,workspace,startedAt:start,endedAt:exit.at,probeBeforeSha256:manifest.probe.sha256,probeAfterSha256:ref(probePath).sha256,pid,identity:owner.identity,reason:kind==='security'?'complete':kind,exitCode:exit.code,signal:exit.signal,stopAt:halt?.at??null,timeBudget:kind==='time'?{estimateSeconds:25,pauseSeconds:50}:null,tokenBudget:kind==='tokens'?{estimateTokens:100,pauseTokens:200}:null,samples:samples.filter(row=>row.at<(halt?.at??exit!.at)),before,afterTerm,final,signals,descendant:descendant?{pid:descendant.pid,identity:descendant.identity}:null}));
    manifest.runs.push({nativeId:native.id,effort,kind,workspace,startedAt:start,endedAt:exit.at,stream:ref(join(leaf,'native.jsonl')),rollout:ref(native.path),supervisor:ref(path),...(kind==='security'?{command:commandText,commandProbe:commandRef}: {})});
    if(existsSync(join(workspace,'.factory-delivery.bundle')))copyFileSync(join(workspace,'.factory-delivery.bundle'),join(leaf,'retained-worker.bundle'));
-   e.archive(sessionId,join(leaf,'result.json'),'owner');s.close();
+   e.archive(sessionId,join(leaf,'result.json'),'owner');activeProbe=undefined;activeSession=undefined;s.close();
   }
   durable(join(run,'manifest.json'),json(manifest));const proof=collectCodexRenewalEvidence(manifest);durable(join(run,'verified.json'),json(proof));if(proof.status!=='verified'||proof.verifiedRuns.length!==6||proof.cleanup!=='verified')throw Error(`native six-run proof refused: ${proof.reason}`);
   guard();await verifySubscription('codex');
@@ -134,5 +136,5 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   status(replaced?'uncertain':'failed',{reason,allCleanup,startedNative});if(allCleanup){live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});}
   renewalFailureAlert(live,id);
   return {state:replaced?'uncertain':'failed',reason,run};
- }finally{live.close();}
+ }finally{process.off('SIGTERM',onTerm);process.off('SIGINT',onInt);if(activePreflight)await activePreflight.stop().catch(()=>{});activeProbe?.close();live.close();}
 }
