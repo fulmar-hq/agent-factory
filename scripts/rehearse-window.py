@@ -186,7 +186,7 @@ class SyntheticWindow:
 
     def run(self):
         results = {}
-        with patch.object(release, 'api', side_effect=self.api), patch.object(release, 'freeze', side_effect=self.freeze), patch.object(release, 'logs', side_effect=self.logs), patch.object(release.time, 'time', side_effect=lambda: self.now):
+        with patch.object(release, 'api', side_effect=self.api), patch.object(release, 'freeze', side_effect=self.freeze), patch.object(release, 'logs', side_effect=self.logs), patch.object(release, 'production_readiness', return_value={'SYNTHETIC': True, 'ready': True, 'evidence': 'SYNTHETIC metadata readiness; zero AWS calls'}), patch.object(release.time, 'time', side_effect=lambda: self.now):
             preflight = context(self.batch, 'preflight')
             # This is an explicitly SYNTHETIC success-path input, never actual readiness.
             preflight['readiness'] = {'day': self.batch['day'], 'at': int(self.now * 1000), 'ready': True, 'missing': [], 'SYNTHETIC': True}
