@@ -216,8 +216,8 @@ maintenance lease. It does not load or reconfigure launchd. Session caches need
 finished/archived/waiting-browser status, null supervisor PID, verified descendant
 cleanup, and fresh process/cwd/open-file checks. Reservation and continuation
 cannot race deletion because the final checks and removal hold the SQLite writer
-transaction. Other run/review clones require one quiet hour and no maintenance
-custody. Unknown probes, linked roots, tracked/index/HEAD content and nested Git
+transaction. Other run/review clones require repository/metadata directories at least one
+hour old, fresh idle process evidence, and no maintenance custody. Unknown probes, linked roots, tracked/index/HEAD content and nested Git
 refuse cleanup. Native history, bundles, Git objects, dirty source, scratch,
 logs, receipts and evidence remain. Receipts append exact intents/results and df
 readings under `receipts/cache-retention`; failed paths remain visible.

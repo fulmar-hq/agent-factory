@@ -36,6 +36,8 @@ class Safety(unittest.TestCase):
   with patch.object(m,'quiet',side_effect=RuntimeError('unknown process evidence')):m.sweep(self.root,True)
   with patch.object(m,'quiet',return_value=True):m.sweep(self.root,False)
   self.assertTrue((self.cache/'generated.js').exists())
+ def test_special_cache_files_refuse(self):
+  os.mkfifo(self.cache/'unknown-pipe');self.assertFalse(m.eligible(self.repo,self.cache))
  def test_nested_git_refuses_and_links_never_follow(self):
   target=self.repo/'outside';target.write_text('keep');(self.cache/'link').symlink_to(target)
   self.assertTrue(m.eligible(self.repo,self.cache));m.remove(self.cache);self.assertEqual(target.read_text(),'keep')

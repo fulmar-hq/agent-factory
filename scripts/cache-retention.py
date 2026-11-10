@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Factory-only regenerable caches. Source, Git and operational evidence stay put."""
-import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time
+import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat
 
 CACHES = {'node_modules', '.next', '.turbo'}
 PROTECTED = {'.git', '.factory-tmp', 'receipts', 'evidence', 'transcripts', 'logs',
@@ -57,6 +57,10 @@ def eligible(repo, cache):
     for directory, dirs, files in os.walk(cache, followlinks=False):
         if '.git' in dirs or '.git' in files:
             return False
+        for name in dirs + files:
+            mode = (pathlib.Path(directory) / name).lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                return False
         for name in list(dirs):
             p = pathlib.Path(directory) / name
             if evidence(name) or p.is_symlink():
