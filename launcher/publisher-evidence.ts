@@ -3,6 +3,7 @@ import {readFileSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {z} from 'zod';
+import {QualificationSchema} from './config';
 import type {Store} from '../tracking/store';
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 export const publisherSources=['adapters/delivery.ts','adapters/github.ts','adapters/native.ts','adapters/workers.ts','launcher/child.ts','launcher/process.ts','launcher/worker.ts','launcher/worker-entry.ts','launcher/publisher-evidence.ts','launcher/config.ts'];
@@ -25,4 +26,16 @@ export function readPublisherProof(dir:string,pub:PublisherPublication,expected:
 export function currentPublisherProof(s:Pick<Store,'db'>,dir:string,expected:PublisherBoundary,now=Date.now()){
  const row=s.db.query("SELECT data FROM events WHERE kind='launcher-publish' ORDER BY at DESC,rowid DESC LIMIT 1").get() as {data:string}|null;if(!row)return;
  try{const pub=JSON.parse(row.data) as PublisherPublication;return {pub,proof:readPublisherProof(dir,pub,expected,now)};}catch{return;}
+}
+
+
+export function publisherQualificationVerified(dir:string,authority:unknown,qualificationBytes:string,expected:PublisherBoundary){
+ try{
+  const a=z.object({version:z.literal(2),expiresAt:z.number().int().positive(),evidence:z.string()}).parse(authority),run=realpathSync(join(a.evidence,'..'));
+  if(!run.startsWith(realpathSync(join(dir,'runs'))+'/')||!a.evidence.endsWith('/report.md'))return false;
+  const prepared=z.object({bindings:z.record(z.string(),sha)}).parse(JSON.parse(readFileSync(join(run,'prepared.json'),'utf8'))),q=JSON.parse(qualificationBytes);
+  for(const key of ['codex','codex:medium','codex:high'])if(prepared.bindings[key]!==hash(JSON.stringify(QualificationSchema.parse(q[key]))))return false;
+  const r=z.object({publisherExpiresAt:z.number(),publisherProof:proofSchema,pub:z.object({head:z.string(),tree:z.string()}),tested:z.object({code:z.literal(0),tree:z.string()}),verification:z.object({verified:z.literal(true),reason:z.literal('valid')})}).parse(JSON.parse(readFileSync(join(run,'publisher-readback.json'),'utf8'))),p=r.publisherProof;
+  return samePublisherBoundary(p.boundary,expected)&&a.expiresAt===r.publisherExpiresAt&&a.expiresAt<=p.completedAt+86400000&&p.startedAt<=p.completedAt&&p.completedAt<p.authorityExpiresAt&&p.head===r.pub.head&&p.tree===r.pub.tree&&p.tree===r.tested.tree;
+ }catch{return false;}
 }

@@ -223,6 +223,13 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   const outputTimes=new Map<string,number>();
   const toolSessions=new Set<number>();
   const calls = new Map<string, { name: string; arguments: string }>();
+  let lifecycleLaunches=0;
+  const validateCall=(name:string,args:unknown)=>{
+    if(['exec_command','functions.exec_command'].includes(name)){
+      if(r.kind==='security'){const a=z.object({cmd:text,workdir:text.optional()}).strict().parse(args);requireThat(a.cmd===r.command&&(a.workdir===undefined||a.workdir===r.workspace),'security command arguments differ');}
+      else{const a=z.object({cmd:text,workdir:text.optional(),yield_time_ms:integer.max(1000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(args);requireThat(['/usr/bin/python3 lifecycle.py','/Library/Developer/CommandLineTools/usr/bin/python3 lifecycle.py'].includes(a.cmd)&&(a.workdir===undefined||a.workdir===r.workspace),'unsupported lifecycle command');requireThat(++lifecycleLaunches===1,'multiple lifecycle launches');}
+    }else{requireThat(r.kind!=='security','security stdin retry forbidden');const a=z.object({session_id:integer,chars:z.literal('').optional(),yield_time_ms:integer.max(5000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(args);requireThat(toolSessions.has(a.session_id),'unbound lifecycle tool session');}
+  };
   const outputs = new Map<string, string>();
   for (const row of rollout) {
     const timestamp = at(row, r);
@@ -247,8 +254,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if(row.type==='response_item'&&p?.type==='custom_tool_call'){
       requireThat(['exec','functions.exec'].includes(p.name??'')&&typeof p.input==='string'&&typeof p.call_id==='string'&&!calls.has(p.call_id),'unsupported/reused code tool');const parsed=codeCall(p.input!);
       if(r.kind==='security')requireThat(compactCode(p.input!)===compactCode(qualificationCodeCommand(r.command!)),'security code must invoke exactly the bound probe');
-      else if(parsed.name==='exec_command'){const args=z.object({cmd:text,workdir:text.optional(),yield_time_ms:integer.max(1000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(parsed.args);requireThat(['/usr/bin/python3 lifecycle.py','/Library/Developer/CommandLineTools/usr/bin/python3 lifecycle.py'].includes(args.cmd)&&(args.workdir===undefined||args.workdir===r.workspace),'unsupported lifecycle command');}
-      else{const args=z.object({session_id:integer,chars:z.literal('').optional(),yield_time_ms:integer.max(5000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(parsed.args);requireThat(toolSessions.has(args.session_id),'unbound lifecycle tool session');}
+      validateCall(`functions.${parsed.name}`,parsed.args);
       calls.set(p.call_id!,{name:`functions.${parsed.name}`,arguments:JSON.stringify(parsed.args)});
     }
     if(row.type==='response_item'&&p?.type==='custom_tool_call_output'){
@@ -259,15 +265,19 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if (row.type === "response_item" && p?.type === "function_call") {
       requireThat(["exec_command","functions.exec_command","write_stdin","functions.write_stdin"].includes(p.name??""), "unsupported qualification tool");
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
+      validateCall(p.name!,JSON.parse(p.arguments!));
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
     if (row.type === "response_item" && p?.type === "function_call_output") {
       requireThat(typeof p.call_id === "string" && calls.has(p.call_id) && !outputs.has(p.call_id) && typeof p.output === "string", "unbound tool output"); const payload=p.output.split(/^(?:Final output:|Output:)\s*$/m).at(-1)!.trim();
-      if(payload.startsWith('{')||payload.startsWith('['))requireThat(!nativeFailure(JSON.parse(payload)), "structured native tool failure");
+      const session=(value:unknown)=>{const p=z.object({session_id:integer.optional()}).safeParse(value);if(p.success&&p.data.session_id!==undefined)toolSessions.add(p.data.session_id);};
+      const running=p.output.match(/^Process running with session ID (\d+)$/m);if(running)toolSessions.add(integer.parse(Number(running[1])));
+      if(payload.startsWith('{')||payload.startsWith('[')){const decoded=JSON.parse(payload);requireThat(!nativeFailure(decoded), "structured native tool failure");session(decoded);}
       else for(const line of payload.split('\n'))if(line.trimStart().startsWith('{')||line.trimStart().startsWith('['))requireThat(!nativeFailure(JSON.parse(line)), "framed structured native tool failure");
       requireThat(!p.output.split("\n").some(line=>/^(?:Process exited with code (?!0(?:$|\s))|Exit code: (?!0(?:$|\s))|Error:|Traceback \()/i.test(line.trim())), "native rehearsal command failed");outputs.set(p.call_id, p.output);outputTimes.set(p.call_id,timestamp);
     }
   }
+  if(r.kind==='time')requireThat(lifecycleLaunches===1,'time rehearsal lifecycle launch missing');
   requireThat(contexts > 0 && counters.length > 0, "missing native context/accounting");
   const total = counters.at(-1)!.usage;
   requireThat(total.total_tokens > 0, "positive native accounting required");
