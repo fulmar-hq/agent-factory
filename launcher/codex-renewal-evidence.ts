@@ -98,7 +98,9 @@ function lines(bytes: Uint8Array, banners = false): NativeEvent[] {
   return value.split("\n").filter(Boolean).flatMap(line => {
     // Installed CLI banners are text, never native events. JSON-looking malformed
     // lines still fail. Rollouts never accept banners or blank/unknown JSON shapes.
-    if (banners && !line.trimStart().startsWith("{")) return [];
+    if (banners && !line.trimStart().startsWith("{")) {
+      requireThat(/^(?:Reading additional input from stdin\.\.\.|Reading prompt from stdin\.\.\.|OpenAI Codex v\d+\.\d+\.\d+(?: \(research preview\))?)$/.test(line.trim()), "unsupported or failed native stream banner");return [];
+    }
     return [nativeEvent.parse(JSON.parse(line))];
   });
 }
@@ -158,7 +160,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
   requireThat(s.runId === m.runId && s.nativeId === r.nativeId && s.workspace === r.workspace && s.startedAt === r.startedAt && s.endedAt === r.endedAt, "supervisor custody mismatch");
   requireThat(stream.filter(x => x.type === "thread.started").length === 1 && stream.find(x => x.type === "thread.started")?.thread_id === r.nativeId, "stream native identity mismatch");
-  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type) || x.item?.type === "error" || x.status === "failed" || x.item?.status === "failed" || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.status !== undefined && x.item.status !== "completed")), "native stream failed");
+  requireThat(!stream.some(x => ["error", "turn.failed"].includes(x.type) || x.item?.type === "error" || (x.error !== undefined && x.error !== null) || (x.item?.error !== undefined && x.item.error !== null) || x.status === "failed" || x.item?.status === "failed" || (x.type === "item.completed" && x.item?.type === "command_execution" && x.item.status !== undefined && x.item.status !== "completed")), "native stream failed");
   requireThat(stream.every(x => (x.thread_id === undefined || x.thread_id === r.nativeId) && (x.model === undefined || x.model === m.model) && (x.effort === undefined || x.effort === r.effort)), "conflicting stream identity/model/effort");
   const meta = rollout.filter(x => x.type === "session_meta");
   requireThat(meta.length === 1 && rollout[0] === meta[0] && meta[0].payload?.id === r.nativeId && meta[0].payload?.cwd === r.workspace, "rollout native custody mismatch");
@@ -172,7 +174,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(timestamp >= previousAt, "native clock regression"); previousAt = timestamp;
     const p = row.payload;
     requireThat((p?.model === undefined || p.model === m.model) && (p?.effort === undefined || p.effort === r.effort), "conflicting native model/effort");
-    requireThat(row.type !== "error" && p?.type !== "error", "native receipt error");
+    requireThat(!["error","turn.failed","task_failed"].includes(row.type) && !["error","turn_failed","task_failed"].includes(p?.type ?? "") && (p?.error === undefined || p.error === null), "native receipt error");
     if (row.type === "turn_context") {
       requireThat(p?.model === m.model && p.effort === r.effort && p.cwd === r.workspace, "native model/effort/cwd mismatch"); contexts++;
     }
@@ -202,7 +204,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     const counter = counters.findLast(c => c.at <= sample.at);
     requireThat(counter && sameUsage(counter.usage, tokenUsage(sample.usage)), "live accounting differs from native receipt");
   }
-  requireThat(s.samples.some(x => x.usage.total_tokens > 0), "no positive accounting while alive");
+  requireThat(s.samples.some(x => x.usage.total_tokens > 0 && x.at <= s.before.at && s.before.at - x.at <= STOP_POLL_GRACE_MS), "no correlated positive accounting while alive");
   const owner = (row: z.infer<typeof processRow>) => row.pid === s.pid && row.identity === s.identity;
   const alive = (row: z.infer<typeof processRow>) => !row.state.startsWith("Z");
   requireThat(s.before.at >= r.startedAt && s.before.at < (s.stopAt ?? r.endedAt) && s.before.rows.some(x => owner(x) && alive(x)), "missing live process identity");
@@ -218,7 +220,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   requireThat(!s.final.rows.some(x => alive(x) && (owned.some(o => o.pid === x.pid && o.identity === x.identity) || owned.some(o => o.group === x.group))), "owned process/group survived cleanup");
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
-    requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1, "security native completion missing");
+    requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
     const u = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer }).parse(completions[0].usage);
     requireThat(u && u.input_tokens === total.input_tokens && u.output_tokens === total.output_tokens && u.cached_input_tokens === total.cached_input_tokens, "stream/final accounting mismatch");
     requireThat(r.command && r.commandProbe, "command and native security probes required");

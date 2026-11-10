@@ -50,7 +50,7 @@ function fixture(root = "/fictional") {
       signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM" },
         ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL" }] : [])] };
     m.runs.push({ nativeId, effort, kind, workspace, startedAt: start, endedAt: end,
-      stream: put(`stream-${n}`, "OpenAI Codex v0.0 fictional CLI banner\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
+      stream: put(`stream-${n}`, "OpenAI Codex v0.0.0\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
       ...(kind === "security" ? { command, commandProbe: put(`command-${n}`, { runId: m.runId, nativeId, workspace, command, probeSha256: probe.sha256, probeAfterSha256: probe.sha256,
         startedAt: start - 500, endedAt: start - 100, code: 0, signal: null, stdout: output,
         targets: securityChecks.slice(0, 6).map(check => ({ check, target: `/fictional/known-${check}`, existedAt: start - 1000, kind: check === "known_agent_socket" ? "socket" : "file" })) }) } : {}) });
@@ -262,3 +262,6 @@ test("missing turn cwd is unknown rather than workspace evidence",()=>{const f=f
 
 for(const failure of ['error-item','failed-status','tool-exit'] as const)test('explicit '+failure+' refuses despite passing booleans',()=>{const f=fixture(),r=f.m.runs[0];if(failure==='tool-exit')f.mutate(r.rollout,x=>{x[3].payload.output='Process exited with code 1\n'+x[3].payload.output;},true);else{const lines=Buffer.from(f.read(r.stream.path)).toString().split('\n');if(failure==='error-item')lines.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'error',message:'failed'}}));else{const row=JSON.parse(lines[2]);row.item.status='failed';lines[2]=JSON.stringify(row);}const b=bytes(lines.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);}expect(f.collect().status).toBe('refused');});
 test('abort between stop intent and actual TERM cannot qualify',()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.supervisor,x=>{x.signals[0].at=r.startedAt+1200;});f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1100).toISOString(),type:'event_msg',payload:{type:'turn_aborted'}});},true);expect(f.collect().status).toBe('refused');});
+
+test('non-JSON error text is never a harmless CLI banner',()=>{const f=fixture(),r=f.m.runs[0],b=bytes('Error: probe failed\n'+Buffer.from(f.read(r.stream.path)).toString());f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+test('a successful security stream needs its native terminal receipt too',()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{x.splice(-1,1);},true);expect(f.collect().status).toBe('refused');});
