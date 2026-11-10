@@ -1,3 +1,4 @@
+import {githubPage} from './fixtures';
 import { expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,7 +18,7 @@ test("enrollment dry run has no writes; apply preserves policy, backfills and st
   const dir = await installation(), path = join(dir, "config.yaml");
   const original = await readFile(path, "utf8");
   const calls: string[][] = [];
-  const execute = async (args: string[]) => { calls.push(args); return JSON.stringify([issue]); };
+  const execute = async (args: string[]) => { calls.push(args); return githubPage('issues',[issue]); };
   expect(await addProject("example/site", { dir, dryRun: true, execute })).toMatchObject({ issues: 1, readOnly: true, dryRun: true });
   expect(await readdir(dir)).toEqual(["config.yaml"]);
   expect(await readFile(path, "utf8")).toBe(original);
@@ -34,13 +35,13 @@ test("enrollment dry run has no writes; apply preserves policy, backfills and st
     expect(store.rows("debits")).toHaveLength(0);
     expect(store.rows("events")).toHaveLength(2);
   } finally { store.close(); }
-  expect(calls.every(args => args[0] === "gh" && args[1] === "issue" && args[2] === "list")).toBe(true);
+  expect(calls.every(args => args[0] === "gh" && args[1] === "api" && args[2] === "graphql")).toBe(true);
 });
 test("invalid repo, source failure and truncated backfill never change config", async () => {
   const dir = await installation(), path = join(dir, "config.yaml"), original = await readFile(path, "utf8");
   await expect(addProject("bad;repo", { dir })).rejects.toThrow("owner/repo");
   await expect(addProject("example/site", { dir, execute: async () => { throw Error("source offline"); } })).rejects.toThrow("source offline");
-  await expect(addProject("example/site", { dir, execute: async () => JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ ...issue, number: i + 1 }))) })).rejects.toThrow("1000");
+  await expect(addProject("example/site", { dir, execute: async () => githubPage('issues',[issue],{total:1000,next:true}) })).rejects.toThrow("cursor");
   expect(await readFile(path, "utf8")).toBe(original);
   expect(await readdir(dir)).toEqual(["config.yaml"]);
 });
