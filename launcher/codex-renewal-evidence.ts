@@ -82,14 +82,14 @@ function json(bytes: Uint8Array): unknown { return JSON.parse(new TextDecoder("u
 const nativeEvent = z.object({
   type: text, timestamp: z.string().optional(), thread_id: z.string().optional(),
   payload: z.object({
-    type: z.string().optional(), id: z.string().optional(), cwd: z.string().optional(),
+    type: z.string().optional(), status:z.enum(["in_progress","completed","failed"]).optional(), id: z.string().optional(), cwd: z.string().optional(),
     model: z.string().optional(), effort: z.string().optional(),
     info: z.object({ total_token_usage: z.unknown() }).passthrough().nullable().optional(),
     call_id: z.string().optional(), name: z.string().optional(), arguments: z.string().optional(), output: z.unknown().optional(),
   }).passthrough().optional(),
   usage: z.unknown().optional(),
-  status: z.string().optional(),
-  item: z.object({ type: text, status:z.string().optional(), command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
+  status: z.enum(["in_progress","completed","failed"]).optional(),
+  item: z.object({ type: text, status:z.enum(["in_progress","completed","failed"]).optional(), command: z.string().optional(), exit_code: z.number().nullable().optional(), aggregated_output: z.string().optional() }).passthrough().optional(),
 }).passthrough();
 type NativeEvent = z.infer<typeof nativeEvent>;
 function lines(bytes: Uint8Array, banners = false): NativeEvent[] {
@@ -153,10 +153,22 @@ function probeInvocation(command: string, workspace: string, probe: string): boo
 }
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
+function nativeFailure(value:unknown):boolean {
+  if(Array.isArray(value))return value.some(nativeFailure);
+  if(!value || typeof value!=="object")return false;
+  for(const [key,v] of Object.entries(value)){
+    if((key==="error"||key==="errors")&&v!==null&&v!==false&&v!==""&&(!Array.isArray(v)||v.length>0))return true;
+    if((key==="is_error"&&v===true)||(["success","ok"].includes(key)&&v===false))return true;
+    if(["status","state","type"].includes(key)&&["failed","error","turn.failed","task_failed","turn_failed"].includes(String(v)))return true;
+    if(nativeFailure(v))return true;
+  }
+  return false;
+}
 function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uint8Array): VerifiedCodexRun {
   requireThat(r.startedAt >= m.startedAt && r.endedAt > r.startedAt, "invalid run interval");
   const stream = lines(load(r.stream), true), rollout = lines(load(r.rollout));
   const s = supervisorSchema.parse(json(load(r.supervisor)));
+  requireThat(!stream.some(nativeFailure)&&!rollout.some(nativeFailure), "explicit native failure receipt");
   requireThat(s.probeBeforeSha256 === m.probe.sha256 && s.probeAfterSha256 === m.probe.sha256, "probe changed before/after native run");
   requireThat(s.runId === m.runId && s.nativeId === r.nativeId && s.workspace === r.workspace && s.startedAt === r.startedAt && s.endedAt === r.endedAt, "supervisor custody mismatch");
   requireThat(stream.filter(x => x.type === "thread.started").length === 1 && stream.find(x => x.type === "thread.started")?.thread_id === r.nativeId, "stream native identity mismatch");
@@ -190,6 +202,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
     if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
     if (row.type === "response_item" && p?.type === "function_call") {
+      requireThat(["exec_command","functions.exec_command","write_stdin","functions.write_stdin"].includes(p.name??""), "unsupported qualification tool");
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
     }
