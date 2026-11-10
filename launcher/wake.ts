@@ -9,6 +9,9 @@ import {type Config,type Ticket,QualificationSchema} from './config';
 import {command} from '../adapters/github';
 import {processIdentity} from './process';
 export type Wake = {id:string;owner:string;kind:string;payload:unknown};
+// The one release acceptance task retains separate custody from ordinary
+// permanent Quality mail/review turns; its identity and policy remain Quality.
+export const ownerRuntimeKey=(wake:Pick<Wake,'owner'|'kind'>)=>wake.kind==='qa-deployed'?'owner-runtime:quality-acceptance':`owner-runtime:${wake.owner}`;
 export type OwnerRuntime = {native?:string;workspace:string;pid?:number;identity?:string;wake?:string};
 export function queueWake(s:Store,w:Wake,now=Date.now()) {
  return s.atomic(()=>{
@@ -31,16 +34,18 @@ export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=pro
     s.event(`owner-deadline:${w.id}`,'owner-wake-expired',{id:w.id,deadline},'Retain missed acceptance deadline; never start a late Quality turn');return false;
    }
   }
-  const runtime=s.get<OwnerRuntime>(`owner-runtime:${w.owner}`);
+  const runtime=s.get<OwnerRuntime>(ownerRuntimeKey(w));
   if(!runtime || !existsSync(runtime.workspace))return false;
+  if(queued.kind==='qa-deployed'&&runtime.pid!==undefined&&(!Number.isSafeInteger(runtime.pid)||runtime.pid<=0||!runtime.identity))return false;
   if(runtime.pid && (!runtime.identity || identity(runtime.pid)===runtime.identity))return false;
   if(runtime.wake) {
    const previous=s.get<{state:string;cleanupVerified?:boolean}>(`owner-wake:${runtime.wake}`);
    // An uncertain spawn is never retried by clearing an old claim.
+   if(queued.kind==='qa-deployed'&&!previous)return false;
    if(previous && (['starting','running'].includes(previous.state) || previous.cleanupVerified!==true))return false;
   }
   s.set(`owner-wake:${w.id}`,{...queued,state:'starting'});
-  s.set(`owner-runtime:${w.owner}`,{...runtime,pid:undefined,identity:undefined,wake:w.id});
+  s.set(ownerRuntimeKey(w),{...runtime,pid:undefined,identity:undefined,wake:w.id});
   s.event(`owner-dispatch:${w.id}`,'owner-wake-dispatch',{...w,native:runtime.native},'Retain the dispatch claim even on uncertain exit');
   return true;
  });

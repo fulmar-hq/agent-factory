@@ -184,3 +184,17 @@ newline-separated wire text, retains the input digest and leaves the native raw
 file untouched. It never changes the tuple or verdict; empty, mixed or object
 findings and extra keys refuse. This representation repair does not rerun a
 model or replace a rejected decision.
+
+
+## Dedicated acceptance custody
+
+The single hosted acceptance task uses `owner-runtime:quality-acceptance`,
+separate from ordinary permanent Quality mail/review turns. Dispatch, native
+identity/PID updates and cleanup use that same key. A live or unresolved
+acceptance runtime retains the pinned wake until its deadline; ordinary Quality
+custody cannot consume it. Per-ticket override readiness checks this dedicated
+workspace; legacy readiness without an override retains the permanent-role
+check. No permanent owner configuration, model qualification, budget, worker
+capacity or independence rule changes. Register the existing read-only acceptance
+workspace through the trusted setup before the release; this source change
+starts no native/model work and does not replay any existing acceptance.
