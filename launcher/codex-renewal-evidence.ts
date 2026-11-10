@@ -155,7 +155,14 @@ export function probeInvocation(command: string, workspace: string, probe: strin
 }
 export function qualificationCodeCommand(command:string){return `text(await tools.exec_command(${JSON.stringify({cmd:command})}));`;}
 function compactCode(source:string){let quoted=false,escaped=false,out='';for(const c of source){if(quoted){out+=c;if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;}else if(c==='"'){quoted=true;out+=c;}else if(!/\s/.test(c))out+=c;}return out.replace(/;$/,'');}
-function codeCall(source:string){const m=compactCode(source).match(/^text\(awaittools\.(exec_command|write_stdin)\((\{.*\})\)\)$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:JSON.parse(m[2]!)};}
+function literalArguments(source:string){
+ let out='',quoted=false,escaped=false;
+ for(let i=0;i<source.length;i++){const c=source[i]!;out+=c;if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue;}if(c==='"'){quoted=true;continue;}
+  if(c==='{'||c===','){const key=source.slice(i+1).match(/^(cmd|workdir|session_id|chars|yield_time_ms|max_output_tokens)(?=:)/);if(key){out+=JSON.stringify(key[1]);i+=key[1]!.length;}}
+ }return JSON.parse(out);
+}
+const codeSyntax=new Bun.Transpiler({loader:'js'});
+function codeCall(source:string){const normalized=codeSyntax.transformSync(source);const m=normalized.match(/^text\(\s*await\s+tools\.(exec_command|write_stdin)\(\s*(\{[\s\S]*\})\s*\)\s*\)\s*;?\s*$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:literalArguments(compactCode(m[2]!))};}
 function codeOutput(raw:unknown){const blocks=z.array(z.object({type:z.literal('input_text'),text:z.string()}).strict()).length(2).parse(raw);requireThat(/^Script completed\nWall time [0-9.]+ seconds?\nOutput:\n$/.test(blocks[0]!.text),'incomplete or failed code tool');const result=z.object({output:z.string(),exit_code:integer.nullable().optional(),session_id:integer.optional()}).passthrough().parse(JSON.parse(blocks[1]!.text));requireThat(!nativeFailure(result)&&(result.exit_code===0||result.session_id!==undefined),'code command failed or unknown');return result;}
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
@@ -342,14 +349,18 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(executed.length === 1 && executed[0].item?.exit_code === 0 && probeInvocation(executed[0].item.command ?? "", r.workspace, m.probe.path), "native command exit unverified");
     securityOutput(text.parse(executed[0].item?.aggregated_output));
   } else {
-    requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode > 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
+    requireThat(!r.command && !r.commandProbe && s.reason === r.kind && s.stopAt !== null && s.signal !== "SIGABRT" && ((s.signal === null && s.exitCode !== null && s.exitCode >= 0) || (s.exitCode === null && s.signal !== null)) && completions.length === 0 && completed === 0, "stop must precede completion");
     requireThat(s.stopAt! >= s.before.at && s.stopAt! < r.endedAt && s.signals.length > 0, "stop timing unverified");
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= s.final.at && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
     if(s.signal!==null)requireThat(s.signals.some(x=>x.pid===s.pid&&x.identity===s.identity&&x.signal===s.signal&&x.at<=r.endedAt), "root termination signal lacks matching sent receipt");
     requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
-    if(s.signal === null)requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt), "nonzero native exit has no controlled abort evidence");
+    for(const snapshot of [s.before,s.afterTerm,s.final])if(snapshot&&snapshot.at>=r.endedAt)requireThat(!snapshot.rows.some(row=>owner(row)&&alive(row)),'live root contradicts reported exit');
+    if(s.signal===null){
+      if(s.exitCode===0)requireThat(r.endedAt-firstTerm.at<=STOP_POLL_GRACE_MS,'graceful native exit was not prompt after actual TERM');
+      else requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt),'nonzero native exit has no controlled abort evidence');
+    }
     requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
     requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS && s.final.at - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {
