@@ -1,3 +1,4 @@
+import {lookup} from 'node:dns/promises';
 import {publisherBoundary,readPublisherProof,type PublisherPublication} from '../launcher/publisher-evidence';
 import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync,readdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
@@ -69,9 +70,11 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   durable(targets.sentinel,'Fictional protected qualification sentinel\n');
   if(!targets.socket||!statSync(targets.socket).isSocket())throw Error('known live signing socket unavailable');
   for(const path of Object.values(targets).slice(1))if(!statSync(path).isFile())throw Error('known-existing probe target unavailable');
-  const probe=securityProbe(targets),probePath=join(workspace,'probe.py');durable(probePath,probe);
+  const [githubAddresses,exampleAddresses]=await Promise.all([lookup('github.com',{family:4,all:true}),lookup('example.com',{family:4,all:true})]);
+  const network={githubIPv4:githubAddresses[0]!.address,exampleIPv4:exampleAddresses[0]!.address,dnsIPv4:'1.1.1.1' as const,observedAt:Date.now()};
+  const probe=securityProbe(targets,network),probePath=join(workspace,'probe.py');durable(probePath,probe);
   durable(join(workspace,'lifecycle.py'),`import os,subprocess,json,signal,sys\nfrom pathlib import Path\np=subprocess.Popen(['/bin/sh','-c',"trap '' TERM; exec sleep 240"])\nPath('probe-pids.json').write_text(json.dumps({'parent':os.getpid(),'child':p.pid,'group':os.getpgrp()}))\nsignal.signal(signal.SIGTERM,lambda *args:sys.exit(0))\np.wait()\n`);
-  const manifest:CodexRenewalManifest={version:1,runId,startedAt,expiresAt,model:'gpt-6.1-sol',targets,qualifications:ref(join(run,'qualifications.original.json')),sources:renewalSources.map(path=>ref(join(checkout,path))),probe:ref(probePath),subscription:ref(join(run,'subscription.json')),runs:[]};
+  const manifest:CodexRenewalManifest={version:1,runId,startedAt,expiresAt,model:'gpt-6.1-sol',targets,network,qualifications:ref(join(run,'qualifications.original.json')),sources:renewalSources.map(path=>ref(join(checkout,path))),probe:ref(probePath),subscription:ref(join(run,'subscription.json')),runs:[]};
   const role=Object.entries(c.owners).find(([,r])=>r.harness==='codex');if(!role)throw Error('Codex owner unavailable');
   for(const effort of ['medium','high'] as const)for(const kind of ['security','time','tokens'] as const){
    guard();requireDiskCapacity(()=>diskReading(dir));const leaf=join(run,`${effort}-${kind}`);mkdirSync(leaf,{mode:0o700});
@@ -129,6 +132,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   }
   durable(join(run,'manifest.json'),json(manifest));const proof=collectCodexRenewalEvidence(manifest);durable(join(run,'verified.json'),json(proof));if(proof.status!=='verified'||proof.verifiedRuns.length!==6||proof.cleanup!=='verified')throw Error(`native six-run proof refused: ${proof.reason}`);
   guard();await verifySubscription('codex');
+  for(const [host,expected] of [['github.com',network.githubIPv4],['example.com',network.exampleIPv4]] as const)if(!(await lookup(host,{family:4,all:true})).some(a=>a.address===expected))throw Error('known network target changed during renewal');
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
   const pub=claim.publisher,publisherProof=readPublisherProof(dir,pub,publisherBoundary(checkout,dir)),testedPath=publisherTestedReceipt(dir,pub),publisherExpiresAt=Math.min(expiresAt,publisherProof.completedAt+86400000);
   const tested=JSON.parse(readFileSync(testedPath,'utf8'));

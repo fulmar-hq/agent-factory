@@ -28,10 +28,11 @@ const run = z.object({
   command: text.optional(), commandProbe: ref.optional(),
 }).strict();
 const targetSchema=z.object({socket:text.refine(isAbsolute),credential:text.refine(isAbsolute),sentinel:text.refine(isAbsolute),publisher:text.refine(isAbsolute),dependencies:text.refine(isAbsolute),toolchain:text.refine(isAbsolute)}).strict();
+const networkSchema=z.object({githubIPv4:z.ipv4(),exampleIPv4:z.ipv4(),dnsIPv4:z.literal("1.1.1.1"),observedAt:time}).strict();
 const manifestSchema = z.object({
   version: z.literal(1), runId: uuid, startedAt: time, expiresAt: time,
   model: z.literal("gpt-6.1-sol"), qualifications: ref, sources: z.array(ref).min(1).max(32),
-  probe: ref, targets:targetSchema, subscription: ref, runs: z.array(run).length(6),
+  probe: ref, targets:targetSchema, network:networkSchema.optional(), subscription: ref, runs: z.array(run).length(6),
 }).strict();
 export type CodexRenewalManifest = z.infer<typeof manifestSchema>;
 export type ReceiptRef = z.infer<typeof ref>;
@@ -170,7 +171,7 @@ export function nativeFailure(value:unknown):boolean {
   }
   return false;
 }
-export function securityProbe(targets:{socket:string;credential:string;sentinel:string;publisher:string;dependencies:string;toolchain:string}){
+export function securityProbe(targets:{socket:string;credential:string;sentinel:string;publisher:string;dependencies:string;toolchain:string},network?:z.infer<typeof networkSchema>){
  return `import os,socket,subprocess,json,errno
 results={}
 errors={}
@@ -188,13 +189,22 @@ for name,path,mode in [('credential',${JSON.stringify(targets.credential)},os.O_
 results['env_clean']=not any(k in os.environ for k in ['SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','FACTORY_OWNER_TOKEN'])
 def endpoint(host):
  s=socket.create_connection((host,443),timeout=3);s.close()
-for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))
+${network?`def dns():
+ s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3)
+ try:s.sendto(bytes.fromhex('123401000001000000000000076578616d706c6503636f6d0000010001'),(${JSON.stringify(network.dnsIPv4)},53))
+ finally:s.close()
+denied('external_dns',dns)
+denied('known_example_transport',lambda:endpoint(${JSON.stringify(network.exampleIPv4)}))
+results['external_dns']=results['external_dns'] and results.pop('known_example_transport')
+try:socket.getaddrinfo('example.com',443);results['external_dns']=False
+except OSError:pass
+denied('external_ip',lambda:endpoint('1.1.1.1'))`:`for name,host in [('external_dns','example.com'),('external_ip','1.1.1.1')]:denied(name,lambda h=host:endpoint(h))`}
 open('scratch','w').write('fictional renewal probe')
 commands=[['config','user.name','Fictional Qualification'],['config','user.email','fixture@example.invalid'],['config','commit.gpgsign','false'],['add','scratch'],['commit','--allow-empty','-m','Fictional unsigned qualification snapshot'],['bundle','create','.factory-delivery.bundle','HEAD']]
 results['unsigned_bundle']=all(subprocess.run(['/usr/bin/git']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0 for args in commands)
 results['workspace_write']=True
-denied('push_QA_transport',lambda:endpoint('github.com'))
-push=subprocess.run(['/usr/bin/git','-c','http.proxy=','-c','credential.helper=','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
+denied('push_QA_transport',lambda:endpoint(${JSON.stringify(network?.githubIPv4??'github.com')}))
+push=subprocess.run(['/usr/bin/git',${network?`'-c',${JSON.stringify('http.curloptResolve=github.com:443:'+network.githubIPv4)},`:''}'-c','http.proxy=','-c','credential.helper=','push','--dry-run','https://github.com/fulmar-hq/alido.git','HEAD:refs/heads/QA'],capture_output=True,text=True)
 results['push_QA']=results.pop('push_QA_transport') and results['unsigned_bundle'] and push.returncode!=0 and \
  'unable to access' in push.stderr.lower() and 'https://github.com/fulmar-hq/alido.git' in push.stderr.lower() and any(s in push.stderr.lower() for s in ['operation not permitted','failed to connect','could not resolve host',"couldn't connect to server"])
 passed=all(results.values())
@@ -370,6 +380,7 @@ export function collectCodexRenewalEvidence(input: unknown, options: CodexRenewa
     const checkClock = () => { const now = time.parse(clock()); requireThat(now >= previousClock && now >= m.startedAt && now < m.expiresAt, "clock regression or expired proof"); previousClock = now; return now; };
     requireThat(m.expiresAt > m.startedAt && m.expiresAt - m.startedAt <= 86400000, "bounded evidence lifetime required");
     checkClock();
+    if(m.network)requireThat(m.network.observedAt>=m.startedAt&&m.network.observedAt<=Math.min(...m.runs.map(r=>r.startedAt)), 'known network preflight timestamp unbound');
     const load = (r: ReceiptRef) => {
       requireThat(!captured.has(r.path), "reused receipt path");
       const bytes = Uint8Array.from(read(r.path));
@@ -385,7 +396,7 @@ export function collectCodexRenewalEvidence(input: unknown, options: CodexRenewa
     for (const key of ["codex", "codex:medium", "codex:high"]) requireThat(deferred.safeParse(q[key]).success, "existing phone-deferred waiver required");
     for (const source of m.sources) load(source);
     const probeBytes=load(m.probe);
-    requireThat(new TextDecoder("utf-8",{fatal:true}).decode(probeBytes)===securityProbe(m.targets), "known-target paths do not match immutable supported probe");
+    requireThat(new TextDecoder("utf-8",{fatal:true}).decode(probeBytes)===securityProbe(m.targets,m.network), "known-target paths do not match immutable supported probe");
     const subscription = z.object({ argv: z.tuple([z.literal("codex"), z.literal("login"), z.literal("status")]), code: z.literal(0), signal: z.null(), stdout: z.string(), stderr: z.string(), observedAt: time }).strict().parse(json(load(m.subscription)));
     requireThat(subscription.observedAt >= m.startedAt && subscription.observedAt <= previousClock && /Logged in using ChatGPT/i.test(subscription.stdout + "\n" + subscription.stderr) && !/API[\s_-]*key|third.party/i.test(subscription.stdout + "\n" + subscription.stderr), "actual subscription receipt missing");
     requireThat(new Set(m.runs.map(r => r.nativeId)).size === 6 && new Set(m.runs.map(r => `${r.effort}:${r.kind}`)).size === 6, "six distinct medium/high native runs required");

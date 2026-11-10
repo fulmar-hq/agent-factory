@@ -28,7 +28,7 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
  const id=renewalDigest({qualification:renewalDigest(bytes),fingerprint});
  return e.s.atomic(()=>{
   const previous=e.s.get<{id:string;dueAt:number}>('codex-renewal-schedule');
-  const schedule={id,...due,workerDueAt,publisherExpiresAt:delivery?.expiresAt,fingerprint,observedAt:now};e.s.set('codex-renewal-schedule',schedule);
+  const schedule={id,...due,workerDueAt,publisherExpiresAt:delivery?.expiresAt,fingerprint,observedAt:now,nextCheckAt:now+60000};e.s.set('codex-renewal-schedule',schedule);
   if(previous?.id!==id)e.s.event(`renewal-scheduled:${id}`,'codex-renewal-scheduled',schedule,'Retain schedule and custody; rollback through reviewed source, never advance expiry from a schedule',now);
   if(e.s.get('codex-renewal-uncertain')===true)return {state:'adoption-uncertain',...schedule};
   if(now<due.dueAt)return {state:'scheduled',...schedule};

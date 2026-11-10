@@ -317,3 +317,8 @@ for(const bad of ['unsupported command','permission key','other workdir','second
 test('unrelated kernel rows with zero process/group IDs do not invalidate complete snapshots',()=>{
  const f=fixture(),r=f.m.runs[0];f.mutate(r.supervisor,s=>{for(const snapshot of [s.before,s.final])snapshot.rows.push({pid:0,parent:0,group:0,state:'S',identity:'fictional kernel zero'},{pid:2,parent:0,group:0,state:'S',identity:'fictional kernel task'});});expect(f.collect().status).toBe('verified');
 });
+
+
+test('known-address probe binds real network policy denials without treating a resolver error as permission denial',()=>{
+ const f=fixture(),network={githubIPv4:'192.0.2.1',exampleIPv4:'192.0.2.2',dnsIPv4:'1.1.1.1' as const,observedAt:startedAt};f.m.network=network;const b=bytes(securityProbe(f.m.targets,network));f.files.set(f.m.probe.path,b);f.m.probe.sha256=digest(b);for(const r of f.m.runs){f.mutate(r.supervisor,s=>{s.probeBeforeSha256=f.m.probe.sha256;s.probeAfterSha256=f.m.probe.sha256;});if(r.commandProbe)f.mutate(r.commandProbe,c=>{c.probeSha256=f.m.probe.sha256;c.probeAfterSha256=f.m.probe.sha256;});}expect(f.collect().status).toBe('verified');f.m.network.githubIPv4='192.0.2.3';expect(f.collect().status).toBe('refused');
+});
