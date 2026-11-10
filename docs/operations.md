@@ -230,3 +230,14 @@ Retained source/Git/transcript growth remains evidence and is not a deletion
 candidate. APFS du totals include shared clone extents: report actual free-space
 deltas from df separately from directory growth. Undo with a reviewed signed
 revert; retain cleanup receipts and restore dependencies from the pinned source.
+
+New worker and publisher source is materialized from one trusted immutable seed
+per expected base under `runs/source-seeds`. The seed uses independent Git objects
+and a checked-out clean committed tree. Consumers receive independent APFS
+copy-on-write files; dirty canonical source is never copied. Missing, changed or
+incomplete seed custody refuses setup. Other platforms copy independent files.
+Worker setup pins `refs/factory/base` and requests an incremental delivery bundle
+(`HEAD ^refs/factory/base`) so each task retains its new objects rather than a
+second full repository history. Publication still imports against its original
+expected base and checks every intermediate commit and the exact tested tree.
+Existing full bundles, source snapshots and Git objects remain preserved.

@@ -84,6 +84,41 @@ export async function cloneStandalone(source:string,target:string,execute=comman
   await execute(["git","-C",target,"cat-file","-e","HEAD^{commit}"]);
 }
 
+// One trusted immutable source seed per base. Every consumer receives independent
+// APFS clone files, never hardlinks or writable access to the seed. Historical
+// source and Git receipts are retained; only future redundant writes are avoided.
+export async function materializeTree(source:string,target:string,base:string,seeds:string,execute=command,platform:NodeJS.Platform=process.platform) {
+  if(!/^[a-f0-9]{40}$/.test(base))throw Error("immutable source base required");
+  mkdirSync(seeds,{recursive:true,mode:0o700});
+  if(realpathSync(seeds)!==resolve(seeds))throw Error("linked source seed root refused");
+  const seed=join(seeds,base),ready=join(seeds,`${base}.ready.json`);
+  let owns=false;
+  try{mkdirSync(seed,{mode:0o700});owns=true;}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}
+  const git=(dir:string,...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",dir,...args]);
+  if(owns) {
+    // cloneStandalone expects an absent destination; retain a separate setup
+    // claim directory rather than deleting it to make room.
+    const checkout=join(seed,"source");
+    await cloneStandalone(source,checkout,execute,platform);
+    await git(checkout,"checkout","--detach",base);
+    if((await git(checkout,"status","--porcelain")).trim())throw Error("dirty source seed refused");
+    const {writeFileSync}=await import("node:fs");
+    writeFileSync(ready,JSON.stringify({base,source:checkout}),{flag:"wx",mode:0o600});
+  } else {
+    for(let n=0;n<300&&!existsSync(ready);n++)await new Promise(r=>setTimeout(r,100));
+  }
+  const checkout=join(seed,"source");
+  if(!existsSync(ready)||lstatSync(ready).isSymbolicLink()||realpathSync(checkout)!==checkout ||
+    JSON.parse(readFileSync(ready,"utf8")).base!==base || (await git(checkout,"rev-parse","HEAD")).trim()!==base ||
+    (await git(checkout,"status","--porcelain")).trim())throw Error("source seed custody incomplete");
+  const names=(await git(checkout,"ls-tree","-z","--name-only",base)).split("\0").filter(Boolean);
+  for(const name of names) {
+    if(name===".git"||name.includes("/")||existsSync(join(target,name)))throw Error("source destination already populated");
+    await execute(["cp",platform==="darwin"?"-cR":"-R",join(checkout,name),join(target,name)]);
+  }
+  await git(target,"read-tree",base);
+}
+
 export const deliveryRepo = "fulmar-hq/alido";
 export const isDeliveryRepo = (repo:string) => [deliveryRepo,"fulmar-hq/agent-factory"].includes(repo);
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
@@ -168,6 +203,8 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     renameSync(join(workspace,".git"),join(archive,"original-gitfile"));
     renameSync(join(clone,".git"),join(workspace,".git"));
   }
+  // A trusted immutable expected base also bounds the worker delivery bundle.
+  if(!(await git("show-ref","--verify","--hash","refs/factory/base").catch(()=>"" )).trim())await git("update-ref","refs/factory/base",(await git("rev-parse","HEAD")).trim());
   const eviction=join(workspace,".factory-tmp/dependencies-evicted.jsonl");
   if(existsSync(eviction)) {
     if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
@@ -230,7 +267,7 @@ export type PublishAuthority = {
   isolationVerified: boolean;
 };
 export async function publish(t:Ticket, id:string, workspace:string, dir:string, baseline:string,
-  authority:PublishAuthority, execute=command, trustedSource=workspace) {
+  authority:PublishAuthority, execute=command, trustedSource=workspace, seeds?:string) {
   if (!authority.isolationVerified) throw Error("publisher blocked: isolation unproven");
   if (![deliveryRepo,"fulmar-hq/agent-factory"].includes(t.repo) || !/^[a-f0-9]{40}$/.test(baseline)) throw Error("publisher destination/base refused");
   authority.verifyClaim();
@@ -258,6 +295,10 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   }
   const changed=(await git("diff","--name-only",baseline,head)).trim().split("\n").filter(Boolean);
   if(!changed.length || changed.some(p=>!t.paths.includes(p)))throw Error("delivery paths outside approved scope");
+  if(seeds) {
+    await git("update-ref","--no-deref","HEAD",baseline);
+    await materializeTree(trustedSource,checkout,baseline,seeds,execute);
+  }
   await git("checkout","--detach",head);
   if((await git("status","--porcelain")).trim())throw Error("publisher checkout not clean");
   const tree=(await git("rev-parse","HEAD^{tree}")).trim();

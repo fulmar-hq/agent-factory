@@ -1,6 +1,6 @@
 import type {PublisherBoundary} from './publisher-evidence';
 import {reviewPublished} from './queue';
-import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
+import { materializeTree,prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { planDeliveryRetention } from "./delivery-retention";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker, type WorkerObservation } from "./child";
@@ -59,17 +59,20 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
     const delivery = t.provider === "codex" && isDeliveryRepo(t.repo);
     if (delivery) executableTest(t.test);
     const base = !continuation && delivery ? await deliveryBase(source,t.repo) : "HEAD";
-    if (!continuation) await command([
+    if (!continuation) {await command([
       "git",
       "-C",
       source,
       "worktree",
       "add",
+      ...(delivery ? ["--no-checkout"] : []),
       "-b",
       `feat/factory-${id.slice(0, 16)}`,
       workspace,
       base,
     ]);
+    if(delivery)await materializeTree(source,workspace,base,join(root,"runs/source-seeds"));
+    }
     s.event(
       `workspace:${id}`,
       "workspace",
@@ -97,7 +100,7 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
         const claims=s.db.query("SELECT path FROM claims WHERE session=?").all(id) as {path:string}[];
         if(!current || current.status!=="finished" || s.get("paused")!==false || s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true || !q || q.version!==2 || q.expiresAt<=Date.now() || claims.length!==t.paths.length || t.paths.some(p=>!claims.some(c=>c.path===p.toLowerCase())))throw Error("publisher claim/cleanup/qualification refused");
       };
-      const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
+      const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source,join(root,"runs/source-seeds"));
       verifyClaim();const executionReceipt=publisher?join(archive,'publisher/implementation.json'):undefined;
       if(executionReceipt)writeFileSync(executionReceipt,JSON.stringify({version:1,boundary:publisher!.boundary,startedAt:publishingAt,completedAt:Date.now(),authorityExpiresAt:s.get<{expiresAt:number}>('delivery-qualified')!.expiresAt,head:result.head,tree:result.tree}),{flag:'wx',mode:0o600});
       s.event(`publish:${id}`,"launcher-publish",{id,...result,executionReceipt,testedTreeReceipt:join(archive,'publisher/tested-tree.json')},"Retain PR and signed tree; undo accepted changes with signed revert");

@@ -160,15 +160,15 @@ test("trusted Git receives an immutable private bundle snapshot and refuses syml
 });
 
 test("launcher signs only the tested snapshot and refuses dirty or mismatched receipts",async()=>{
- const {mkdtempSync,mkdirSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {mkdtempSync,mkdirSync,writeFileSync,realpathSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {publish}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
- const dir=mkdtempSync(join(tmpdir(),"factory-publish-")),source=join(dir,"source");mkdirSync(source);
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-publish-"))),source=join(dir,"source");mkdirSync(source);
  const git=(...a:string[])=>command(["git","-C",source,...a]);
  await git("init");await git("config","user.name","Fictional");await git("config","user.email","fixture@example.invalid");
  writeFileSync(join(source,"fixture"),"base");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","base");
  const base=(await git("rev-parse","HEAD")).trim();
  writeFileSync(join(source,"fixture"),"tested");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","worker");
- await git("bundle","create",".factory-delivery.bundle","HEAD");
+ await git("bundle","create",".factory-delivery.bundle","HEAD",`^${base}`);
  const t={...ticket(),repo:"fulmar-hq/alido",paths:["fixture"]},calls:string[][]=[];
  let signed="",testedTree="";
  const execute=async(a:string[])=>{
@@ -187,7 +187,7 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
  let claims=0;
  const result=await publish(t,"a".repeat(64),source,join(dir,"pass"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
   expect(await Bun.file(join(checkout,"fixture")).text()).toBe("tested");return {tree,passed:true};
- }},execute,source);
+ }},execute,source,join(dir,"source-seeds"));
  expect(claims).toBe(3);expect(calls.find(a=>a.includes("commit-tree"))).toContain("-S");
  expect(calls.find(a=>a.includes("push"))?.at(-1)).toBe(`refs/heads/${result.branch}:refs/heads/${result.branch}`);
  expect((await command(["git","-C",source,"rev-parse","HEAD^{tree}"])).trim()).toBe(result.tree);
@@ -249,4 +249,27 @@ test('standalone copy-on-write clone has no live alternates and mutations never 
  // A source that itself depends on external objects is never copied as standalone.
  writeFileSync(join(source,'.git/objects/info/alternates'),'/fictional/other/objects');
  if(process.platform==='darwin')await expect(cloneStandalone(source,join(dir,'refused'))).rejects.toThrow('standalone source');
+});
+
+test('source seeds preserve immutable baselines and give each consumer independent files',async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,lstatSync,realpathSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {materializeTree}=await import('../adapters/delivery'),{command}=await import('../adapters/github');
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),'factory-source-seed-'))),source=join(dir,'original'),seeds=join(dir,'seeds');mkdirSync(source);
+ const git=(where:string,...args:string[])=>command(['git','-C',where,...args]);
+ await git(source,'init');writeFileSync(join(source,'fixture'),'committed baseline');await git(source,'add','fixture');
+ await git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.test','-c','commit.gpgsign=false','commit','-m','fixture');
+ const base=(await git(source,'rev-parse','HEAD')).trim();writeFileSync(join(source,'fixture'),'private dirty original');
+ for(const name of ['one','two']) {
+  const target=join(dir,name);await git(source,'worktree','add','--detach','--no-checkout',target,base);
+  await materializeTree(source,target,base,seeds);
+  expect(readFileSync(join(target,'fixture'),'utf8')).toBe('committed baseline');
+  expect((await git(target,'status','--porcelain')).trim()).toBe('');
+  expect(lstatSync(join(target,'fixture')).nlink).toBe(1);
+  writeFileSync(join(target,'fixture'),'independent consumer edit');
+ }
+ expect(readFileSync(join(source,'fixture'),'utf8')).toBe('private dirty original');
+ expect(readFileSync(join(seeds,base,'source/fixture'),'utf8')).toBe('committed baseline');
+ writeFileSync(join(seeds,base,'source/fixture'),'changed seed');
+ const refused=join(dir,'refused');await git(source,'worktree','add','--detach','--no-checkout',refused,base);
+ await expect(materializeTree(source,refused,base,seeds)).rejects.toThrow('source seed custody incomplete');
 });
