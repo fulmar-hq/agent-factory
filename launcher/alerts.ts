@@ -70,3 +70,22 @@ export function relatedFactoryAlarm(path:string,condition:'qualification'|'disk'
  for(const row of rows){if(row.created_at>=now-2*3600000)return row;const table=db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_messages'").get();if(!table||!db.query('SELECT 1 FROM telegram_messages WHERE mail_id=? LIMIT 1').get(row.id))return row;}return null;
  }finally{db.close();}
 }
+
+// One bridge message per durable watchdog incident, even across a crash between
+// outbox insertion and local receipt. Resolution is recorded without a message.
+export function watchdogAlert(s:Store,now:number,path=mailPath()) {
+ const incident=s.get<{id:string;state:string;summary:string}>('watchdog-stall');
+ if(!incident || incident.state!=='open' || s.get(`alert:${incident.id}`))return;
+ try {
+  if(!existsSync(path))throw Error('existing Telegram bridge store unavailable');
+  const db=new Database(path,{readwrite:true,strict:true});
+  try {
+   db.exec('PRAGMA busy_timeout=10000');
+   db.query(`INSERT OR IGNORE INTO messages(id,send_id,created_at,sender,sender_app,sender_ref,recipient,recipient_app,kind,reply,summary,body,thread_id,depth,hash,state,wake_state)
+     VALUES(?,?,?,'Factory Desk','codex','factory-watchdog','Vincent','telegram','fyi','none',?,'',?,0,?,'unread','pending')`)
+     .run(incident.id,incident.id,now,incident.summary,incident.id,createHash('sha256').update(incident.summary).digest('hex'));
+  }finally{db.close();}
+  s.set(`alert:${incident.id}`,{queuedAt:now,path});
+  s.event(`alert:${incident.id}`,'watchdog-alert-queued',{id:incident.id},'Retain outbox evidence; never resend this incident',now);
+ }catch(error){s.event(crypto.randomUUID(),'watchdog-alert-failure',{id:incident.id,error:String(error)},'Retry the existing bridge with the same incident ID',now);}
+}
