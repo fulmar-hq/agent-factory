@@ -1,7 +1,7 @@
 import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { observeBilling, available } from "../wallet/ledger";
 import { issueTicket, type Issue } from "../adapters/github";
