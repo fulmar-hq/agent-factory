@@ -135,6 +135,18 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  expect(readFileSync(join(source,"node_modules/fixture"),"utf8")).toBe("original dependency");
  expect(realpathSync(join(work,"node_modules/node_modules"))).toBe(realpathSync(join(work,"node_modules")));
  expect(readFileSync(join(dir,"archive/original-gitfile"),"utf8")).toContain("gitdir:");
+ const {existsSync,readdirSync}=await import('node:fs');
+ expect(existsSync(join(dir,'archive/local-clone/fixture'))).toBe(false);
+ mkdirSync(join(work,'.factory-tmp'),{recursive:true});
+ writeFileSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'),'retained eviction receipt');
+ writeFileSync(join(work,'node_modules/result.log'),'retained evidence');
+ await prepareDelivery(work,source,join(dir,'archive'),id);
+ expect(readFileSync(join(work,'node_modules/fixture'),'utf8')).toBe('original dependency');
+ const preserved=readdirSync(join(dir,'archive')).find(p=>p.startsWith('dependency-evidence-'))!;
+ expect(readFileSync(join(dir,'archive',preserved,'result.log'),'utf8')).toBe('retained evidence');
+ expect(readFileSync(join(work,'fixture'),'utf8')).toBe('preserved edit');
+ expect(existsSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'))).toBe(false);
+
 });
 
 test("trusted Git receives an immutable private bundle snapshot and refuses symlinks",async()=>{

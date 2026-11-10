@@ -204,3 +204,29 @@ Until the recurring cleaner is reviewed and installed, Platform performs the bou
 Tool caches need a separate activity check. Bun's install cache and npm's `_cacache` are regenerable when no installer or process uses them. Playwright browser revisions are eligible only when proven unused; preserve them when browser custody is unclear. Xcode DerivedData, if present, needs the same unused check. Do not broaden this authority to app caches or user data. Report large retained items and their sizes to Coordinator for a separate decision.
 
 The recurring guard must clean after a verified finished session, **after** publication/tests/browser handoff consumers release the workspace, and run a daily idle sweep with the same protections. Finished native generation alone is insufficient. Waiting-browser, live, recent, unknown or unverified cleanup custody stays intact. All private-root workspaces are excluded under the current cleanup authority; resolving their build-material retention needs explicit scoped policy before enabling deletion there. The job must serialize sweeps, support dry-run, retain deletion intents/results, recheck process/path/ignore evidence immediately before each deletion, and visibly retain failures. The tick records actual disk readings under `disk-capacity` and an append-only event on warning/unknown/recovery transitions. At 80% it emits an actionable stderr warning once per episode; repeated ticks retain updated readings without repeating the warning. Unknown filesystem evidence is visible and never clears a pause. The warning is source-implemented here; installed readback still follows review. No launchd install, live checkout patch, automatic session retry, model call or AWS change is part of this rule. #138 owns implementation, synthetic safety tests, normal signed PR review, Coordinator activation and installed readback; this document does not claim that automation is already active.
+
+### Factory cache lifecycle (Nov 10)
+
+Platform's Nov 10 instruction extends cache-only cleanup to factory workspaces,
+including waiting-browser parents, delivery/run clones and `work/review-*`.
+`scripts/cache-retention.py --root "$FACTORY_PRIVATE_DIR"` previews eligible
+`node_modules`, `.next` and `.turbo`; add `--apply` to remove only regenerable
+content. The existing five-minute maintenance job invokes it after releasing its
+maintenance lease. It does not load or reconfigure launchd. Session caches need
+finished/archived/waiting-browser status, null supervisor PID, verified descendant
+cleanup, and fresh process/cwd/open-file checks. Reservation and continuation
+cannot race deletion because the final checks and removal hold the SQLite writer
+transaction. Other run/review clones require one quiet hour and no maintenance
+custody. Unknown probes, linked roots, tracked/index/HEAD content and nested Git
+refuse cleanup. Native history, bundles, Git objects, dirty source, scratch,
+logs, receipts and evidence remain. Receipts append exact intents/results and df
+readings under `receipts/cache-retention`; failed paths remain visible.
+
+Waiting-browser eviction records a private scratch receipt. Trusted worker setup
+restores pinned dependencies before resuming, archiving any in-cache evidence and
+the eviction receipt. Source setup initializes the independent Git index without
+checking out a second source tree in the retained local-clone setup directory.
+Retained source/Git/transcript growth remains evidence and is not a deletion
+candidate. APFS du totals include shared clone extents: report actual free-space
+deltas from df separately from directory growth. Undo with a reviewed signed
+revert; retain cleanup receipts and restore dependencies from the pinned source.

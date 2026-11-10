@@ -160,9 +160,20 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     if (branch !== branchFor(id)) throw Error("worker branch mismatch");
     const clone=join(archive,"local-clone");
     await cloneStandalone(source,clone);
-    await command(["git","-C",clone,"checkout","-b",branch,head]);
+    // Populate only the independent index/ref. The real workspace already has
+    // its source; checking out here retained a second full source tree per task.
+    await command(["git","-C",clone,"update-ref",`refs/heads/${branch}`,head]);
+    await command(["git","-C",clone,"symbolic-ref","HEAD",`refs/heads/${branch}`]);
+    await command(["git","-C",clone,"read-tree",head]);
     renameSync(join(workspace,".git"),join(archive,"original-gitfile"));
     renameSync(join(clone,".git"),join(workspace,".git"));
+  }
+  const eviction=join(workspace,".factory-tmp/dependencies-evicted.jsonl");
+  if(existsSync(eviction)) {
+    if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
+    // Keep in-cache logs/receipts and the eviction receipt. Resume gets a
+    // complete pinned dependency copy before any native process starts.
+    if(existsSync(join(workspace,"node_modules")))renameSync(join(workspace,"node_modules"),join(archive,`dependency-evidence-${crypto.randomUUID()}`));
   }
   if (!existsSync(join(workspace,"node_modules"))) {
     if (!existsSync(join(source,"node_modules"))) throw Error("installed dependencies missing");
@@ -170,6 +181,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   }
   verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
+  if(existsSync(eviction))renameSync(eviction,join(archive,`dependency-restored-${crypto.randomUUID()}.jsonl`));
   const metadata=join(workspace,".git");
   if(realpathSync(metadata)!==metadata || existsSync(join(metadata,"commondir")) || existsSync(join(metadata,"objects/info/alternates")))throw Error("standalone worker Git required");
   const checkGit=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {

@@ -58,4 +58,7 @@ if(import.meta.main){
  const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
  try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,identity:processIdentity(process.pid),at:Date.now()});ownsLease=true;});console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s))));}
  finally{const challenge=s.get<{state:string}>('factory-challenge-slot');if(ownsLease&&(!challenge||challenge.state==='released')&&s.get<{id:string}>('launcher-maintenance-lease')?.id===leaseId)s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'released',at:Date.now()});s.close();renameSync(lock,join(directory,`completed-${Date.now()}-${crypto.randomUUID()}`));}
+ // The existing scheduled job owns recurring factory cache retention. The
+ // cleaner serializes its own sweep and rechecks native/launcher custody.
+ console.log(await command(['python3',join(repo,'scripts/cache-retention.py'),'--root',root,'--apply']));
 }
