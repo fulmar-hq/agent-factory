@@ -72,14 +72,17 @@ export async function releaseWindowResult(s:Store,o:ReleaseResultOptions={}) {
  const body=plain.length<=120?'':serverText;
  const path=o.path??mailPath();
  if(!existsSync(path))throw Error('existing Alido Mail outbox is unavailable');
+ let retained:{created_at:number;summary:string;body:string}|undefined;
  const db=new Database(path,{readwrite:true,strict:true});
  try{
   db.exec('PRAGMA busy_timeout=10000');
   db.query(`INSERT OR IGNORE INTO messages(id,send_id,created_at,sender,sender_app,sender_ref,recipient,recipient_app,kind,reply,summary,body,thread_id,depth,hash,state,wake_state)
    VALUES(?,?,?,'Release','codex','factory-release-result','Vincent','telegram','handoff','none',?,?,?,0,?,'unread','pending')`)
    .run(id,id,now,summary,body,id,createHash('sha256').update(summary+'\n'+body).digest('hex'));
+  retained=db.query('SELECT created_at,summary,body FROM messages WHERE id=?').get(id) as typeof retained;
+  if(!retained)throw Error('Queued result readback missing');
  }finally{db.close();}
- const receipt={queuedAt:now,path,...result,stopped,servers:servers??null,...(error?{error}:{})};
+ const receipt={queuedAt:retained!.created_at,path,shipped:retained!.summary.startsWith('Shipped.'),stopped:(retained!.summary+' '+retained!.body).includes('QA servers stopped: yes.'),summary:retained!.summary,body:retained!.body,computedResult:result,computedStopped:stopped,servers:servers??null,...(error?{error}:{})};
  s.set(id,receipt);s.event(id,'release-window-result',receipt,undo,now);
- return {queued:true,id,...result,stopped};
+ return {queued:true,id,shipped:receipt.shipped,stopped:receipt.stopped};
 }
