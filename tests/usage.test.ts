@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { codexReading } from "../adapters/usage";
@@ -135,3 +135,74 @@ test("70/90 thresholds apply to every exposed window, including a single weekly 
   expect(()=>usageGate(claude,false,now,c,"claude")).not.toThrow();
   expect(claude?.windows[0].name).toBe("seven_day");
 });
+
+import {claudeStatus} from '../adapters/usage';
+const quotaPanel=(all=43,model=18)=>`Settings  Status  Config  Usage  Stats
+Session
+Total duration (API): 0s
+Usage: 0 input, 0 output, 0 cache read, 0 cache write
+Current week (all models)
+${all}% ${all}% used
+Resets Nov 14 at 4pm (America/Toronto)
+Current week (Fable)
+${model}% ${model}% used
+Resets Nov 14 at 3:59pm (America/Toronto)
+Usage credits are off
+Esc to cancel`;
+async function parseQuota(text:string) {
+ const child=Bun.spawn(['/usr/bin/python3','-I','-B',new URL('../scripts/claude-usage.py',import.meta.url).pathname,'--parse'],{stdin:'pipe',stdout:'pipe',stderr:'pipe'});
+ child.stdin.write(JSON.stringify({text,observedAt:Date.parse('2026-11-12T19:00:00-05:00')}));child.stdin.end();
+ const [out,code]=await Promise.all([new Response(child.stdout).text(),child.exited]);expect(code).toBe(0);return JSON.parse(out);
+}
+test('native Claude quota panel retains every actually exposed window and timezone reset',async()=>{
+ const meter=await parseQuota(quotaPanel());
+ expect(meter).toMatchObject({nativeProvider:'claude',windows:[{name:'Current week (all models)',used:.43,resetsAt:Date.parse('2026-11-14T16:00:00-05:00')},{name:'Current week (Fable)',used:.18,resetsAt:Date.parse('2026-11-14T15:59:00-05:00')}]});
+ expect((await parseQuota(quotaPanel(82,91))).windows.map((w:any)=>w.used)).toEqual([.82,.91]);
+ expect(meter.windows.some((w:any)=>w.name==='five_hour')).toBe(false);
+ const redrawn=quotaPanel().replace('\nCurrent week (Fable)','\nEsc to cancel\u001b[14B\u001b[2K\u001b[GCurrent week (Fable)');
+ expect((await parseQuota(redrawn)).windows.map((w:any)=>w.used)).toEqual([.43,.18]);
+});
+test('incomplete, login, unknown reset, inconsistent percentages and model usage panels cannot supply quota',async()=>{
+ for(const text of [quotaPanel().replace('Resets Nov 14 at 3:59pm (America/Toronto)',''),quotaPanel()+'\nEnter y/n:',quotaPanel().replace('Nov 14 at 4pm','an unknown time'),quotaPanel().replace('43% 43%','43% 44%'),quotaPanel(101),quotaPanel().replace('0 input','1 input'),quotaPanel().replace(/Current week \(all models\)\n43% 43% used\nResets Nov 14 at 4pm \(America\/Toronto\)\n/,''),quotaPanel()+'\nUsage: 1 input, 0 output, 0 cache read, 0 cache write',quotaPanel()+'\nTotal duration (API): 1s','9% used; status allowed'])expect(await parseQuota(text)).toBeNull();
+});
+test('explicit Claude quota reader validates native provider, source and actual observation time',async()=>{
+ const native=()=>({observedAt:Date.now(),nativeProvider:'claude',windows:[{name:'Current week (all models)',used:.23,resetsAt:Date.now()+3600000}],source:'native Claude /usage TUI'});
+ expect(await claudeStatus(async(args,cwd,timeout)=>{expect(args.slice(0,3)).toEqual(['/usr/bin/python3','-I','-B']);expect(cwd).toBe('/fictional/trusted');expect(timeout).toBe(10000);return JSON.stringify(native());},'/fictional/trusted')).toMatchObject({nativeProvider:'claude'});
+ for(const raw of [null,{...native(),observedAt:1},{...native(),nativeProvider:'codex'},{...native(),source:'fictional status allowed'}])expect(await claudeStatus(async()=>JSON.stringify(raw))).toBeUndefined();
+});
+
+test('quota helper drains late quota rows and tears down its CLI group despite diagnostic failure or SIGTERM',async()=>{
+ const directory=mkdtempSync(join(tmpdir(),'factory-quota-custody-'));
+ const helper=new URL('../scripts/claude-usage.py',import.meta.url).pathname;
+ try{
+  for(const mode of ['diagnostic-failure','signal','staged-high','staged-incomplete']){
+   const pidFile=join(directory,`${mode}.pids`),fixture=join(directory,`fixture-${mode}.py`),wrapper=join(directory,`${mode}-wrapper.py`),diagnostic=join(directory,`${mode}.json`);
+   writeFileSync(diagnostic,'retained diagnostic sentinel');
+   const panel=mode==='signal'?'':quotaPanel().replaceAll('Nov 14','Dec 30');
+   const aggregate=panel.replace(/Current week \(Fable\)\n18% 18% used\nResets Dec 30 at 3:59pm \(America\/Toronto\)\n/,'');
+   const late='\u001b[18B\u001b[2K\u001b[GCurrent week (Fable)\n91% 91% used\n'+(mode==='staged-high'?'Resets Dec 30 at 3:59pm (America/Toronto)\n':'')+'Usage credits are off\nEsc to cancel';
+   const emit=mode.startsWith('staged-')?`print(${JSON.stringify(aggregate)},flush=True)\ntime.sleep(.15)\nprint(${JSON.stringify(late)},flush=True)`:`print(${JSON.stringify(panel)},flush=True)`;
+   writeFileSync(fixture,`import os,sys,subprocess,json,time\nchild=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])\nopen(${JSON.stringify(pidFile)},'w').write(json.dumps([os.getpid(),child.pid]))\nprint('$',flush=True)\nsys.stdin.readline()\n${emit}\ntime.sleep(60)\n`);
+   writeFileSync(wrapper,`import importlib.util,subprocess,sys,json,os\nspec=importlib.util.spec_from_file_location('quota',${JSON.stringify(helper)})\nm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nm.time.time=lambda:${Date.parse('2026-11-12T19:00:00-05:00')/1000}\noriginal=m.subprocess.Popen\nm.subprocess.Popen=lambda args,**kwargs:original([sys.executable,'-I','-B',${JSON.stringify(fixture)}],**kwargs)\nos.environ['FACTORY_CLAUDE_USAGE_RECEIPT']=${JSON.stringify(diagnostic)}\nm.install_signal_handlers()\nprint(json.dumps(m.read_usage(.6,.05)))\n`);
+   const child=Bun.spawn(['/usr/bin/python3','-I','-B',wrapper],{stdout:'pipe',stderr:'pipe'});
+   const output=new Response(child.stdout).text(),errors=new Response(child.stderr).text();
+   let pids:number[]=[];
+   try{
+    const deadline=Date.now()+2000;while(!existsSync(pidFile)&&Date.now()<deadline)await Bun.sleep(10);
+    if(!existsSync(pidFile)){child.kill('SIGTERM');await child.exited;throw Error(await errors);}
+    pids=JSON.parse(readFileSync(pidFile,'utf8'));
+    if(mode==='signal')child.kill('SIGTERM');
+    const [out,err,exit]=await Promise.all([output,errors,child.exited]);
+    if(mode==='diagnostic-failure'||mode==='staged-high'){expect(exit).toBe(0);expect(JSON.parse(out).nativeProvider).toBe('claude');expect(err).toContain('diagnostic unavailable');if(mode==='staged-high')expect(JSON.parse(out).windows.map((w:any)=>w.used)).toEqual([.43,.91]);}
+    else if(mode==='signal')expect(exit).toBe(143);
+    else {expect(exit).not.toBe(0);expect(err).toContain('complete quota panel unavailable');}
+    expect(readFileSync(diagnostic,'utf8')).toBe('retained diagnostic sentinel');
+    for(const pid of pids){
+     const ps=Bun.spawn(['/bin/ps','-p',String(pid),'-o','state='],{stdout:'pipe',stderr:'pipe'});
+     const state=(await new Response(ps.stdout).text()).trim();await ps.exited;
+     expect(!state||state.startsWith('Z')).toBe(true);
+    }
+   }finally{child.kill('SIGKILL');for(const pid of pids){try{process.kill(pid,'SIGKILL');}catch{}}}
+  }
+ }finally{rmSync(directory,{recursive:true});}
+},10000);
