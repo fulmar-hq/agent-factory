@@ -56,7 +56,7 @@ export async function launchReady(e: Engine, t: Ticket, a: Admission & { qualifi
   return session;
 }
 export function spawnSupervisor(id: string, dir: string) {
-  const p = Bun.spawn([process.execPath, join(import.meta.dir, "worker.ts"), id], {
+  const p = Bun.spawn([process.execPath, join(import.meta.dir, "worker-entry.ts"), id], {
     env: { ...process.env, FACTORY_PRIVATE_DIR: dir },
     // launchd terminates the tick's remaining process group when the tick exits.
     // unref alone only releases Bun's event loop; it does not create a new group.

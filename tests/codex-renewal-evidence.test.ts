@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, linkSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { collectCodexRenewalEvidence, readCodexRenewalReceipt, securityChecks, securityProbe, type CodexRenewalManifest, type ReceiptRef } from "../launcher/codex-renewal-evidence";
+import { collectCodexRenewalEvidence, readCodexRenewalReceipt, securityChecks, securityProbe, qualificationCodeCommand, type CodexRenewalManifest, type ReceiptRef } from "../launcher/codex-renewal-evidence";
 
 // Entirely fictional retained owner captures. No model, target, process, socket,
 // subscription command or qualification replacement is executed by this suite.
@@ -301,3 +301,8 @@ test('root may exit on TERM before bounded descendant KILL and final absence',()
  expect(f.collect().status).toBe('verified');
  const bad=f.m.runs.find(r=>r.kind==='time')!;f.mutate(bad.supervisor,s=>{s.signals.at(-1).at=s.final.at+1;});expect(f.collect().status).toBe('refused');
 });
+
+
+function codeSecurity(f:ReturnType<typeof fixture>){for(const r of f.m.runs.filter(r=>r.kind==='security')){f.mutate(r.rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='function_call').payload,output=rows.find((x:any)=>x.payload?.type==='function_call_output').payload;call.type='custom_tool_call';call.name='exec';call.input=qualificationCodeCommand(r.command!);delete call.arguments;output.type='custom_tool_call_output';output.output=[{type:'input_text',text:'Script completed\nWall time 0.1 seconds\nOutput:\n'},{type:'input_text',text:JSON.stringify({exit_code:0,output:output.output})}];},true);}}
+test('current native code-mode security wrapper binds one literal command and actual successful response',()=>{const f=fixture();codeSecurity(f);expect(f.collect().status).toBe('verified');});
+for(const bad of ['extra code','extra key','failed command','unbound response','running response'] as const)test('code-mode qualification refuses '+bad,()=>{const f=fixture();codeSecurity(f);f.mutate(f.m.runs[0].rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload,output=rows.find((x:any)=>x.payload?.type==='custom_tool_call_output').payload;if(bad==='extra code')call.input+='text("forged");';if(bad==='extra key')call.input=call.input.replace('"cmd":','"login":true,"cmd":');if(bad==='failed command'){const r=JSON.parse(output.output[1].text);r.exit_code=1;output.output[1].text=JSON.stringify(r);}if(bad==='unbound response')output.call_id='unrelated';if(bad==='running response'){const r=JSON.parse(output.output[1].text);r.session_id=99;delete r.exit_code;output.output[1].text=JSON.stringify(r);}},true);expect(f.collect().status).toBe('refused');});

@@ -86,7 +86,7 @@ const nativeEvent = z.object({
     type: z.string().optional(), status:z.enum(["in_progress","completed","failed"]).optional(), id: z.string().optional(), cwd: z.string().optional(),
     model: z.string().optional(), effort: z.string().optional(),
     info: z.object({ total_token_usage: z.unknown() }).passthrough().nullable().optional(),
-    call_id: z.string().optional(), name: z.string().optional(), arguments: z.string().optional(), output: z.unknown().optional(),
+    call_id: z.string().optional(), name: z.string().optional(), arguments: z.string().optional(), input:z.string().optional(), output: z.unknown().optional(),
   }).passthrough().optional(),
   usage: z.unknown().optional(),
   status: z.enum(["in_progress","completed","failed"]).optional(),
@@ -149,9 +149,13 @@ export type CodexRenewalEvidenceOptions = {
 // for execution of the exact hashed, workspace-local probe.
 export function probeInvocation(command: string, workspace: string, probe: string): boolean {
   if (probe !== join(workspace, "probe.py") || !/^\/[A-Za-z0-9/_.-]+$/.test(probe)) return false;
-  const commands = [`/usr/bin/python3 ${probe}`, "/usr/bin/python3 probe.py"];
+  const commands = ['/usr/bin/python3','/Library/Developer/CommandLineTools/usr/bin/python3'].flatMap(python=>[`${python} ${probe}`,`${python} probe.py`]);
   return commands.some(c => command === c || command === `/bin/zsh -c '${c}'`);
 }
+export function qualificationCodeCommand(command:string){return `text(await tools.exec_command(${JSON.stringify({cmd:command})}));`;}
+function compactCode(source:string){let quoted=false,escaped=false,out='';for(const c of source){if(quoted){out+=c;if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;}else if(c==='"'){quoted=true;out+=c;}else if(!/\s/.test(c))out+=c;}return out.replace(/;$/,'');}
+function codeCall(source:string){const m=compactCode(source).match(/^text\(awaittools\.(exec_command|write_stdin)\((\{.*\})\)\)$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:JSON.parse(m[2]!)};}
+function codeOutput(raw:unknown){const blocks=z.array(z.object({type:z.literal('input_text'),text:z.string()}).strict()).length(2).parse(raw);requireThat(/^Script completed\nWall time [0-9.]+ seconds?\nOutput:\n$/.test(blocks[0]!.text),'incomplete or failed code tool');const result=z.object({output:z.string(),exit_code:integer.nullable().optional(),session_id:integer.optional()}).passthrough().parse(JSON.parse(blocks[1]!.text));requireThat(!nativeFailure(result)&&(result.exit_code===0||result.session_id!==undefined),'code command failed or unknown');return result;}
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;
 export function nativeFailure(value:unknown):boolean {
@@ -217,6 +221,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   const starts:number[]=[];
   const aborts:number[]=[];let completedAt:number|null=null;
   const outputTimes=new Map<string,number>();
+  const toolSessions=new Set<number>();
   const calls = new Map<string, { name: string; arguments: string }>();
   const outputs = new Map<string, string>();
   for (const row of rollout) {
@@ -238,7 +243,19 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) {completed++;completedAt=timestamp;}
     if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
-    if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
+    if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output","custom_tool_call","custom_tool_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
+    if(row.type==='response_item'&&p?.type==='custom_tool_call'){
+      requireThat(['exec','functions.exec'].includes(p.name??'')&&typeof p.input==='string'&&typeof p.call_id==='string'&&!calls.has(p.call_id),'unsupported/reused code tool');const parsed=codeCall(p.input!);
+      if(r.kind==='security')requireThat(compactCode(p.input!)===compactCode(qualificationCodeCommand(r.command!)),'security code must invoke exactly the bound probe');
+      else if(parsed.name==='exec_command'){const args=z.object({cmd:text,workdir:text.optional(),yield_time_ms:integer.max(1000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(parsed.args);requireThat(['/usr/bin/python3 lifecycle.py','/Library/Developer/CommandLineTools/usr/bin/python3 lifecycle.py'].includes(args.cmd)&&(args.workdir===undefined||args.workdir===r.workspace),'unsupported lifecycle command');}
+      else{const args=z.object({session_id:integer,chars:z.literal('').optional(),yield_time_ms:integer.max(5000).optional(),max_output_tokens:integer.max(4000).optional()}).strict().parse(parsed.args);requireThat(toolSessions.has(args.session_id),'unbound lifecycle tool session');}
+      calls.set(p.call_id!,{name:`functions.${parsed.name}`,arguments:JSON.stringify(parsed.args)});
+    }
+    if(row.type==='response_item'&&p?.type==='custom_tool_call_output'){
+      requireThat(typeof p.call_id==='string'&&calls.has(p.call_id)&&!outputs.has(p.call_id),'unbound code output');const result=codeOutput(p.output);
+      if(r.kind==='security'){requireThat(result.exit_code===0&&result.session_id===undefined,'security command completion missing');securityOutput(result.output);}
+      if(result.session_id!==undefined)toolSessions.add(result.session_id);outputs.set(p.call_id!,result.output);outputTimes.set(p.call_id!,timestamp);
+    }
     if (row.type === "response_item" && p?.type === "function_call") {
       requireThat(["exec_command","functions.exec_command","write_stdin","functions.write_stdin"].includes(p.name??""), "unsupported qualification tool");
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");

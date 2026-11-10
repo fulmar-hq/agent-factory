@@ -1,3 +1,4 @@
+import {publisherBoundary,currentPublisherProof} from './publisher-evidence';
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {join,dirname} from 'node:path';
@@ -7,7 +8,7 @@ import {healthBridge} from './factory-health-runtime';
 import {mailPath} from './alerts';
 import {requireDiskCapacity} from './disk';
 import {builderSlots} from './capacity';
-export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts'];
+export const renewalSources=['adapters/workers.ts','adapters/native.ts','adapters/delivery.ts','launcher/child.ts','launcher/worker.ts','launcher/process.ts','launcher/config.ts','adapters/codex-renewal.ts','launcher/codex-renewal-evidence.ts','launcher/owner.ts','launcher/engine.ts','launcher/capacity.ts','launcher/usage-push-policy.ts','adapters/factory-challenge.ts','launcher/publisher-evidence.ts','launcher/worker-entry.ts','adapters/github.ts'];
 export const renewalDigest=(value:unknown)=>createHash('sha256').update(typeof value==='string'?value:(JSON.stringify(value)??"undefined")).digest('hex');
 export function renewalFingerprint(checkout:string,version:string){return {version,hashes:Object.fromEntries(renewalSources.map(path=>[path,renewalDigest(readFileSync(join(checkout,path),'utf8'))]))};}
 export function renewalDue(q:Record<string,unknown>,fingerprint:unknown,prior:unknown,now:number){
@@ -21,7 +22,10 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
  const bytes=readFileSync(join(dir,'qualifications.json'),'utf8'),q=JSON.parse(bytes),fingerprint=renewalFingerprint(checkout,version);
  let prior:unknown;
  try{prior={version:QualificationSchema.parse(q.codex).version,hashes:JSON.parse(readFileSync(join(dirname(QualificationSchema.parse(q.codex).evidence),'source-hashes.json'),'utf8'))};}catch{/* No matching material evidence makes renewal due, never qualified. */}
- const due=renewalDue(q,fingerprint,prior,now),id=renewalDigest({qualification:renewalDigest(bytes),fingerprint});
+ const due=renewalDue(q,fingerprint,prior,now),delivery=e.s.get<{expiresAt:number}>('delivery-qualified');
+ if(delivery&&Number.isSafeInteger(delivery.expiresAt))due.dueAt=Math.min(due.dueAt,delivery.expiresAt-6*3600000);
+ const expectedPublisher=publisherBoundary(checkout,dir);
+ const id=renewalDigest({qualification:renewalDigest(bytes),fingerprint});
  return e.s.atomic(()=>{
   const previous=e.s.get<{id:string;dueAt:number}>('codex-renewal-schedule');
   const schedule={id,...due,fingerprint,observedAt:now};e.s.set('codex-renewal-schedule',schedule);
@@ -35,7 +39,8 @@ export function scheduleCodexRenewal(e:Engine,dir:string,checkout:string,version
   usageGate(e.s.get<Record<string,unknown>>('readings')?.codex,true,now,e.c,'codex');
   requireDiskCapacity(e.diskProbe);
   if(!builderSlots(e.s,e.c).free)return {state:'waiting-capacity',...schedule};
-  const claim={id,state:'starting',at:now,qualificationSha256:renewalDigest(bytes),fingerprint};
+  const published=currentPublisherProof(e.s,dir,expectedPublisher,now);if(!published)return {state:'waiting-publisher-proof',...schedule,nextCheckAt:now+60000};
+  const claim={publisher:published.pub,id,state:'starting',at:now,qualificationSha256:renewalDigest(bytes),fingerprint};
   e.s.set(`codex-renewal-attempt:${id}`,claim);e.s.set('codex-renewal-slot',claim);e.s.set('launcher-maintenance-lease',{id,kind:'renewal',state:'active',at:now});
   // Claim and synchronous detached-spawn attempt share normal slot custody.
   spawn(id);return {state:'starting',...schedule};

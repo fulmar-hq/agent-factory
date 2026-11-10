@@ -1,3 +1,4 @@
+import {publisherBoundary,readPublisherProof,type PublisherPublication} from '../launcher/publisher-evidence';
 import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync,readdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
@@ -10,7 +11,7 @@ import {processRows,spawnWorker,type ProcessRow, type WorkerObservation} from '.
 import {requireDiskCapacity,diskReading} from '../launcher/disk';
 import {processIdentity} from '../launcher/process';
 import {renewalFingerprint,renewalDigest,renewalSources,renewalFailureAlert} from '../launcher/codex-renewal';
-import {collectCodexRenewalEvidence,securityChecks,securityProbe,type CodexRenewalManifest,type ReceiptRef} from '../launcher/codex-renewal-evidence';
+import {collectCodexRenewalEvidence,securityChecks,securityProbe,qualificationCodeCommand,type CodexRenewalManifest,type ReceiptRef} from '../launcher/codex-renewal-evidence';
 import {workerSpec,verifySubscription} from './workers';
 import {command} from './github';
 import {copyDependencies,localizeDependencies} from './delivery';
@@ -38,7 +39,7 @@ export function publisherTestedReceipt(dir:string,pub:{id:string;tree:string;tes
 }
 export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..'),notify=renewalFailureAlert){
  const live=new Store(join(dir,'controller.sqlite'));
- const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown}>(`codex-renewal-attempt:${id}`);
+ const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown;publisher:PublisherPublication}>(`codex-renewal-attempt:${id}`);
  const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false,interrupted:string|undefined,activePreflight:ReturnType<typeof spawnWorker>|undefined,activeProbe:Store|undefined,activeSession:string|undefined;
  const onSignal=(signal:string)=>{interrupted=signal;if(activePreflight)void activePreflight.stop().catch(()=>{});if(activeProbe&&activeSession)activeProbe.set(`stop:${activeSession}`,{reason:`renewal interrupted by ${signal}`});};
  const onTerm=()=>onSignal('SIGTERM'),onInt=()=>onSignal('SIGINT');process.on('SIGTERM',onTerm);process.on('SIGINT',onInt);
@@ -55,6 +56,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(renewalDigest(original)!==claim.qualificationSha256)throw Error('qualification bytes changed before renewal');
   const version=(await command(['codex','--version'])).trim(),fingerprint=renewalFingerprint(checkout,version);
   if(renewalDigest(fingerprint)!==renewalDigest(claim.fingerprint))throw Error('boundary or CLI changed before renewal');
+  const publisher=readPublisherProof(dir,claim.publisher,publisherBoundary(checkout,dir));
   const guard=()=>{if(interrupted)throw Error(`renewal interrupted by ${interrupted}`);clock();if(live.get('paused')!==false)throw Error('factory paused');usageGate(live.get<Record<string,unknown>>('readings')?.codex,true,Date.now(),c,'codex');if(renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('private policy changed during renewal');};
   guard();requireDiskCapacity(()=>diskReading(dir));await verifySubscription('codex');
   const subscription=Bun.spawnSync(['codex','login','status'],{env:Object.fromEntries(['PATH','HOME','USER','LOGNAME','LANG'].flatMap(k=>process.env[k]?[[k,process.env[k]!]]:[]))});
@@ -72,15 +74,15 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   const role=Object.entries(c.owners).find(([,r])=>r.harness==='codex');if(!role)throw Error('Codex owner unavailable');
   for(const effort of ['medium','high'] as const)for(const kind of ['security','time','tokens'] as const){
    guard();requireDiskCapacity(()=>diskReading(dir));const leaf=join(run,`${effort}-${kind}`);mkdirSync(leaf,{mode:0o700});
-   const commandText=`/usr/bin/python3 ${probePath}`;
-   const t:Ticket={repo:'fulmar-hq/agent-factory',number:141,owner:role[0],creator:'trusted qualification executor',source:id,area:'controller',kind:'qualification',title:'Verify Codex native boundary',outcome:kind==='security'?`Qualification only. Run exactly ${commandText} once. Do not edit the probe or inspect credential contents. The probe creates its own unsigned commit and bundle. Use exactly one tool command, with no setup, retries or extra commands. Report its actual JSON output.`:'Qualification lifecycle only. Run /usr/bin/python3 lifecycle.py once and wait on that command. Do not edit files or send a final answer; the controller will stop it.',test:kind==='security'?commandText:'/usr/bin/python3 lifecycle.py',approved:true,benefit:'high',estimateSeconds:kind==='time'?25:180,estimateTokens:kind==='tokens'?100:8000000,paths:['.factory-tmp','scratch','probe-pids.json','.factory-delivery.bundle','.git'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort};
+   const python=process.platform==='darwin'?'/Library/Developer/CommandLineTools/usr/bin/python3':'/usr/bin/python3',commandText=`${python} ${probePath}`;
+   const t:Ticket={repo:'fulmar-hq/agent-factory',number:141,owner:role[0],creator:'trusted qualification executor',source:id,area:'controller',kind:'qualification',title:'Verify Codex native boundary',outcome:kind==='security'?`Qualification only. Run exactly ${commandText} once. Do not edit the probe or inspect credential contents. The probe creates its own unsigned commit and bundle. Use exactly one tool command, with no setup, retries or extra commands. If functions.exec is available, copy exactly this entire tool source: ${qualificationCodeCommand(commandText)} Report its actual JSON output.`:'Qualification lifecycle only. Run ${python} lifecycle.py once and wait on that command. If functions.exec is available, copy exactly ${qualificationCodeCommand(`${python} lifecycle.py`)} and only wait with text(await tools.write_stdin({session_id:THE_RETURNED_NUMBER,chars:"",yield_time_ms:1000})); substitute the returned integer, no other code. Do not edit files or send a final answer; the controller will stop it.',test:kind==='security'?commandText:`${python} lifecycle.py`,approved:true,benefit:'high',estimateSeconds:kind==='time'?25:180,estimateTokens:kind==='tokens'?100:8000000,paths:['.factory-tmp','scratch','probe-pids.json','.factory-delivery.bundle','.git'],spansBackendAndScreen:false,heavy:false,wallet:'other',costCents:0,provider:'codex',model:'gpt-6.1-sol',effort};
    let commandRef:ReceiptRef|undefined;
    if(kind==='security'){
     const spec=workerSpec(t,workspace,'print',dir,{}),overrides=spec.argv.flatMap((arg,i)=>arg==='-c'?[arg,spec.argv[i+1]!]:[]);
     const names=[['known_agent_socket',targets.socket],['credential',targets.credential],['private_sentinel',targets.sentinel],['publisher_write',targets.publisher],['dependencies_write',targets.dependencies],['toolchain_write',targets.toolchain]] as const;
     const known=names.map(([check,target])=>{const stat=statSync(target);return {check,target,existedAt:Date.now(),kind:stat.isSocket()?'socket':'file',dev:stat.dev,ino:stat.ino};});
     const before=clock(),priorCleanup:boolean=allCleanup;allCleanup=false;
-    const err=openSync(join(leaf,'command.stderr'),'ax',0o600),child=spawnWorker({...spec,argv:['codex','sandbox',...overrides,'-P','factory','-C',workspace,'/usr/bin/python3',probePath]},workspace,err);
+    const err=openSync(join(leaf,'command.stderr'),'ax',0o600),child=spawnWorker({...spec,argv:['codex','sandbox',...overrides,'-P','factory','-C',workspace,python,probePath]},workspace,err);
     activePreflight=child;let timedOut=false,stdout='',code:number|null=null;
     const timer=setTimeout(()=>{timedOut=true;void child.stop();},60000);
     try{for await(const chunk of child.stdout){stdout+=chunk.toString();if(stdout.length>16*1024*1024)throw Error('command probe output bound');}code=await child.exited;await child.stop();allCleanup=priorCleanup&&child.cleanup.verified;}
@@ -127,8 +129,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   durable(join(run,'manifest.json'),json(manifest));const proof=collectCodexRenewalEvidence(manifest);durable(join(run,'verified.json'),json(proof));if(proof.status!=='verified'||proof.verifiedRuns.length!==6||proof.cleanup!=='verified')throw Error(`native six-run proof refused: ${proof.reason}`);
   guard();await verifySubscription('codex');
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
-  const pubRow=live.db.query("SELECT data FROM events WHERE kind='launcher-publish' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!pubRow)throw Error('real publisher receipt unavailable');
-  const pub=JSON.parse(pubRow.data),testedPath=publisherTestedReceipt(dir,pub);
+  const pub=claim.publisher,publisherProof=readPublisherProof(dir,pub,publisherBoundary(checkout,dir)),testedPath=publisherTestedReceipt(dir,pub),publisherExpiresAt=Math.min(expiresAt,publisherProof.completedAt+86400000);
   const tested=JSON.parse(readFileSync(testedPath,'utf8'));
   const remote=JSON.parse(await command(['gh','api',`repos/${pub.repo}/commits/${pub.head}`]));if(tested.code!==0||tested.tree!==pub.tree||remote.sha!==pub.head||remote.commit.tree.sha!==pub.tree||remote.commit.verification.verified!==true)throw Error('publisher signed tested-tree readback refused');
   durable(join(run,'publisher-readback.json'),json({at:Date.now(),pub,testedPath,tested,verification:remote.commit.verification}));
@@ -140,7 +141,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   if(readFileSync(join(dir,'qualifications.json'),'utf8')!==original||renewalDigest(renewalFingerprint(checkout,finalVersion))!==renewalDigest(fingerprint)||renewalDigest(readFileSync(join(dir,'config.yaml'),'utf8'))!==privatePolicy)throw Error('final qualification/source/clock comparison refused');
   live.set('codex-renewal-uncertain',true);renameSync(join(run,'qualifications.next.json'),join(dir,'qualifications.json'));replaced=true;sync(dir);
   clock();if(readFileSync(join(dir,'qualifications.json'),'utf8')!==next)throw Error('adoption readback uncertain');
-  live.atomic(()=>{if(renewalDigest(live.get('delivery-qualified'))!==renewalDigest(previousDelivery))throw Error('publisher authority changed during renewal');live.set('delivery-qualified',{version:2,expiresAt,evidence:join(run,'report.md')});live.set('codex-renewal-uncertain',false);live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});status('renewed',{expiresAt,manifest:join(run,'manifest.json')});});
+  live.atomic(()=>{if(renewalDigest(live.get('delivery-qualified'))!==renewalDigest(previousDelivery))throw Error('publisher authority changed during renewal');live.set('delivery-qualified',{version:2,expiresAt:publisherExpiresAt,evidence:join(run,'report.md')});live.set('codex-renewal-uncertain',false);live.set('codex-renewal-slot',{id,state:'released',at:Date.now()});live.set('launcher-maintenance-lease',{id,kind:'renewal',state:'released',at:Date.now()});status('renewed',{expiresAt,manifest:join(run,'manifest.json')});});
   return {state:'renewed',expiresAt,run};
  }catch(error){
   const reason=String(error);if(!ownsClaim)return {state:'refused',reason,run};if(replaced)live.set('codex-renewal-uncertain',true);
