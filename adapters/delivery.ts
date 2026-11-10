@@ -114,9 +114,10 @@ export async function materializeTree(source:string,target:string,base:string,se
   const names=(await git(checkout,"ls-tree","-z","--name-only",base)).split("\0").filter(Boolean);
   for(const name of names) {
     if(name===".git"||name.includes("/")||existsSync(join(target,name)))throw Error("source destination already populated");
-    await execute(["cp",platform==="darwin"?"-cR":"-R",join(checkout,name),join(target,name)]);
+    await execute(["cp",platform==="darwin"?"-cRPn":"-RPn",join(checkout,name),join(target,name)]);
   }
   await git(target,"read-tree",base);
+  if((await git(target,"status","--porcelain")).trim())throw Error("materialized source changed during setup");
 }
 
 export const deliveryRepo = "fulmar-hq/alido";
