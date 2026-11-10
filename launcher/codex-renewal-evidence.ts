@@ -161,7 +161,8 @@ function literalArguments(source:string){
   if(c==='{'||c===','){const key=source.slice(i+1).match(/^(cmd|workdir|session_id|chars|yield_time_ms|max_output_tokens)(?=:)/);if(key){out+=JSON.stringify(key[1]);i+=key[1]!.length;}}
  }return JSON.parse(out);
 }
-function codeCall(source:string){const m=compactCode(source).match(/^text\(awaittools\.(exec_command|write_stdin)\((\{.*\})\)\)$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:literalArguments(m[2]!)};}
+const codeSyntax=new Bun.Transpiler({loader:'js'});
+function codeCall(source:string){const normalized=codeSyntax.transformSync(source);const m=normalized.match(/^text\(\s*await\s+tools\.(exec_command|write_stdin)\(\s*(\{[\s\S]*\})\s*\)\s*\)\s*;?\s*$/);requireThat(m,'unsupported qualification code wrapper');return {name:m[1]!,args:literalArguments(compactCode(m[2]!))};}
 function codeOutput(raw:unknown){const blocks=z.array(z.object({type:z.literal('input_text'),text:z.string()}).strict()).length(2).parse(raw);requireThat(/^Script completed\nWall time [0-9.]+ seconds?\nOutput:\n$/.test(blocks[0]!.text),'incomplete or failed code tool');const result=z.object({output:z.string(),exit_code:integer.nullable().optional(),session_id:integer.optional()}).passthrough().parse(JSON.parse(blocks[1]!.text));requireThat(!nativeFailure(result)&&(result.exit_code===0||result.session_id!==undefined),'code command failed or unknown');return result;}
 const STOP_POLL_GRACE_MS = 1500;
 const CLEANUP_GRACE_MS = 5500;

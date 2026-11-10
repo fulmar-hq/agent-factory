@@ -324,10 +324,12 @@ test('known-address probe binds real network policy denials without treating a r
 });
 
 
-test('literal lifecycle wait keys and prompt graceful zero exits retain positive OS stop proof',()=>{
+function gracefulFixture(){
  const f=fixture();for(const r of f.m.runs.filter(r=>r.kind!=='security')){const s=JSON.parse(Buffer.from(f.read(r.supervisor.path)).toString()),end=s.stopAt+20;r.endedAt=end;f.mutate(r.supervisor,x=>{x.endedAt=end;x.exitCode=0;x.signal=null;});
   if(r.kind==='time')f.mutate(r.rollout,rows=>{const counter=rows.findIndex((x:any)=>x.payload?.type==='token_count'),at=r.startedAt+60;rows.splice(counter,0,{timestamp:new Date(at).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'wait',input:`text(await tools.write_stdin({session_id:${r===f.m.runs[1]?2:5},chars:"",yield_time_ms:1000}));`}},{timestamp:new Date(at+1).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'wait',output:[{type:'input_text',text:'Script completed\nWall time 0.1 seconds\nOutput:\n'},{type:'input_text',text:JSON.stringify({session_id:r===f.m.runs[1]?2:5,output:''})}]}});},true);
- }expect(f.collect().status).toBe('verified');const r=f.m.runs[2];f.mutate(r.supervisor,s=>{s.signals=[];});expect(f.collect().status).toBe('refused');
+ }return f;}
+test('literal lifecycle wait keys and prompt graceful zero exits retain positive OS stop proof',()=>{
+ const f=gracefulFixture();expect(f.collect().status).toBe('verified');const r=f.m.runs[2];f.mutate(r.supervisor,s=>{s.signals=[];});expect(f.collect().status).toBe('refused');
 });
 test('a zero exit without prompt verified root termination remains refused',()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.supervisor,s=>{s.exitCode=0;s.signal=null;});expect(f.collect().status).toBe('refused');});
 
@@ -335,3 +337,6 @@ test('a zero exit without prompt verified root termination remains refused',()=>
 test('a live bound root after its claimed graceful exit cannot qualify',()=>{
  const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+50020;f.mutate(r.supervisor,s=>{s.endedAt=r.endedAt;s.exitCode=0;s.signal=null;s.afterTerm.rows.push({...s.before.rows.find((row:any)=>row.pid===s.pid)});});expect(f.collect().status).toBe('refused');
 });
+
+
+for(const bad of ['split key','split number','missing await token'] as const)test('native code grammar rejects '+bad,()=>{const f=gracefulFixture(),r=f.m.runs[1];f.mutate(r.rollout,rows=>{const p=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload;if(bad==='split key')p.input=p.input.replace('session_id:','session_ id:');if(bad==='split number')p.input=p.input.replace('yield_time_ms:1000','yield_time_ms:1 000');if(bad==='missing await token')p.input=p.input.replace('await tools.','awaittools.');},true);expect(f.collect().status).toBe('refused');});
