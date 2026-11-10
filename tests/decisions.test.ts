@@ -105,7 +105,7 @@ test("preserves questions, A4 decision data and audit records across service ini
   let s = new Store(path);
   const a4 = { id: "legacy", state: "open", default: "not approved", deadline: now + 1000 };
   try {
-    s.db.query("INSERT INTO questions VALUES(?,?,?,?)").run("legacy", "Existing question", null, now);
+    s.db.query("INSERT INTO questions(id,text,answer,at) VALUES(?,?,?,?)").run("legacy", "Existing question", null, now);
     s.set("autonomy-decision:legacy", a4);
     s.event("decision:legacy", "autonomy-owner-decision", a4, "retain", now);
     const questions = s.rows("questions"), events = s.rows("events");
@@ -186,3 +186,15 @@ for (const mode of ["defaults", "answers", "late-answer"] as const) {
     } finally { s.close(); }
   });
 }
+
+
+test('SQLite replacement cannot overwrite retained decision, outcome or audit evidence',()=>{
+ const s=new Store(':memory:'),d=new DecisionService(s);try{
+  d.create(decision(),now);const original=d.resolve(decision().id,'hold','synthetic-vincent',now+1),events=s.rows('events');
+  expect(()=>s.db.query('INSERT OR REPLACE INTO a3_decisions VALUES(?,?,?,?)').run(decision().id,'{}',0,'other')).toThrow('immutable');
+  expect(()=>s.db.query('REPLACE INTO a3_outcomes VALUES(?,?)').run(decision().id,'{}')).toThrow('immutable');
+  const audit=(events as {id:string;kind:string}[]).find(e=>e.kind==='a3-decision-created')!;
+  expect(()=>s.db.query('INSERT OR REPLACE INTO events VALUES(?,?,?,?,?)').run(audit.id,'fictional',now,'{}','retain')).toThrow('immutable');
+  expect(d.get(decision().id)).toEqual(original);expect(s.rows('events')).toEqual(events);
+ }finally{s.close();}
+});

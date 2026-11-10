@@ -38,6 +38,9 @@ export class DecisionService {
       CREATE TABLE IF NOT EXISTS a3_decisions(id TEXT PRIMARY KEY, definition TEXT NOT NULL, deadline INTEGER NOT NULL, scope TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS a3_deadlines ON a3_decisions(deadline);
       CREATE TABLE IF NOT EXISTS a3_outcomes(id TEXT PRIMARY KEY REFERENCES a3_decisions(id), outcome TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS a3_definition_replace BEFORE INSERT ON a3_decisions WHEN EXISTS(SELECT 1 FROM a3_decisions WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'decision is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS a3_outcome_replace BEFORE INSERT ON a3_outcomes WHEN EXISTS(SELECT 1 FROM a3_outcomes WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'outcome is immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS a3_audit_replace BEFORE INSERT ON events WHEN EXISTS(SELECT 1 FROM events WHERE id=NEW.id AND kind IN ('a3-decision-created','a3-decision-resolved')) BEGIN SELECT RAISE(ABORT,'decision audit is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS a3_definition_update BEFORE UPDATE ON a3_decisions BEGIN SELECT RAISE(ABORT,'decision is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS a3_definition_delete BEFORE DELETE ON a3_decisions BEGIN SELECT RAISE(ABORT,'decision is immutable'); END;
       CREATE TRIGGER IF NOT EXISTS a3_outcome_update BEFORE UPDATE ON a3_outcomes BEGIN SELECT RAISE(ABORT,'outcome is immutable'); END;
