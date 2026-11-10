@@ -29,7 +29,7 @@ function lastUsage(path:string,at:number):Usage|undefined{
  for(const line of bytes.split('\n').reverse())try{const row=JSON.parse(line);if(row.type==='event_msg'&&row.payload?.type==='token_count'&&Date.parse(row.timestamp)<=at)return usageSchema.parse(row.payload.info.total_token_usage);}catch(error){if(error instanceof z.ZodError)throw error;}
 }
 export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(import.meta.dir,'..')){
- const live=new Store(join(dir,'controller.sqlite')),policyBytes=readFileSync(join(dir,'config.yaml'),'utf8'),c=ConfigSchema.parse(Bun.YAML.parse(policyBytes));
+ const live=new Store(join(dir,'controller.sqlite'));
  const claim=live.get<{id:string;state:string;qualificationSha256:string;fingerprint:unknown}>(`codex-renewal-attempt:${id}`);
  const run=join(dir,'runs',`automatic-codex-renewal-${id}`);let allCleanup=true,startedNative=false,replaced=false,ownsClaim=false,interrupted:string|undefined,activePreflight:ReturnType<typeof spawnWorker>|undefined,activeProbe:Store|undefined,activeSession:string|undefined;
  const onSignal=(signal:string)=>{interrupted=signal;if(activePreflight)void activePreflight.stop().catch(()=>{});if(activeProbe&&activeSession)activeProbe.set(`stop:${activeSession}`,{reason:`renewal interrupted by ${signal}`});};
@@ -38,7 +38,9 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
  try{
   if(!claim||claim.state!=='starting'||claim.id!==id||live.get<{id:string}>('codex-renewal-slot')?.id!==id||live.get<{id:string}>('launcher-maintenance-lease')?.id!==id)throw Error('detached renewal claim mismatch');
   live.atomic(()=>{const current=live.get<{state:string}>(`codex-renewal-attempt:${id}`);if(current?.state!=='starting')throw Error('renewal already claimed');live.set(`codex-renewal-attempt:${id}`,{...claim,state:'running',pid:process.pid,identity:processIdentity(process.pid)});live.set('codex-renewal-slot',{id,state:'running',pid:process.pid,identity:processIdentity(process.pid)});});
-  ownsClaim=true;if(Bun.version!=='1.3.14')throw Error('pinned Bun runtime required');mkdirSync(run,{mode:0o700});const startedAt=Date.now(),expiresAt=startedAt+86400000,runId=crypto.randomUUID();let lastClock=startedAt;
+  ownsClaim=true;
+  const policyBytes=readFileSync(join(dir,'config.yaml'),'utf8'),c=ConfigSchema.parse(Bun.YAML.parse(policyBytes));
+  if(Bun.version!=='1.3.14')throw Error('pinned Bun runtime required');mkdirSync(run,{mode:0o700});const startedAt=Date.now(),expiresAt=startedAt+86400000,runId=crypto.randomUUID();let lastClock=startedAt;
   const clock=()=>{const now=Date.now();if(now<lastClock||now>=expiresAt)throw Error('renewal clock regression or expiry');lastClock=now;return now;};
   const original=readFileSync(join(dir,'qualifications.json'),'utf8'),privatePolicy=renewalDigest(policyBytes);
   const previousDelivery=live.get<{version?:number}>('delivery-qualified');if(previousDelivery?.version!==2)throw Error('prior publisher v2 authority unavailable');durable(join(run,'delivery-qualified.original.json'),json(previousDelivery));
@@ -118,7 +120,9 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   guard();await verifySubscription('codex');
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
   const pubRow=live.db.query("SELECT data FROM events WHERE kind='launcher-publish' ORDER BY at DESC LIMIT 1").get() as {data:string}|null;if(!pubRow)throw Error('real publisher receipt unavailable');
-  const pub=JSON.parse(pubRow.data),testedPath=join(dir,'runs/delivery',pub.id,'initial/publisher/tested-tree.json'),tested=JSON.parse(readFileSync(testedPath,'utf8'));
+  const pub=JSON.parse(pubRow.data),testedPath=pub.testedTreeReceipt;
+  if(typeof testedPath!=='string'||!realpathSync(testedPath).startsWith(realpathSync(join(dir,'runs/delivery',pub.id))+'/'))throw Error('trusted exact publisher tested-tree path unavailable');
+  const tested=JSON.parse(readFileSync(testedPath,'utf8'));
   const remote=JSON.parse(await command(['gh','api',`repos/${pub.repo}/commits/${pub.head}`]));if(tested.code!==0||tested.tree!==pub.tree||remote.sha!==pub.head||remote.commit.tree.sha!==pub.tree||remote.commit.verification.verified!==true)throw Error('publisher signed tested-tree readback refused');
   durable(join(run,'publisher-readback.json'),json({at:Date.now(),pub,testedPath,tested,verification:remote.commit.verification}));
   durable(join(run,'source-hashes.json'),json(fingerprint.hashes));

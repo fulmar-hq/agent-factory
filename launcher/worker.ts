@@ -95,7 +95,7 @@ export async function runWorker(id: string) {
         if(!current || current.status!=="finished" || s.get("paused")!==false || s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true || !q || q.version!==2 || q.expiresAt<=Date.now() || claims.length!==t.paths.length || t.paths.some(p=>!claims.some(c=>c.path===p.toLowerCase())))throw Error("publisher claim/cleanup/qualification refused");
       };
       const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
-      s.event(`publish:${id}`,"launcher-publish",{id,...result},"Retain PR and signed tree; undo accepted changes with signed revert");
+      s.event(`publish:${id}`,"launcher-publish",{id,...result,testedTreeReceipt:join(archive,'publisher/tested-tree.json')},"Retain PR and signed tree; undo accepted changes with signed revert");
       await reviewPublished(e);
       // Only plan here. The trusted archive API is also the missed-cleanup path;
       // no timer, native deletion or automatic archival runs in a supervisor.
