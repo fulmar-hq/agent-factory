@@ -10,7 +10,7 @@ export function monthAt(now: number) {
   }).format(new Date(now));
 }
 export function available(
-  s: Store,
+  s: Pick<Store,"get"|"db">,
   c: Config,
   source: "aws" | "other",
   now: number,
@@ -53,7 +53,7 @@ export function debit(
 }
 
 export function awsRefusal(
-  s: Store,
+  s: Pick<Store,"get"|"db">,
   c: Config,
   now: number,
   b?: Billing,
