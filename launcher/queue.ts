@@ -1,4 +1,5 @@
 import {Engine} from './engine';
+import {processIdentity} from './process';
 import type {Ticket} from './config';
 import {command,intakeLabel,type Issue} from '../adapters/github';
 
@@ -10,10 +11,14 @@ export function claimableReady(e:Engine,ready:Ticket[]) {
 
 // Level-triggered recovery covers interruption between publication and labels.
 // A fresh digest or an owner-returned review is never overwritten by old work.
-export async function reviewPublished(e:Engine,execute=command) {
+export async function reviewPublished(e:Engine,execute=command,identity=processIdentity) {
+ const {autonomyEffects}=await import('./autonomy');
+ return await autonomyEffects(e.s,()=>reconcilePublished(e,execute),identity) ?? 0;
+}
+async function reconcilePublished(e:Engine,execute:typeof command) {
  let changed=0;
  for(const x of e.sessions()) {
-  if(x.status!=='finished' || !x.approval_digest)continue;
+  if(x.status!=='finished' || !x.approval_digest || e.s.get(`review-returned:${x.id}:${x.approval_digest}`))continue;
   const receipt=e.s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery') AND json_extract(data,'$.id')=? ORDER BY at DESC LIMIT 1").get(x.id) as {data:string}|null;
   if(!receipt)continue;
   const t=JSON.parse(x.brief) as Ticket;

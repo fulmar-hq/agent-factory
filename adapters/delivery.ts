@@ -82,15 +82,19 @@ export const testShell = (test:string) => ["/bin/bash","-e","-o","pipefail","-c"
 // Retained snapshots may predate the macOS-safe diagnostic test. Refuse the
 // known crashing suite rather than changing a frozen tree or skipping a test.
 export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS.Platform=process.platform) {
-  if(platform!=="darwin")return;
+  if(platform!=="darwin" || !/\b(?:unittest|pytest|test_calendar_build_diagnostic)\b/.test(test))return;
   const path=join(checkout,"infra/ci/test_calendar_build_diagnostic.py");
-  if(!existsSync(path) || !readFileSync(path,"utf8").includes("os.abort()"))return;
   const refuse=()=>{throw Error("macOS crash-producing diagnostic test refused; approve the SIGTERM-on-macOS test repair before retrying this frozen snapshot");};
+  if(!existsSync(path))return;
+  const fixture=lstatSync(path),root=realpathSync(checkout),target=realpathSync(path),inside=relative(root,target);
+  if(!fixture.isFile()||fixture.isSymbolicLink()||fixture.nlink!==1||fixture.size>1024*1024||inside.startsWith("..")||isAbsolute(inside))refuse();
+  if(!readFileSync(path,"utf8").includes("os.abort()"))return;
   if(/test_calendar_build_diagnostic/.test(test))refuse();
   for(const match of test.matchAll(/\bunittest\b([^;&|]*)/g)) {
-    let cwd=checkout;
+    if(/[(){}|`$]/.test(test.slice(0,match.index)) || /\b(?:if|then|else|elif|fi|case|esac|for|while|until|do|done|eval|source|pushd|popd)\b/.test(test.slice(0,match.index)) || /(?:^|[;&])\s*\.\s/.test(test.slice(0,match.index)))refuse();
+    let cwd=realpathSync(checkout);
     for(const cd of test.slice(0,match.index).matchAll(/\bcd\s+([^\s;&|]+)/g)) {
-      const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value))refuse();cwd=resolve(cwd,value);
+      const value=cd[1]!.replace(/^['"]|['"]$/g,"");if(!/^[A-Za-z0-9_./-]+$/.test(value)||value.startsWith("-"))refuse();try{cwd=realpathSync(resolve(cwd,value));}catch{refuse();}
     }
     const args=match[1]!.trim().split(/\s+/).filter(Boolean).map(s=>s.replace(/^['"]|['"]$/g,""));
     let discovery=false,start=cwd,pattern="test*.py";const names:string[]=[];
@@ -105,7 +109,8 @@ export function assertMacCrashSafe(checkout:string, test:string, platform:NodeJS
       if(!/^[A-Za-z0-9_./]+$/.test(arg))refuse();names.push(arg);
     }
     if(!discovery&&names.length)continue;
-    const tail=relative(start,path);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
+    try{start=realpathSync(start);}catch{refuse();}
+    const tail=relative(start,target);if(!tail.startsWith("..")&&!isAbsolute(tail)&&new Bun.Glob(pattern).match("test_calendar_build_diagnostic.py"))refuse();
   }
   // Other test runners are unresolved collection unless explicitly scoped to files.
   for(const match of test.matchAll(/\bpytest\b([^;&|]*)/g)) {
