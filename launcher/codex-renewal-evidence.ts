@@ -60,7 +60,7 @@ const supervisorSchema = z.object({
   samples: z.array(z.object({ at: time, alive: z.literal(true), usage }).strict()).min(1),
   // Full trusted ps captures, not a caller's `cleanup: true` assertion.
   before: snapshot, afterTerm: snapshot.nullable(), final: snapshot,
-  signals: z.array(z.object({ pid: time, identity: text, at: time, signal: z.enum(["SIGTERM", "SIGKILL"]) }).strict()),
+  signals: z.array(z.object({ pid: time, identity: text, at: time, signal: z.enum(["SIGTERM", "SIGKILL"]), result:z.literal("sent") }).strict()),
   descendant: z.object({ pid: time, identity: text }).strict().nullable(),
 }).strict();
 
@@ -187,6 +187,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     if (row.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p?.type ?? "")) completed++;
     if (row.type === "event_msg" && p?.type === "error") throw Error("native turn failed");
     if (row.type === "event_msg" && p?.type === "turn_aborted") {aborts.push(timestamp);if(r.kind === "security" || s.stopAt === null || timestamp < s.stopAt)throw Error("native turn failed before controlled stop");}
+    if (row.type === "response_item" && p?.type?.includes("call") && !["function_call","function_call_output"].includes(p.type))throw Error("unsupported native tool attempt");
     if (row.type === "response_item" && p?.type === "function_call") {
       requireThat(typeof p.call_id === "string" && !calls.has(p.call_id) && typeof p.name === "string" && typeof p.arguments === "string", "invalid/reused tool call");
       calls.set(p.call_id, { name: p.name, arguments: p.arguments });
@@ -221,6 +222,7 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
   const completions = stream.filter(x => x.type === "turn.completed");
   if (r.kind === "security") {
     requireThat(s.reason === "complete" && s.exitCode === 0 && s.signal === null && s.stopAt === null && s.timeBudget === null && s.tokenBudget === null && completions.length === 1 && completed === 1, "security native completion missing");
+    requireThat(!stream.some(x=>x.item&&!["agent_message","reasoning","command_execution"].includes(x.item.type)), "unsupported native security stream item");
     const u = z.object({ input_tokens: integer, output_tokens: integer, cached_input_tokens: integer }).parse(completions[0].usage);
     requireThat(u && u.input_tokens === total.input_tokens && u.output_tokens === total.output_tokens && u.cached_input_tokens === total.cached_input_tokens, "stream/final accounting mismatch");
     requireThat(r.command && r.commandProbe, "command and native security probes required");
@@ -249,6 +251,8 @@ function verifyRun(m: CodexRenewalManifest, r: Run, load: (r: ReceiptRef) => Uin
     requireThat(s.signals.every(x => x.at >= s.stopAt! && x.at <= r.endedAt && owned.some(o => o.pid === x.pid && o.identity === x.identity)), "unbound stop signal");
     const firstTerm = s.signals.filter(x => x.pid === s.pid && x.identity === s.identity && x.signal === "SIGTERM").sort((a,b) => a.at-b.at)[0];
     requireThat(firstTerm, "owner TERM missing");
+    requireThat(s.stopAt! - s.before.at <= STOP_POLL_GRACE_MS && r.endedAt >= firstTerm.at, "fresh live root and signal/exit ordering required");
+    if(s.signal === null)requireThat(aborts.some(at=>at>=firstTerm.at&&at<=r.endedAt), "nonzero native exit has no controlled abort evidence");
     requireThat(aborts.every(at => at >= firstTerm.at), "native turn aborted before actual controlled signal");
     requireThat(firstTerm.at - s.stopAt! <= STOP_POLL_GRACE_MS && r.endedAt - firstTerm.at <= CLEANUP_GRACE_MS && s.final.at - firstTerm.at <= CLEANUP_GRACE_MS, "stop signal or cleanup exceeded bounded grace");
     if (r.kind === "time") {

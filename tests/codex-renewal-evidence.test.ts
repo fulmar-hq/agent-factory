@@ -44,11 +44,11 @@ function fixture(root = "/fictional") {
     const supervisor = { runId: m.runId, nativeId, workspace, startedAt: start, endedAt: end, pid: parent.pid, identity: parent.identity,
       probeBeforeSha256: probe.sha256, probeAfterSha256: probe.sha256,
       reason: kind === "security" ? "complete" : kind, timeBudget: kind === "time" ? { estimateSeconds: 25, pauseSeconds: 50 } : null, tokenBudget: kind === "tokens" ? { estimateTokens: 100, pauseTokens: 200 } : null, exitCode: kind === "security" ? 0 : null, signal: kind === "security" ? null : "SIGTERM", stopAt,
-      samples: [{ at: start + 500, alive: true, usage: u }], before: snapshot(start + 500, kind === "time" ? [parent, child] : [parent]),
+      samples: [{ at: start + 500, alive: true, usage: u },...(kind === "time"?[{at:start+49500,alive:true,usage:u}]:[])], before: snapshot(start + (kind === "time"?49500:500), kind === "time" ? [parent, child] : [parent]),
       afterTerm: kind === "time" ? snapshot(start + 52000, [child]) : null, final: snapshot(end, []),
       descendant: kind === "time" ? { pid: child.pid, identity: child.identity } : null,
-      signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM" },
-        ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL" }] : [])] };
+      signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM",result:"sent" },
+        ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM",result:"sent" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL",result:"sent" }] : [])] };
     m.runs.push({ nativeId, effort, kind, workspace, startedAt: start, endedAt: end,
       stream: put(`stream-${n}`, "OpenAI Codex v0.0.0\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
       ...(kind === "security" ? { command, commandProbe: put(`command-${n}`, { runId: m.runId, nativeId, workspace, command, probeSha256: probe.sha256, probeAfterSha256: probe.sha256,
@@ -265,3 +265,7 @@ test('abort between stop intent and actual TERM cannot qualify',()=>{const f=fix
 
 test('non-JSON error text is never a harmless CLI banner',()=>{const f=fixture(),r=f.m.runs[0],b=bytes('Error: probe failed\n'+Buffer.from(f.read(r.stream.path)).toString());f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
 test('a successful security stream needs its native terminal receipt too',()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{x.splice(-1,1);},true);expect(f.collect().status).toBe('refused');});
+
+test('unsupported custom tool attempts cannot hide an earlier failed probe',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'failed-custom',input:'probe'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'failed-custom',output:'Process exited with code 1'}});},true);expect(f.collect().status).toBe('refused');});
+test('uncontrolled positive native exit cannot qualify a budget stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.exitCode=1;x.signal=null;});expect(f.collect().status).toBe('refused');});
+test('an old root observation cannot establish liveness at the controlled stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.before.at=x.startedAt+500;});expect(f.collect().status).toBe('refused');});
