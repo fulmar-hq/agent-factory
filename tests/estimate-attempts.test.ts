@@ -133,3 +133,8 @@ test("recent five resolves completion ties deterministically and excludes future
   expect(estimate([...input].reverse(),success,10_000,evaluation)).toEqual(estimate(input,success,10_000,evaluation));
   expect(input).toEqual(before);
 });
+
+
+test('malformed unrelated archive JSON never poisons a valid attempt receipt',()=>{
+ for(const raw of ['null','{','[]','{"id":7}']){const s=fixture([success]);try{s.db.query('INSERT INTO events VALUES(?,?,?,?,?)').run('fictional-corrupt-archive','session-archive',30_000,raw,'retain fictional corruption');expect(history(s)).toEqual([expected]);}finally{s.close();}}
+});
