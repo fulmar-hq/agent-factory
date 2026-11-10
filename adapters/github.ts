@@ -1,3 +1,4 @@
+import { githubPages } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
@@ -7,6 +8,7 @@ export type Issue = {
   body: string;
   url: string;
   updatedAt: string;
+  closedAt?: string | null;
   state: string;
   labels: { name: string }[];
 };
@@ -78,28 +80,15 @@ export async function reconcile(
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
-      const issues = JSON.parse(
-        await execute([
-          "gh",
-          "issue",
-          "list",
-          "--repo",
-          project.repo,
-          "--state",
-          "all",
-          "--limit",
-          "1000",
-          "--json",
-          "number,title,body,url,updatedAt,state,labels",
-        ],undefined,120000),
-      ) as Issue[];
+      const issues = await githubPages(project.repo,'issues',execute) as Issue[];
+      const repositoryReady:Ticket[]=[];
       s.atomic(() => {
         for (const i of issues) {
           const id = `${project.repo}#${i.number}`;
           let decision = "observed";
           try {
             const t = issueTicket(project.repo, i);
-            if (t) ready.push(t);
+            if (t) repositoryReady.push(t);
           } catch (e) {
             decision = String(e);
           }
@@ -119,16 +108,14 @@ export async function reconcile(
         s.set(`github:${project.repo}`, {
           observedAt: now,
           count: issues.length,
-          truncated: issues.length === 1000,
+          truncated: false,
           error: null,
         });
       });
-      // Refuse admissions if the bounded backfill might be incomplete.
-      if (issues.length === 1000)
-        for (let n = ready.length - 1; n >= 0; n--)
-          if (ready[n].repo === project.repo) ready.splice(n, 1);
+      ready.push(...repositoryReady);
     } catch (e) {
-      s.set(`github:${project.repo}`, { error: String(e), observedAt: now });
+      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now });}
+      catch{console.error(`GitHub failure receipt unavailable for ${project.repo}; candidates remain refused.`);}
     }
   }
   return ready;
