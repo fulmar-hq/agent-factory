@@ -1,6 +1,6 @@
 import {test,expect} from 'bun:test';
-import {acceptanceProfile,assertIndependent} from '../launcher/acceptance-profile';
-import {config} from './fixtures';
+import {acceptanceProfile,assertIndependent,acceptanceUsage} from '../launcher/acceptance-profile';
+import {config,meter} from './fixtures';
 import {Store} from '../tracking/store';
 const day='2026-11-12',through=Date.parse(day+'T22:30:00-05:00');
 const ticket={version:1,repo:'fulmar-hq/alido',number:1192,owner:'quality',day,provider:'codex',model:'gpt-6.1-sol',effort:'medium',source:'fictional explicit acting-chat decision',expiresAt:through+1,excludedNatives:['fictional-release-writer']};
@@ -20,4 +20,14 @@ test('writer identities cannot supply acceptance even when tuple matches',()=>{
  expect(()=>assertIndependent(s,'',[])).toThrow();
  expect(()=>assertIndependent(s,'fictional-fresh-quality',['fictional-author'])).not.toThrow();
  }finally{s.close();}
+});
+
+// The native meter is observed after the asynchronous fetch begins. The gate
+// must sample the clock after collection, while still refusing future readings.
+test('fresh asynchronous meter uses the post-fetch clock and deadline',()=>{
+ const c=config(),m={...meter(),observedAt:1200,windows:[{used:0.2,resetsAt:9000},{used:0.3,resetsAt:9000}]};
+ expect(()=>acceptanceUsage(c,'codex',m,8000,()=>1300)).not.toThrow();
+ expect(()=>acceptanceUsage(c,'codex',m,8000,()=>1000)).toThrow('usage stale');
+ expect(()=>acceptanceUsage(c,'codex',m,1300,()=>1300)).toThrow('deadline');
+ expect(()=>acceptanceUsage(c,'codex',{...m,observedAt:1400},8000,()=>1300)).toThrow('usage stale');
 });
