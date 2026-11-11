@@ -94,3 +94,10 @@ custody is retained. Workers, qualifications, usage/capacity and 20:00/21:30 rel
 times are unchanged. Archive the file after the bounded window; never extend it
 implicitly. Release verifies the installed revision after the freeze starts;
 Quality then proves that exact revision through22:30 before19:00 preflight.
+
+For an owner-requested serial delivery, `bun scripts/maintain-factory.ts --once
+--pr NUMBER` restricts that pass to one launcher PR in the registered installed
+checkout. It uses the same lease, independent native reviewer, green checks,
+signatures, exact-tree integration, install freeze and retained restart custody.
+It does not sweep product PRs or admit unrelated launcher changes during that
+pass. The ordinary scheduled `--once` inventory remains unchanged.
