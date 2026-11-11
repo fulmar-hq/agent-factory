@@ -3,7 +3,7 @@ import {mkdtempSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {ConfigSchema,type Ticket} from '../launcher/config';
 import {slotLimit,reconcileCapacity} from '../launcher/capacity';
 import {supply,autoApprove,prospective,failures,classifyFailure,applyOwnerResults,autonomyEffects,expireDecisions} from '../launcher/autonomy';

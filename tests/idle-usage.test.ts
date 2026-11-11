@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexStatus, codexStatusMetadata, localReadings } from "../adapters/usage";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { Store } from "../tracking/store";
 import { admission, config, meter, now, ticket } from "./fixtures";
 const native = (at = now, used = .1) => ({ ...meter(used), nativeProvider: "codex" as const, observedAt: at });

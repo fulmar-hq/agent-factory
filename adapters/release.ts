@@ -4,9 +4,10 @@ import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync,openSync,closeSync,existsSync,readFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {root} from '../launcher/config';
+import {carrierIdentity,type ReleaseBatch} from '../launcher/release-batch';
 
 export type ReleaseStep = 'preflight'|'freeze'|'qa'|'promote'|'readback';
-export type ReleaseContext = {day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object};
+export type ReleaseContext = {day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object;batch?:ReleaseBatch;readiness?:object};
 export type ReleaseObservation = {state:'pending'|'success'|'failure';evidence:Record<string,unknown>};
 export interface ReleasePort {
  snapshot():Promise<{revision:string;tree:string;holdId:string;held:boolean;overlap:boolean}>;
@@ -20,24 +21,40 @@ const record=(value:unknown):value is Record<string,unknown>=>!!value && typeof 
 // No Mini AWS profile, credential renewal or shell fallback. A missing protected
 // remote executor is a refusal, never permission to use a weaker release path.
 export class AlidoReleasePort implements ReleasePort {
- constructor(private execute=command,private now=Date.now,private local:LocalReleaseEffects=localReleaseEffects) {}
+ constructor(private execute=command,private now=Date.now,private local:LocalReleaseEffects=localReleaseEffects,private batch?:ReleaseBatch,private readiness?:object) {}
  private async api(path:string,method='GET',fields:string[]=[]):Promise<any> {
   return JSON.parse(await this.execute(['gh','api','--method',method,`repos/${REPO}/${path}`,...fields]) || 'null');
+ }
+ private async runs(branch:string,status:string){
+  const all:any[]=[],ids=new Set<number>();
+  for(let page=1;page<=20;page++){
+   const value=await this.api(`actions/runs?branch=${branch}&status=${status}&per_page=100&page=${page}`),rows=value?.workflow_runs;
+   if(!Array.isArray(rows))throw Error('Release run inventory incomplete');
+   for(const run of rows){if(!Number.isSafeInteger(run.id)||ids.has(run.id))throw Error('Changing release run inventory');ids.add(run.id);all.push(run);}
+   if(rows.length<100)return {workflow_runs:all};
+  }
+  throw Error('Release run inventory exceeds bound');
  }
  async snapshot() {
   const [ref,variable,pulls,runs]=await Promise.all([
    this.api('git/ref/heads/QA'),this.api('actions/variables/QA_HOLD'),
-   this.api('pulls?state=open&base=main&per_page=100'), Promise.all(['requested','queued','in_progress','waiting','pending'].map(status=>this.api(`actions/runs?status=${status}&per_page=100`)))]);
-  const revision=ref?.object?.sha;
+   this.api('pulls?state=open&base=main&per_page=100'), Promise.all(['requested','queued','in_progress','waiting','pending'].flatMap(status=>['QA','main'].map(branch=>this.runs(branch,status))))]);
+  let revision=ref?.object?.sha;
   if(!sha(revision))throw Error('QA revision unverified');
+  if(this.batch){
+   const pull=await this.api(`pulls/${this.batch.pr}`);carrierIdentity(this.batch,pull);
+   if(pull.merged===true){if(pull.merge_commit_sha!==revision)throw Error('Merged carrier no longer current QA');}
+   else {if(pull.state!=='open'||revision!==this.batch.base)throw Error('Carrier base changed');revision=this.batch.revision;}
+  }
   const commit=await this.api(`git/commits/${revision}`),tree=commit?.tree?.sha;
   const hold=JSON.parse(variable?.value ?? 'null');
   if(!sha(tree)||!record(hold)||typeof hold.id!=='string'||typeof hold.held!=='boolean')throw Error('QA tree/hold unverified');
-  if(!Array.isArray(pulls)||pulls.length===100||!Array.isArray(runs)||runs.some(page=>!Array.isArray(page?.workflow_runs)||page.workflow_runs.length===100))throw Error('Release inventory incomplete');
+  if(!Array.isArray(pulls)||pulls.length===100||!Array.isArray(runs)||runs.some(page=>!Array.isArray(page?.workflow_runs)))throw Error('Release inventory incomplete');
+  if(this.batch&&tree!==this.batch.tree)throw Error('Carrier tree changed');
   const overlap=pulls.some((p:any)=>p.head?.ref==='QA')||runs.flatMap(page=>page.workflow_runs).some((r:any)=>
    ['requested','queued','in_progress','waiting','pending'].includes(r.status) &&
    ['.github/workflows/deploy.yml','.github/workflows/ci.yml',`.github/workflows/${WORKFLOW}`].includes(r.path) &&
-   ['QA','main'].includes(r.head_branch));
+   ['QA','main'].includes(r.head_branch) && (r.path!=='.github/workflows/ci.yml'||r.event==='push'));
   return {revision,tree,holdId:hold.id,held:hold.held,overlap};
  }
  private validate(c:ReleaseContext) {
@@ -46,7 +63,8 @@ export class AlidoReleasePort implements ReleasePort {
  }
  async perform(step:ReleaseStep,c:ReleaseContext) {
   this.validate(c);
-  const ref=await this.api(`git/ref/heads/${step==='readback'?'main':'QA'}`),source=ref?.object?.sha;
+  const branch=step==='readback'?'main':this.batch&&['preflight','qa'].includes(step)?this.batch.ref:'QA';
+  const ref=await this.api(`git/ref/heads/${branch}`),source=ref?.object?.sha;
   if(!sha(source))throw Error('Protected executor source missing');
   if(step!=='readback'){
    if(source!==c.revision)throw Error('Protected QA executor revision changed');
@@ -58,7 +76,7 @@ export class AlidoReleasePort implements ReleasePort {
   if(!body.includes(`# ${MARKER}`)||!body.includes('workflow_dispatch:'))throw Error('Protected tree/deadline release workflow not delivered; refuse effect');
   const key=createHash('sha256').update(JSON.stringify([c.day,step,c.revision,c.tree])).digest('hex');
   this.validate(c); // Source discovery must not consume the remaining effect window.
-  if(step!=='readback')return this.local.start(step,c,key,source,this.now());
+  if(step!=='readback')return this.local.start(step,{...c,...(this.batch&&step!=='promote'?{batch:this.batch}:{}),...(step==='preflight'&&this.readiness?{readiness:this.readiness}:{})},key,source,this.now());
   await this.api(`actions/workflows/${WORKFLOW}/dispatches`,'POST',[
    '-f','ref=main','-f',`inputs[executor_source]=${source}`,'-f',`inputs[step]=${step}`,'-f',`inputs[day]=${c.day}`,
    '-f',`inputs[revision]=${c.revision}`,'-f',`inputs[tree]=${c.tree}`,
@@ -129,7 +147,7 @@ const localReleaseEffects:LocalReleaseEffects={
   if(value.state!=='success'||!record(r)||r.version!==1||r.key!==h.key||r.step!==step||r.day!==c.day||r.revision!==c.revision||r.tree!==c.tree||r.status!=='success'||!Number.isSafeInteger(r.completedAt)||Number(r.completedAt)<Number(h.dispatchedAt)||Number(r.completedAt)>now||Number(r.completedAt)>=c.deadline)return {state:'failure',evidence:{reason:'Local native receipt differs'}};
   const positive=(v:unknown)=>Number.isSafeInteger(v)&&Number(v)>0;
   const artifact=(v:unknown)=>typeof v==='string'&&/@sha256:[a-f0-9]{64}$/.test(v);
-  const proof=step==='preflight'?positive(r.preflightRun):step==='qa'?positive(r.qaRun)&&artifact(r.artifact)&&typeof r.holdId==='string'&&record(r.qaReadback)&&r.qaReadback.source===c.revision:step==='promote'?sha(r.main)&&positive(r.promotion)&&artifact(r.artifact):false;
+  const proof=step==='preflight'?(positive(r.preflightRun)||r.readiness===true):step==='qa'?positive(r.qaRun)&&artifact(r.artifact)&&typeof r.holdId==='string'&&record(r.qaReadback)&&r.qaReadback.source===(c.batch?r.qaRevision:c.revision)&&(!c.batch||sha(r.qaRevision)):step==='promote'?sha(r.main)&&positive(r.promotion)&&artifact(r.artifact):false;
   if(!proof)return {state:'failure',evidence:{reason:'Local native operation proof missing'}};
   return {state:'success',evidence:{...r,executorSource:h.source,localReceipt:result}};
  }
