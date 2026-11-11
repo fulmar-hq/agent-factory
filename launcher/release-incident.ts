@@ -22,12 +22,13 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  const current=toronto(now),minute=current.day===day?current.minute:1440;
  const windowBoundary=(time:number)=>{const stamp=Date.parse(day+'T12:00:00Z');return stamp+(time+1-toronto(stamp).minute)*60000;};
  if(day>current.day||minute<1140)return {queued:false};
+ const retainedWindows=s.get<{windows?:Window[]}>(`release-incident:${day}`)?.windows??[];
  const observed=reports(s,day),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`),windows:Window[]=[];
  for(const [name,time,step] of [['preflight',1140,'preflight'],['QA',1200,'qa'],['Production',1290,'promote']] as const){
   const effect=s.get<{state:string;evidence?:{reason?:string}}>(`executor:${day}:${step}`);
   if(minute<time)continue;
   if(name==='preflight'&&preflight?.ready===false)windows.push({name,minute:time,state:'refused',reason:preflight.missing.map(g=>g.input).join(', '),knownBy:preflight.at});
-  else if(effect?.state==='failure'){const event=s.db.query('SELECT MIN(at) AS at FROM events WHERE id IN (?,?)').get(`executor:${day}:${step}:failure`,`executor:${day}:${step}:deadline`) as {at:number|null};windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`,knownBy:event.at??now});}
+  else if(effect?.state==='failure'){const event=s.db.query('SELECT MIN(at) AS at FROM events WHERE id IN (?,?)').get(`executor:${day}:${step}:failure`,`executor:${day}:${step}:deadline`) as {at:number|null};windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`,knownBy:event.at??retainedWindows.find(w=>w.name===name&&w.state==='refused')?.knownBy??now});}
   else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`,knownBy:windowBoundary(time)});
  }
  const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') AND json_extract(data,'$.kind') NOT LIKE '%outside window%') OR (kind='release-executor-refusal' AND id LIKE ? AND json_extract(data,'$.stage') IN ('preflight','qa','production')) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
