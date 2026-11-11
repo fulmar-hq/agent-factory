@@ -286,7 +286,8 @@ receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
 never manufactures freshness. No Cost Explorer, model or resource calls occur.
 
 Every missing input queues one Alido Mail action per day/input to Release,
-Quality or Platform. AWS sign-in, usage decisions and pauses go to Coordinator.
+Quality or Platform. Owner-only decisions, including AWS sign-in and latched
+spending stops, plus usage decisions and pauses go to Coordinator.
 Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
 preflight. Repeated observations reuse the immutable action payload and mail ID;
 clean collections are retained as `release-rehearsal` events and are not mailed.
