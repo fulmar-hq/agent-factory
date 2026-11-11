@@ -30,6 +30,7 @@ function environment(){
  return {s,c,files,remotes,options};
 }
 
+// lesson: sign-in-refresh-not-renewal (docs/lessons.md)
 test('original sign-in must cover the full margin and cannot be replaced by refreshed credentials',()=>{
  expect(originalSessionExpiry(auth,now,through).expiresAt).toBeGreaterThan(through);
  for(const raw of [{expiresAt:auth.expiresAt}, {...auth,expiresAt:'2026-11-12T22:30:00-05:00'}, {...auth,expiresAt:'2026-11-12T22:29:59-05:00'}, {...auth,expiresAt:'2026-11-13T23:30:00-05:00'}, {...auth,receipt:''}])expect(()=>originalSessionExpiry(raw,now,through)).toThrow();

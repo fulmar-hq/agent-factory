@@ -4,6 +4,7 @@ import {mkdtempSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {assertReleaseInstallQuiescent} from '../launcher/release-install-quiescence';
+// lesson: disable-not-start-fence (docs/lessons.md)
 test('installation requires actual pause, stopped workers, terminal effects and safe hours',()=>{
  const dir=mkdtempSync(join(tmpdir(),'release-quiescent-')),db=new Database(join(dir,'controller.sqlite'));db.exec('CREATE TABLE kv(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE sessions(id TEXT,status TEXT,pid INTEGER);');
  const now=Date.parse('2026-11-11T00:30:00-05:00'),set=(v:unknown)=>db.query("INSERT OR REPLACE INTO kv VALUES('paused',?)").run(JSON.stringify(v));

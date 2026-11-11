@@ -31,6 +31,7 @@ test('a hold or lost quiescence blocks immediately before bootout',async()=>{
  const held=fixture({disabled:true});await expect(rebindReleaseJob('job','/private/job.plist',501,held.identity,held.verify,held.execute,held.prepare)).rejects.toThrow('already disabled');expect(held.calls.map(c=>c[1])).toEqual(['print-disabled']);
 });
 test('missing jobs bootstrap once and never boot out unknown service',async()=>{const f=fixture({missing:true});await rebindReleaseJob('job','/private/job.plist',501,f.identity,f.verify,f.execute,f.prepare);expect(f.calls.filter(c=>c[1]==='bootstrap')).toHaveLength(1);expect(f.calls.some(c=>c[1]==='bootout')).toBe(false);});
+// lesson: loaded-job-not-rebound (docs/lessons.md)
 for(const field of ['program','args','directory','path','stage'] as const)test(`loaded ${field} requires exact value, never substring`,async()=>{
  const bad={...expected,args:[...expected.args]};if(field==='stage')bad.args[2]='production';else if(field==='args')bad.args[1]+='-old';else bad[field]+='-old';const f=fixture({identity:bad});await expect(rebindReleaseJob('job','/private/job.plist',501,f.identity,f.verify,f.execute,f.prepare)).rejects.toThrow('loaded definition differs');
 });

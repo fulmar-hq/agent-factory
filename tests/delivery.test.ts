@@ -5,6 +5,7 @@ import { Store } from "../tracking/store";
 import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
 
+// lesson: publisher-macos-abort (docs/lessons.md)
 test("publisher refuses retained macOS abort fixtures without changing the snapshot",async()=>{
  const {mkdtempSync,mkdirSync,writeFileSync,readFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {assertMacCrashSafe,testSnapshot}=await import("../adapters/delivery");
