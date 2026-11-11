@@ -69,3 +69,10 @@ test('late setup failure retains its genuinely scheduled invocation time',()=>{
 test('a recorded resume separates afternoon pause knowledge from a new evening pause',()=>{
  const s=new Store(':memory:'),day='2026-11-11';try{s.event('afternoon-pause','pause',{},'fixture',at(day,'13:00'));report(s,day,'14:00',[{input:'factory state',reason:'factory paused'}]);s.event('evening-resume','resume',{},'fixture',at(day,'18:00'));report(s,day,'19:00',[{input:'release configuration',reason:'configuration unknown'}],'release-readiness');s.event('new-evening-pause','pause',{},'fixture',at(day,'20:45'));s.event('evening-refusal','release-executor',{day,kind:'refused:factory paused',data:{reason:'factory paused'}},'fixture',at(day,'21:30'));releaseIncident(s,day,at(day,'21:31'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps.find((g:any)=>g.input==='factory state').knownBy).toBe(at(day,'20:45'));}finally{s.close();}
 });
+
+test('retained fully missed nights count even when every job and the daily-result mail were absent',()=>{
+ const s=new Store(':memory:'),offline=()=>{throw Error('synthetic outbox unavailable');};try{expect(()=>releaseIncident(s,'2026-11-09',at('2026-11-09','22:30'),offline)).toThrow('unavailable');reconcileReleaseIncidents(s,at('2026-11-10','22:30'),offline);expect(s.get<any>('release-incident:2026-11-10').consecutiveMisses).toBe(2);}finally{s.close();}
+});
+test('a retained proven recovery is not counted as another missed night',()=>{
+ const s=new Store(':memory:');try{s.set('release-incident:2026-11-09',{day:'2026-11-09',firstObservedAt:at('2026-11-09','22:30'),shipped:true,windows:[],mail:{summary:'Recovered',body:'Synthetic retained proven recovery'}});releaseIncident(s,'2026-11-10',at('2026-11-10','22:30'),id=>({id,queued:true}));expect(s.get<any>('release-incident:2026-11-10').consecutiveMisses).toBe(1);}finally{s.close();}
+});

@@ -25,10 +25,11 @@ function releaseRefusals(s:Store,day:string){
  if(rows.length>1000)throw Error('release refusal inventory exceeds incident bound');
  return rows.filter(r=>r.kind!=='release-executor-refusal'||scheduledCli(day,r.at,JSON.parse(r.data)));
 }
-function knownNight(s:Store,day:string){return !!(s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
+function knownNight(s:Store,day:string){return !!(s.get(`release-incident:${day}`)||s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
 function missedNight(s:Store,day:string){
  const result=s.get<{shipped:boolean}>(`release-window-result:${day}`);
- return knownNight(s,day)&&(result?result.shipped!==true:!releaseOutcome(s,day).shipped);
+ if(result?.shipped===true||s.get<{shipped?:boolean}>(`release-incident:${day}`)?.shipped===true)return false;
+ return knownNight(s,day)&&(result?true:!releaseOutcome(s,day).shipped);
 }
 export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAction){
  const current=toronto(now),minute=current.day===day?current.minute:1440;
@@ -61,7 +62,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}
  for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':/config/i.test(reason)?'release configuration':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});
- const shipped=releaseOutcome(s,day).shipped;
+ const shipped=s.get<{shipped?:boolean}>(`release-incident:${day}`)?.shipped===true||s.get<{shipped?:boolean}>(`release-window-result:${day}`)?.shipped===true||releaseOutcome(s,day).shipped;
  let consecutiveMisses=shipped?0:1,prior=previousDay(day);
  while(!shipped&&consecutiveMisses<30&&missedNight(s,prior)){consecutiveMisses++;prior=previousDay(prior);}
  const key=`release-incident:${day}`,earlier=s.get<{firstObservedAt:number;mail:{summary:string;body:string}}>(key);
