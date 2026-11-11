@@ -1,3 +1,4 @@
+import {recordRehearsal} from '../launcher/release-rehearsal';
 import {withReleaseAuth} from '../launcher/release-auth';
 import {readFileSync} from 'node:fs';
 import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
@@ -6,7 +7,7 @@ import {releaseAvailable,observeReleaseBilling} from '../wallet/release';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
 import {configAt,inputs,root} from '../launcher/config';
-import {ReleaseExecutor,toronto} from '../launcher/release';
+import {ReleaseExecutor,toronto,deadlineAt} from '../launcher/release';
 import {AlidoReleasePort} from '../adapters/release';
 import {releaseBilling} from '../adapters/billing';
 import {awsRefusal,debit} from '../wallet/ledger';
@@ -15,8 +16,11 @@ import {localReadings,claudeStatus} from '../adapters/usage';
 import {readReleaseBatch,type ReleaseBatch} from '../launcher/release-batch';
 import {collectReleaseReadiness,releasePreflightAlert,type ReleaseReadiness} from '../launcher/release-readiness';
 const stage=process.argv[2];
+const rehearsal=stage==='rehearsal';
+const rehearsalSlot=process.argv[3]??'14:00';
+if(rehearsal&&!['14:00','17:40'].includes(rehearsalSlot))throw Error('rehearsal slot must be 14:00 or 17:40');
 const invokedAt=Date.now();
-if(!['preflight','qa','production','reconcile','dry-run'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
+if(!['preflight','qa','production','reconcile','dry-run','rehearsal'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
 const s=new Store(join(root,'controller.sqlite'));
 try {
  const c=await configAt(join(root,'config.yaml'));
@@ -48,22 +52,23 @@ try {
  if(stage!=='reconcile'){
   try{batch=readReleaseBatch(root,toronto(Date.now()).day);}catch(error){if(stage==='production')throw error;}
  }
- if(stage==='dry-run'||stage==='preflight'&&minute===1140||stage==='qa'&&minute===1200){
+ if(rehearsal||stage==='dry-run'||stage==='preflight'&&minute===1140||stage==='qa'&&minute===1200){
   let billingRefusal:string|null=null;
-  try{admittedBilling=await withReleaseAuth(root,()=>releaseBilling(root));const now=Date.now();billingRefusal=awsRefusal(s,c,now,admittedBilling);if(!billingRefusal&&funds(now)<100)billingRefusal='release wallet insufficient';}
+  try{admittedBilling=await withReleaseAuth(root,()=>releaseBilling(root));const now=Date.now();if(rehearsal){observeReleaseBilling(s,c,admittedBilling,now);s.event(`billing-rehearsal:${now}`,'billing-import',admittedBilling,'Retain AWS source age and refresh receipt');}billingRefusal=awsRefusal(s,c,rehearsal?Math.max(now,deadlineAt(now,1140)):now,admittedBilling);if(!billingRefusal&&funds(now)<100)billingRefusal='release wallet insufficient';}
   catch(error){billingRefusal=String(error);}
   // Billing is collected even when pause or STOP independently refuses starts.
   const factorySource=(await command(['git','rev-parse','HEAD'],import.meta.dir+'/..')).trim();
   const [readings,quota]=await Promise.all([localReadings(),claudeStatus()]);
   if(quota&&(!readings.claude||quota.observedAt>readings.claude.observedAt))readings.claude=quota;
-  readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
+  readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:rehearsal?(s.get('aws-stop-latched')===true?'AWS stop latched':s.get('paused')!==false?'factory paused':null):await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
+  if(rehearsal){recordRehearsal(s,readiness,rehearsalSlot as '14:00'|'17:40');console.log(JSON.stringify({effects:false,slot:rehearsalSlot,readiness}));}
   if(stage==='preflight')readiness.at=invokedAt;
   if(stage==='preflight'){
    s.event(`release-readiness:${readiness.day}`,'release-readiness',readiness,'Retain the preflight report; correct missing inputs before the next fixed window');
    s.set(`release-preflight-report:${readiness.day}`,readiness);
    releasePreflightAlert(s,readiness);
   }
-  if(stage!=='dry-run'&&!readiness.ready){console.log(JSON.stringify({state:'refused',readiness}));process.exitCode=1;}
+  if(!rehearsal&&stage!=='dry-run'&&!readiness.ready){console.log(JSON.stringify({state:'refused',readiness}));process.exitCode=1;}
  }
  const port=new AlidoReleasePort(undefined,Date.now,undefined,batch,readiness);
  const executor=new ReleaseExecutor(s,port,brake,Date.now,id=>{
@@ -76,7 +81,7 @@ try {
   catch(error){s.event(`executor-alert-retry:${pending.day}`,'release-preflight-alert-failure',{error:String(error)},'Restore existing Alido Mail; reconciliation retries the same stable alert ID before19:50');}
  }
  if(stage==='dry-run')console.log(JSON.stringify({effects:false,snapshot:await port.snapshot(),readiness}));
- else if(process.exitCode!==1){
+ else if(!rehearsal&&process.exitCode!==1){
   const result=await executor.run(stage as 'preflight'|'qa'|'production'|'reconcile');
   if(stage==='preflight'&&toronto(invokedAt).minute===1140&&['refused','skipped'].includes(result.state)){
    const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'preflight checks',reason:JSON.stringify(result)}],evidence:{result}};
@@ -86,6 +91,10 @@ try {
  }
 }catch(error){
  const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
+ if(rehearsal){
+  const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'release configuration',reason:String(error)}],evidence:{error:String(error)}};
+  try{recordRehearsal(s,failed,rehearsalSlot as '14:00'|'17:40');}catch(mailError){s.event(`rehearsal-mail-failed:${invokedAt}`,'release-rehearsal-alert-failure',{error:String(mailError)},'Restore mail and retry the same rehearsal gap IDs');}
+ }
  if(stage==='preflight'&&toronto(invokedAt).minute===1140){
   const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'release configuration',reason:String(error)}],evidence:{error:String(error)}};
   s.set(`release-preflight-report:${failed.day}`,failed);
