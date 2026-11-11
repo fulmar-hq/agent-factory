@@ -35,3 +35,17 @@ test('a prior reset does not conceal an available comparable post-reset burn bas
  const current=meter(now,.2),old=meter(now-50*60000,.8,now-30*60000),recent=meter(now-20*60000,.1),projection=projectUsage(current,[old,recent],'codex',now,target,.7);
  expect(projection.windows[0].baselineAt).toBe(recent.observedAt);expect(projection.windows[0].ratePerHour).toBeCloseTo(.3);expect(projection.underGate).toBe(false);
 });
+
+test('intervening counter or reset discontinuities cannot hide behind matching endpoints',()=>{
+ const baseline=meter(now-60*60000,.4),current=meter(now,.41);
+ for(const middle of [[meter(now-20*60000,.6),meter(now-10*60000,.35)],[meter(now-10*60000,.6,target+3600000+60000)]])expect(()=>projectUsage(current,[baseline,...middle],'codex',now,target,.7)).toThrow('15 minutes');
+});
+test('a sub-five-minute peak/drop is retained and restarts the comparable evidence segment',()=>{
+ const s=new Store(':memory:');try{
+  for(const m of [meter(now-60*60000,.4),meter(now-10*60000,.4),meter(now-9*60000,.6),meter(now-8*60000,.35),meter(now,.41)])observeReleaseUsage(s,{codex:m},m.observedAt);
+  const history=s.get<Meter[]>('release-usage-history:codex')!;expect(history.some(m=>m.windows[0].used===.6)).toBe(true);expect(()=>projectUsage(meter(now,.41),history,'codex',now,target,.7)).toThrow('15 minutes');
+ }finally{s.close();}
+});
+test('a newer trusted native history observation cannot be hidden by an older low collection',()=>{
+ const p=projectUsage(meter(now-60000,.4),[meter(now-60*60000,.4),meter(now,.65)],'codex',now,target,.7);expect(p.windows[0].used).toBe(.65);expect(p.underGate).toBe(false);
+});

@@ -326,7 +326,9 @@ native observations. Every exposed window must project below **0.70**. A
 projection at/above the gate, stale or absent usage, missing burn history,
 changed window/reset identity or decreasing counters is a Coordinator gap.
 The ordinary tick retains at most 72 native metadata observations/provider over
-six hours, at five-minute spacing, without another model or paid API call.
+six hours, normally at five-minute spacing, with intervening discontinuities
+retained immediately, without another model or paid API call. At least 15 minutes
+of continuous comparable evidence is required after the latest discontinuity.
 
 The report retains baseline, current usage, measured hourly burn and target for
 every window. A scheduled reset is labelled a forecast assumption; it never

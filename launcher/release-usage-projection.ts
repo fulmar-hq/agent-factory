@@ -6,30 +6,44 @@ import type {ReleaseReadiness} from './release-readiness';
 export type UsageReadings={codex?:Meter;claude?:Meter};
 const historyKey=(provider:string)=>`release-usage-history:${provider}`;
 const key=(w:Meter['windows'][number],index:number)=>`${w.name??index}:${w.durationMinutes??'unknown'}`;
-// Native metadata only, bounded to six hours/72 observations per provider. No
-// transcript, model call or fresh zero is manufactured. Tick already reads it.
+function continuous(before:Meter,after:Meter){
+ if(before.observedAt>after.observedAt||before.windows.length!==after.windows.length)return false;
+ return after.windows.every((w,i)=>{const matches=before.windows.filter((v,j)=>key(v,j)===key(w,i));
+  return matches.length===1&&matches[0].resetsAt===w.resetsAt&&matches[0].used<=w.used&&(before.observedAt!==after.observedAt||matches[0].used===w.used);
+ });
+}
+// Retain bounded native metadata, including discontinuities between ordinary
+// five-minute samples. No transcript, model call or fresh zero is manufactured.
 export function observeReleaseUsage(s:Store,readings:UsageReadings,now=Date.now()){
  for(const provider of ['codex','claude'] as const){
   const p=MeterSchema.safeParse(readings[provider]);
   if(!p.success||p.data.nativeProvider!==provider||p.data.observedAt>now||now-p.data.observedAt>15*60000)continue;
-  const history=(s.get<Meter[]>(historyKey(provider))??[]).filter(m=>now-m.observedAt<=6*3600000&&m.observedAt<=now).slice(-71),last=history.at(-1);
-  if(last&&p.data.observedAt-last.observedAt<5*60000)continue;
-  history.push(p.data);s.set(historyKey(provider),history);
+  const history=(s.get<Meter[]>(historyKey(provider))??[]).filter(m=>now-m.observedAt<=6*3600000&&m.observedAt<=now).slice(-72),retained=history.at(-1);
+  const seen=MeterSchema.safeParse(s.get(`release-usage-last-native:${provider}`)),last=seen.success?seen.data:retained;
+  if(last&&p.data.observedAt<last.observedAt)continue;
+  const broken=!!last&&!continuous(last,p.data);
+  s.set(`release-usage-last-native:${provider}`,p.data);
+  if(retained&&!broken&&p.data.observedAt-retained.observedAt<5*60000)continue;
+  if(broken&&last&&(!retained||last.observedAt>retained.observedAt))history.push(last);
+  history.push(p.data);s.set(historyKey(provider),history.slice(-72));
  }
 }
 export function projectUsage(current:Meter|undefined,history:Meter[],provider:'codex'|'claude',now:number,target:number,gate:number){
  const parsed=MeterSchema.safeParse(current);
  if(!parsed.success||parsed.data.nativeProvider!==provider||parsed.data.observedAt>now||now-parsed.data.observedAt>15*60000)throw Error('fresh native usage is unavailable; headroom projection unknown');
- const meter=parsed.data;
  if(target<=now)throw Error('18:30 projection target has passed; collect current readiness');
- const baseline=history.filter(m=>m.nativeProvider===provider&&meter.observedAt-m.observedAt>=15*60000&&meter.observedAt-m.observedAt<=60*60000&&meter.windows.every((w,i)=>{const matches=m.windows.filter((before,j)=>key(before,j)===key(w,i));return matches.length===1&&matches[0].resetsAt===w.resetsAt;})).sort((a,b)=>a.observedAt-b.observedAt)[0];
- if(!baseline)throw Error('at least 15 minutes of comparable current native burn history is required; projection unknown');
+ const samples:Meter[]=[];
+ for(const raw of history){const p=MeterSchema.safeParse(raw);if(!p.success)throw Error('native usage history is invalid; projection unknown');if(p.data.nativeProvider!==provider)continue;if(p.data.observedAt>now)throw Error('future native history cannot supply a projection');samples.push(p.data);}
+ samples.push(parsed.data);samples.sort((a,b)=>a.observedAt-b.observedAt);
+ const meter=samples.at(-1)!; // A newer trusted tick sample cannot be hidden by an older collection.
+ const timeline=samples.filter(m=>meter.observedAt-m.observedAt<=60*60000);
+ let start=0;for(let i=1;i<timeline.length;i++)if(!continuous(timeline[i-1],timeline[i]))start=i;
+ const baseline=timeline.slice(start).find(m=>meter.observedAt-m.observedAt>=15*60000);
+ if(!baseline)throw Error('at least 15 minutes of comparable native burn history after the latest discontinuity is required; projection unknown');
  const windows=meter.windows.map((window,index)=>{
-  const candidates=baseline.windows.filter((w,i)=>key(w,i)===key(window,index));
-  const before=candidates.length===1?candidates[0]:undefined;
+  const candidates=baseline.windows.filter((w,i)=>key(w,i)===key(window,index)),before=candidates.length===1?candidates[0]:undefined;
   if(!before||before.resetsAt!==window.resetsAt||before.used>window.used||window.resetsAt<=now)throw Error('usage window reset, identity or counters changed; projection unknown until comparable samples exist');
-  const ratePerHour=(window.used-before.used)/((meter.observedAt-baseline.observedAt)/3600000);
-  const resetAssumed=window.resetsAt<=target;
+  const ratePerHour=(window.used-before.used)/((meter.observedAt-baseline.observedAt)/3600000),resetAssumed=window.resetsAt<=target;
   const projectedUsed=resetAssumed?ratePerHour*(target-window.resetsAt)/3600000:window.used+ratePerHour*(target-meter.observedAt)/3600000;
   return {name:window.name??String(index),used:window.used,observedAt:meter.observedAt,baselineAt:baseline.observedAt,ratePerHour,resetsAt:window.resetsAt,resetAssumed,projectedUsed,underGate:projectedUsed<gate};
  });
