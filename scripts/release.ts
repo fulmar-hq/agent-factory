@@ -30,7 +30,8 @@ try {
   const proof=await requestFreezeProof(s,root,installedSource);watchReleasePause(s,root);
   console.log(JSON.stringify({effects:false,proof}));
  }else{
- if(stage==='reconcile')await requestFreezeProof(s,root,installedSource);
+ if(stage==='reconcile')try{await requestFreezeProof(s,root,installedSource);}
+ catch(error){s.event(`release-freeze-proof-failure:${toronto(Date.now()).day}`,'release-freeze-proof-request-failure',{error:String(error)},'Retry the retained proof request; notification failure never suppresses release reconciliation');}
  const c=await configAt(join(root,'config.yaml'));
  const policy=()=>Bun.YAML.parse(readFileSync(join(root,'config.yaml'),'utf8'));
  const funds=(now:number)=>releaseAvailable(s,c,admittedBilling,policy(),now);
