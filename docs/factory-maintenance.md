@@ -85,15 +85,23 @@ The Alido protected set comes exclusively from `readReleaseBatch` and the existi
 
 Native review results retain the actual reviewed base ref and immutable base head. Reuse and publication require that original identity to match the current PR, even for previously published verdicts. Missing or retargeted base evidence remains blocked for explicit reconciliation. Deterministic repository-inventory failures are recorded per repository while independent projects continue; transport and quota failures retain global backoff. Product-domain actions such as email verification are classified by workflow context and actual source scope, not their leading verb alone.
 
-A private `integration-freeze.json` may hold source integration for one explicit
-window of at most24hours: `{version:1,from:ISO_WITH_OFFSET,until:ISO_WITH_OFFSET,reason}`.
-Missing file means no extra hold; malformed input refuses integration. Maintenance
-checks the dated hold before work and immediately before merge/install, including
-retained pending installs and a window crossed during review/readback. Pending
-custody is retained. Workers, qualifications, usage/capacity and 20:00/21:30 release
-times are unchanged. Archive the file after the bounded window; never extend it
-implicitly. Release verifies the installed revision after the freeze starts;
-Quality then proves that exact revision through22:30 before19:00 preflight.
+Source integration is frozen **every day, 17:30–22:35 America/Toronto**.
+Maintenance checks this standing schedule before work and immediately before
+merge/install, including retained pending installs and a boundary crossed during
+review/readback. Pending custody is retained. No install after the freeze starts
+is allowed, even if a dated hold is absent or expired. The Nov 11 one-day file is
+archived after standing-source installation; it is no longer the daily schedule.
+An optional private `integration-freeze.json` can add a bounded hold of at most
+24 hours: `{version:1,from:ISO_WITH_OFFSET,until:ISO_WITH_OFFSET,reason}`. Malformed
+input still refuses integration. Archive dated assets, never delete them.
+
+At 17:30 the installed `release.freeze-start` LaunchAgent requests Quality's
+exact installed-revision hosted HTTP and trusted receipt path proof, due 18:30
+and valid through 22:30. Release reconciliation retries the same retained mail
+and native owner wake if the calendar invocation or mail failed, before 19:00.
+A clean 17:40 rehearsal does not replace that proof. Requests grant no source
+install or model, gate, customer-data/send exception. Workers, qualifications,
+usage/capacity and 19:00/20:00/21:30 release times remain unchanged.
 
 For an owner-requested serial delivery, `bun scripts/maintain-factory.ts --once
 --pr NUMBER` restricts that pass to one launcher PR in the registered installed
