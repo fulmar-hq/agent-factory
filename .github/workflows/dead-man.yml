@@ -1,0 +1,58 @@
+# The off-machine heartbeat check. docs/dead-man.md explains it in plain words.
+# It reads one repository variable the Mac writes every 15 minutes, keeps one
+# standing issue up to date, and comments once when a problem opens and once
+# when it recovers. It runs nothing from a pull request and never from a fork.
+name: Dead man
+on:
+  schedule:
+    # Every 30 minutes, off the hour and half hour, when GitHub's queue is longest.
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+    inputs:
+      variable:
+        description: "Variable to read. A drill uses FACTORY_HEARTBEAT_DRILL."
+        type: choice
+        options:
+          - FACTORY_HEARTBEAT
+          - FACTORY_HEARTBEAT_DRILL
+        default: FACTORY_HEARTBEAT
+      issue:
+        description: "Issue number to report to. A drill uses the drill issue. Blank means the standing issue."
+        type: string
+        default: ""
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: dead-man-${{ inputs.issue || vars.FACTORY_HEARTBEAT_ISSUE }}
+  cancel-in-progress: false
+jobs:
+  check:
+    name: Check the heartbeat
+    # Until the standing issue's number is stored the job is skipped, so the
+    # merged workflow costs nothing and says nothing before it is set up.
+    if: ${{ inputs.issue != '' || vars.FACTORY_HEARTBEAT_ISSUE != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Bun 1.3.14
+        run: |
+          curl --fail --silent --show-error --location --output bun.zip https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip
+          echo '951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f  bun.zip' | sha256sum --check
+          unzip -q bun.zip -d "$RUNNER_TEMP/factory-bun"
+          echo "$RUNNER_TEMP/factory-bun/bun-linux-x64" >> "$GITHUB_PATH"
+      # No dependency install: the check imports only Node built-ins.
+      # Every value reaches the script through the environment, never the shell.
+      - name: Check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEARTBEAT_VARIABLE: ${{ inputs.variable || 'FACTORY_HEARTBEAT' }}
+          HEARTBEAT_VALUE: ${{ vars[inputs.variable || 'FACTORY_HEARTBEAT'] }}
+          HEARTBEAT_ISSUE: ${{ inputs.issue || vars.FACTORY_HEARTBEAT_ISSUE }}
+          HEARTBEAT_STANDING_ISSUE: ${{ vars.FACTORY_HEARTBEAT_ISSUE }}
+          HEARTBEAT_OWNER: ${{ vars.FACTORY_HEARTBEAT_OWNER }}
+          HEARTBEAT_TELEGRAM: ${{ secrets.FACTORY_HEARTBEAT_TELEGRAM }}
+        run: bun scripts/push-heartbeat.ts check
