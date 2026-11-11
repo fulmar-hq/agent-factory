@@ -5,9 +5,10 @@
 //   bun scripts/install-release-morning.ts --install  also loads it and reads it back
 //
 // The program, working directory and PATH are copied from the loaded
-// rehearsal job, never from this shell, and the readback must match them.
+// rehearsal job, never from this shell, and the readback must match them. A
+// job that reads back differently is unloaded again before this fails.
 // It refuses to load anything during the 17:30–22:35 install freeze.
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { command } from "../adapters/github";
@@ -64,9 +65,22 @@ if (!install) {
   if (existsSync(installed)) copyFileSync(installed, join(archive, `${MORNING_LABEL}.installed.plist`));
   copyFileSync(prepared, installed);
   await command(["launchctl", "bootstrap", domain, installed]);
-  const readback = await command(["launchctl", "print", service]);
-  const actual = loadedReleaseJob(readback);
-  if (actual.program !== expected.program || actual.directory !== expected.directory || actual.path !== expected.path || JSON.stringify(actual.args) !== JSON.stringify(expected.args) || loadedVariable(readback, "FACTORY_PRIVATE_DIR") !== root)
-    throw Error(`${MORNING_LABEL} loaded definition differs from the rehearsal job; see ${archive}/undo.txt`);
+  let actual: ReturnType<typeof loadedReleaseJob>;
+  try {
+    const readback = await command(["launchctl", "print", service]);
+    actual = loadedReleaseJob(readback);
+    if (actual.program !== expected.program || actual.directory !== expected.directory || actual.path !== expected.path || JSON.stringify(actual.args) !== JSON.stringify(expected.args) || loadedVariable(readback, "FACTORY_PRIVATE_DIR") !== root)
+      throw Error("the loaded definition differs from the rehearsal job");
+  } catch (error) {
+    // Never leave a job scheduled that did not read back as intended.
+    const refused = join(archive, `${MORNING_LABEL}.refused.plist`);
+    try {
+      await command(["launchctl", "bootout", service]);
+      renameSync(installed, refused);
+    } catch (undo) {
+      throw Error(`${MORNING_LABEL} did not read back as intended (${String(error)}) and could not be unloaded (${String(undo)}); follow ${archive}/undo.txt now`);
+    }
+    throw Error(`${MORNING_LABEL} did not read back as intended (${String(error)}); it was unloaded again and its definition kept as ${refused}`);
+  }
   console.log(JSON.stringify({ installed, loaded: true, sameAsRehearsal: { program: actual.program, directory: actual.directory, path: actual.path }, archive }));
 }

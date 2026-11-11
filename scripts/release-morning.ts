@@ -1,8 +1,9 @@
 // Runs the morning release-inputs check once. The LaunchAgent starts it at
 // 09:00, 12:00, 16:45 and 17:35; it can also be run by hand at any time. It
-// collects readiness the way the rehearsal does (the same reads, no release
-// effect, no wallet observation) and prints its report as one JSON line.
-import { readFileSync } from "node:fs";
+// collects readiness with the reads the rehearsal makes, but keeps nothing of
+// them: no release effect, no wallet observation, no billing file. It prints
+// its report as one JSON line.
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { releaseBilling } from "../adapters/billing";
 import { claudeStatus, localReadings } from "../adapters/usage";
@@ -15,6 +16,20 @@ import { collectReleaseReadiness } from "../launcher/release-readiness";
 import { Store } from "../tracking/store";
 import { awsRefusal } from "../wallet/ledger";
 import { releaseAvailable } from "../wallet/release";
+
+// The release's billing read keeps its result in release-billing.json, which
+// the health job uses as its billing reading. This check must leave that file
+// alone, so the same trusted read runs on a throwaway copy of its two inputs
+// inside the private directory, and the copy is removed again.
+async function billingReading(): Promise<Billing> {
+  const scratch = mkdtempSync(join(root, ".release-morning-billing-"));
+  try {
+    for (const name of ["release-billing-source.json", "config.yaml"]) copyFileSync(join(root, name), join(scratch, name));
+    return await releaseBilling(scratch);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 const checkout = join(import.meta.dir, "..");
 let revision: string | undefined;
@@ -42,7 +57,7 @@ try {
       let billing: Billing | undefined;
       let billingRefusal: string | null;
       try {
-        billing = await withReleaseAuth(root, () => releaseBilling(root));
+        billing = await withReleaseAuth(root, billingReading);
         // Judged as of now: is the billing read working and the wallet open. The preflight takes its own reading at 19:00.
         billingRefusal = awsRefusal(s, c, now, billing);
         if (!billingRefusal && releaseAvailable(s, c, billing, Bun.YAML.parse(readFileSync(join(root, "config.yaml"), "utf8")), now) < 100) billingRefusal = "release wallet insufficient";

@@ -6,9 +6,12 @@ import { join } from "node:path";
 import { integrationFreeze } from "../launcher/integration-freeze";
 import { plistEnvironment } from "../launcher/job-environment";
 import { actionRole, inboxFileName, parseInboxRecord, parseOwnerMessageId, releaseInputClassId, roleActionId, type InboxRecord } from "../launcher/loop-contract";
+import { toronto } from "../launcher/release";
+import { readReleaseBatch } from "../launcher/release-batch";
 import { MORNING_LABEL, expiringQualifications, freezeProblem, installedRevision, morningJobDefinition, morningSlot, proofProblem, runMorningCheck, type MorningOptions } from "../launcher/release-morning";
+import { collectReleaseReadiness } from "../launcher/release-readiness";
 import { Store } from "../tracking/store";
-import { config } from "./fixtures";
+import { config, meter, qualification } from "./fixtures";
 import { openRealMailStore, realMailSource } from "./helpers/real-mail-store";
 
 const repo = join(import.meta.dir, "..");
@@ -61,6 +64,7 @@ function day(mailPath?: string) {
   };
 }
 const finding = (report: Awaited<ReturnType<typeof runMorningCheck>>, input: string) => report.findings.find((f) => f.input === input);
+const classOf = (file: { record: InboxRecord }) => ("classId" in file.record ? file.record.classId : undefined);
 
 describe("the morning release-inputs check", () => {
   test("the slot follows the clock, and a healthy day reports nothing, mails nothing and writes nothing", async () => {
@@ -189,17 +193,46 @@ describe("the morning release-inputs check", () => {
     }
   });
 
-  test("a qualification that lapses at 23:47 tonight is reported at 09:00; one already lapsed or valid past tomorrow morning is not", async () => {
-    const d = day();
+  test("a qualification that lapses at 23:47 tonight is reported at 09:00; Platform is asked only when no renewal is on schedule", async () => {
+    const expiry = "worker environment qualifications";
+    const mail = roleActionId("Platform", releaseInputClassId(expiry), DAY);
+    // The contract's own owner rule answers Platform for this input: renewal is Platform's, not Release's.
+    expect(actionRole({ kind: "release-input", input: expiry, reason: "qualifications lapse before 09:00 tomorrow: codex at 2026-11-12 23:47" })).toBe("Platform");
+    // Codex keys renew by themselves six hours before they lapse. On schedule they are reported, and nobody is mailed.
+    const scheduled = day();
     try {
-      d.write("qualifications.json", { codex: { expiresAt: at("23:47") }, "codex:high": { expiresAt: at("08:59", "2026-11-13") }, "codex:medium": { expiresAt: at("09:01", "2026-11-13") }, claude: { expiresAt: at("08:00") } });
-      const report = await d.run("09:00");
-      expect(report.findings).toEqual([{ input: "qualification expiry", level: "missing", reason: `qualifications lapse before 09:00 tomorrow: codex at ${DAY} 23:47, codex:high at 2026-11-13 08:59` }]);
-      const role = actionRole({ kind: "release-input", input: "qualification expiry", reason: report.findings[0]!.reason });
-      expect(d.mails().map((m) => [m.id, m.recipient])).toEqual([[roleActionId(role, "release-input-qualification-expiry", DAY), role]]);
+      scheduled.write("qualifications.json", { codex: { expiresAt: at("23:47") }, "codex:high": { expiresAt: at("08:59", "2026-11-13") }, "codex:medium": { expiresAt: at("09:01", "2026-11-13") }, claude: { expiresAt: at("08:00") } });
+      const report = await scheduled.run("09:00");
+      expect(report.findings).toEqual([{ input: expiry, level: "informational", reason: `qualifications lapse before 09:00 tomorrow: codex at ${DAY} 23:47, codex:high at 2026-11-13 08:59; the automatic renewal is due six hours before each lapse` }]);
+      expect(report.ready).toBe(true);
+      for (const time of RUNS.slice(1)) await scheduled.run(time);
+      expect(scheduled.mails()).toEqual([]);
+      expect(scheduled.inbox()).toEqual([]);
       expect(expiringQualifications(null, at("09:00"))).toBeNull();
     } finally {
-      d.close();
+      scheduled.close();
+    }
+    // A renewal that has not happened with under five hours left is late: one mail to Platform, one ledger record.
+    const late = day();
+    try {
+      late.write("qualifications.json", { codex: { expiresAt: at("21:44") }, "codex:high": { expiresAt: at("21:44") } });
+      expect(finding(await late.run("12:00"), expiry)?.level).toBe("informational");
+      expect(late.mails()).toEqual([]);
+      expect(finding(await late.run("16:45"), expiry)).toEqual({ input: expiry, level: "missing", reason: `qualifications lapse before 09:00 tomorrow: codex at ${DAY} 21:44, codex:high at ${DAY} 21:44` });
+      await late.run("17:35");
+      expect(late.mails().map((m) => [m.id, m.recipient])).toEqual([[mail, "Platform"]]);
+      expect(late.inbox().map(classOf)).toEqual([releaseInputClassId(expiry)]);
+    } finally {
+      late.close();
+    }
+    // A key with no automatic renewal is acted on as soon as it is seen.
+    const manual = day();
+    try {
+      manual.write("qualifications.json", { claude: { expiresAt: at("23:47") } });
+      expect(finding(await manual.run("09:00"), expiry)).toEqual({ input: expiry, level: "missing", reason: `qualifications lapse before 09:00 tomorrow: claude at ${DAY} 23:47` });
+      expect(manual.mails().map((m) => [m.id, m.recipient])).toEqual([[mail, "Platform"]]);
+    } finally {
+      manual.close();
     }
   });
 
@@ -353,6 +386,235 @@ describe("the morning release-inputs check", () => {
     }
   });
 
+  // These three run the preflight's real collection, wired the way the entry
+  // point wires it, so the findings are the ones the installed job would see.
+  function realCollection(d: ReturnType<typeof day>) {
+    const c = config();
+    c.owners = { release: { harness: "codex", model: "gpt-6.1-sol", effort: "medium" }, quality: { harness: "claude", model: "opus-5.5", effort: "medium" } };
+    const q = { ...qualification(), expiresAt: at("12:00", "2026-11-14") };
+    const carrier = { day: DAY, base: "c".repeat(40), revision: "d".repeat(40), tree: "e".repeat(40), pr: 7, ref: "fix/fictional-batch", holdId: "fictional-off" };
+    const batch = (on: string) => ({ version: 1, ...carrier, day: on, sources: [{ number: 5, head: "f".repeat(40), ref: "fix/fictional-source", title: "Fictional change" }], overlaps: [], review: "fictional review" });
+    d.write("release-auth-session.json", { version: 1, kind: "original-password-mfa-session", signedInAt: `${DAY}T00:30:00-05:00`, expiresAt: `${DAY}T23:30:00-05:00`, receipt: "fictional original sign-in" });
+    d.write("qualifications.json", { codex: q, claude: { ...q, model: "opus-5.5" } });
+    d.write("release-quality-path.json", { version: 1, qualified: true, provider: "claude", model: "opus-5.5", effort: "medium", expiresAt: at("23:00"), source: A, evidence: "fictional hosted proof", hostedHttp: true, receiptIngestion: true });
+    d.write("release-batch.json", batch(DAY));
+    d.store.set("paused", false);
+    d.store.set("owner-runtime:quality", { workspace: tmpdir() });
+    const hold = { version: 1, id: carrier.holdId, held: false, legacy_issue: null, reason: "Fictional open batch", by: "fixture", at: "2026-11-12T12:00:00Z" };
+    const remotes: Record<string, unknown> = {
+      "actions/variables/QA_HOLD": { value: JSON.stringify(hold) },
+      "issues/1192": { labels: [] },
+      "pulls/7": { state: "open", draft: false, head: { sha: carrier.revision, ref: carrier.ref, repo: { full_name: "fulmar-hq/alido" } }, base: { ref: "QA", repo: { full_name: "fulmar-hq/alido" } }, mergeable: true, mergeable_state: "clean" },
+      "git/ref/heads/QA": { object: { sha: carrier.base } },
+      [`git/commits/${carrier.revision}`]: { tree: { sha: carrier.tree } },
+      [`commits/${carrier.revision}/check-runs?per_page=100`]: { total_count: 3, check_runs: ["Verify", "Secret scan", "Release hold"].map((name, id) => ({ id, name, app: { slug: "github-actions" }, head_sha: carrier.revision, status: "completed", conclusion: "success" })) },
+    };
+    const identity = { of: (_pid: number): string | null => null };
+    const collect: MorningOptions["collect"] = async (now) => {
+      // As scripts/release-morning.ts does: no batch for today yet is a finding, not a crash.
+      let today: ReturnType<typeof readReleaseBatch> | undefined;
+      try {
+        today = readReleaseBatch(d.dir, toronto(now).day);
+      } catch {}
+      const reading = { ...meter(0.2), observedAt: now, windows: [0.2, 0.3].map((used) => ({ used, resetsAt: now + 86400000 })) };
+      return collectReleaseReadiness({
+        dir: d.dir,
+        config: c,
+        store: d.store,
+        brake: null,
+        billingRefusal: null,
+        carrier: today,
+        factorySource: d.state.installed,
+        readings: { codex: reading, claude: reading },
+        now,
+        disk: () => ({ freeGiB: 70, usedFraction: 0.7 }),
+        identity: (pid) => identity.of(pid),
+        execute: async (args) => {
+          const key = args[4]!.split("repos/fulmar-hq/alido/")[1]!;
+          if (!(key in remotes)) throw Error("unknown fictional source");
+          return JSON.stringify(remotes[key]);
+        },
+      });
+    };
+    return { collect, batch, hold, remotes, identity };
+  }
+  const levels = (report: Awaited<ReturnType<typeof runMorningCheck>>) => Object.fromEntries(report.findings.map((f) => [f.input, f.level]));
+
+  test("the real collection with no batch for today: one cause is one finding, noted at 09:00 and one mail from 12:00; a real hold later is still mailed", async () => {
+    const d = day();
+    try {
+      const real = realCollection(d);
+      // A complete day passes the preflight's own collection.
+      expect(await d.run("09:00", { collect: real.collect })).toMatchObject({ ready: true, findings: [] });
+
+      // Yesterday's batch is still on disk at 09:00. The QA hold itself is valid and off.
+      d.write("release-batch.json", real.batch("2026-11-11"));
+      const morning = await d.run("09:00", { collect: real.collect });
+      expect(levels(morning)).toEqual({ "PR checks": "informational", "release holds": "informational" });
+      expect(finding(morning, "release holds")?.reason).toBe("the QA hold cannot be compared with tonight's batch until there is one");
+      expect(morning).toMatchObject({ ready: true, actions: [], failures: [] });
+      expect(d.mails()).toEqual([]);
+      expect(d.inbox()).toEqual([]);
+
+      // From noon the missing batch is one mail to Release, not a second one about holds.
+      const noon = await d.run("12:00", { collect: real.collect });
+      expect(levels(noon)).toEqual({ "PR checks": "missing", "release holds": "informational" });
+      expect(d.mails().map((m) => [m.id, m.recipient])).toEqual([[roleActionId("Release", releaseInputClassId("PR checks"), DAY), "Release"]]);
+      expect(d.inbox().map(classOf)).toEqual(["release-input-pr-checks"]);
+
+      // The batch arrives at 14:22 and the QA hold is switched on at 15:00: that is a real holds problem and gets its own mail.
+      d.write("release-batch.json", real.batch(DAY));
+      real.remotes["actions/variables/QA_HOLD"] = { value: JSON.stringify({ ...real.hold, held: true }) };
+      const late = await d.run("16:45", { collect: real.collect });
+      expect(late.findings).toEqual([{ input: "release holds", level: "missing", reason: "Error: QA hold is on" }]);
+      const holds = d.mails().find((m) => m.id === roleActionId("Release", releaseInputClassId("release holds"), DAY));
+      expect(holds).toMatchObject({ recipient: "Release" });
+      expect(holds!.body).toStartWith("Error: QA hold is on");
+      expect(d.mails()).toHaveLength(2);
+    } finally {
+      d.close();
+    }
+  });
+
+  test("the real collection while Quality is mid-turn: a session in progress is only noted, a lost workspace is mailed", async () => {
+    const d = day();
+    try {
+      const real = realCollection(d);
+      d.store.set("owner-runtime:quality", { workspace: tmpdir(), pid: 4242, identity: "fictional start identity" });
+      real.identity.of = () => "fictional start identity";
+      for (const time of RUNS) {
+        const report = await d.run(time, { collect: real.collect });
+        expect(report.findings).toEqual([{ input: "Quality runner", level: "informational", reason: "Error: Quality owner is still running" }]);
+        expect(report.ready).toBe(true);
+      }
+      expect(d.mails()).toEqual([]);
+      expect(d.inbox()).toEqual([]);
+      d.store.set("owner-runtime:quality", { workspace: join(d.dir, "absent") });
+      expect((await d.run("17:35", { collect: real.collect })).findings).toEqual([{ input: "Quality runner", level: "missing", reason: "Error: Quality has no registered existing workspace" }]);
+      expect(d.mails().map((m) => m.recipient)).toEqual(["Quality"]);
+    } finally {
+      d.close();
+    }
+  });
+
+  test("his sign-in is asked for only while a release can still follow it tonight", async () => {
+    const vincent = (d: ReturnType<typeof day>) => d.mails("Vincent").map((m) => m.id);
+    const stop = `loop:hard-stop:human-step:aws-sign-in:${DAY}`;
+    // The factory is paused: no ask, no hard stop. The pause and the sign-in are still reported and recorded.
+    const paused = day();
+    try {
+      paused.state.missing = [
+        { input: "AWS sign-in", reason: signIn },
+        { input: "factory state", reason: "factory is paused" },
+      ];
+      for (const time of RUNS) expect((await paused.run(time)).ready).toBe(false);
+      expect(vincent(paused)).toEqual([]);
+      expect(paused.mails().map((m) => m.recipient)).toEqual(["Platform"]);
+      expect(paused.inbox().map((f) => f.record.type).sort()).toEqual(["release-input", "release-input"]);
+    } finally {
+      paused.close();
+    }
+    // No batch for tonight: the noon ask still goes (the batch is normally made in the afternoon), the hard stop does not.
+    const empty = day();
+    try {
+      rmSync(join(empty.dir, "release-batch.json"));
+      empty.state.missing = [{ input: "AWS sign-in", reason: signIn }];
+      for (const time of RUNS.slice(0, 3)) await empty.run(time);
+      expect(vincent(empty)).toEqual([`loop:ask:release-step:aws-sign-in:${DAY}`]);
+      // Once the batch exists the open sign-in blocks a real release, and the 17:35 run says so.
+      empty.write("release-batch.json", { day: DAY });
+      await empty.run("17:35");
+      expect(vincent(empty)).toEqual([`loop:ask:release-step:aws-sign-in:${DAY}`, stop]);
+    } finally {
+      empty.close();
+    }
+    // A run after 18:30 (by hand, or launchd catching up after sleep) names no deadline that has passed: it reports and records only.
+    for (const time of ["18:30", "23:30"]) {
+      const after = day();
+      try {
+        after.state.installed = B;
+        after.state.missing = [
+          { input: "AWS sign-in", reason: signIn },
+          { input: "disk space", reason: "Error: only 40 GiB free" },
+        ];
+        const report = await after.run(time);
+        expect(report).toMatchObject({ slot: "17:35", ready: false, actions: [], failures: [] });
+        expect(after.mails()).toEqual([]);
+        expect(after.wakes()).toEqual([]);
+        expect(after.inbox().map(classOf).sort()).toEqual(["release-input-aws-sign-in", "release-input-disk-space", ...(time === "18:30" ? ["release-input-hosted-acceptance-path"] : [])]);
+        expect(after.store.get(`release-morning:${DAY}:17:35`)).toMatchObject({ at: at(time) });
+      } finally {
+        after.close();
+      }
+    }
+    // The last moment in time still sends.
+    const last = day();
+    try {
+      last.state.missing = [{ input: "AWS sign-in", reason: signIn }];
+      await last.run("18:29");
+      expect(vincent(last)).toEqual([stop]);
+    } finally {
+      last.close();
+    }
+    // Another input whose error text happens to mention a password is work for its role, not a sign-in for Vincent.
+    const login = day();
+    try {
+      login.state.missing = [{ input: "release holds", reason: "Error: gh: password authentication is not supported" }];
+      for (const time of RUNS) await login.run(time);
+      expect(vincent(login)).toEqual([]);
+      expect(login.mails().map((m) => [m.id, m.recipient])).toEqual([[roleActionId("Platform", releaseInputClassId("release holds"), DAY), "Platform"]]);
+      expect(login.inbox().map((f) => f.record.type)).toEqual(["release-input"]);
+    } finally {
+      login.close();
+    }
+  });
+
+  test("an operator's dated hold in the morning is not tonight's freeze: no proof is requested until 17:35, and the request says only what is known", async () => {
+    const d = day();
+    try {
+      d.state.installed = B;
+      d.write("integration-freeze.json", { version: 1, from: `${DAY}T08:00:00-05:00`, until: `${DAY}T12:00:00-05:00`, reason: "risky change" });
+      expect(integrationFreeze(d.dir, at("09:00"))).toBe("risky change");
+      const morning = await d.run("09:00");
+      expect(morning.frozen).toBe(false);
+      expect(finding(morning, "hosted acceptance path")?.level).toBe("informational");
+      expect(d.mails("Quality")).toEqual([]);
+      expect(d.wakes()).toEqual([]);
+      // A hold that is active at 16:45 but is not the evening window does not count either.
+      expect((await d.run("16:45", { freeze: () => "an afternoon hold" })).frozen).toBe(false);
+      expect(d.mails("Quality")).toEqual([]);
+      const late = await d.run("17:35", { freeze: () => "the evening freeze" });
+      expect(late.frozen).toBe(true);
+      expect(d.mails("Quality")).toHaveLength(1);
+      expect(d.mails("Quality")[0]!.body).toContain("Tonight's 17:30–22:35 install freeze has begun, so the installed revision is held.");
+      expect(d.wakes()).toHaveLength(1);
+    } finally {
+      d.close();
+    }
+  });
+
+  test("one input the contract cannot name does not cost the others their report, mail or hard stop", async () => {
+    const d = day();
+    try {
+      d.state.missing = [
+        { input: "???", reason: "a computed name went wrong" },
+        { input: "AWS sign-in", reason: signIn },
+        { input: "disk space", reason: "Error: only 40 GiB free" },
+      ];
+      const report = await d.run("16:45");
+      expect(report.failures).toEqual([expect.stringContaining('class for "???": Error: release input has no usable name')]);
+      expect(report.actions.map((a) => [a.did, a.to]).sort()).toEqual([
+        ["hard-stop", "Vincent"],
+        ["mailed", "Platform"],
+      ]);
+      expect(d.mails().map((m) => m.recipient).sort()).toEqual(["Platform", "Vincent"]);
+      expect(d.store.get(`release-morning:${DAY}:16:45`)).toMatchObject({ ready: false, failures: report.failures });
+      expect(d.store.db.query("SELECT count(*) AS n FROM events WHERE kind='release-morning'").get()).toEqual({ n: 1 });
+    } finally {
+      d.close();
+    }
+  });
+
   test("the installed revision is read from the checkout's own files", () => {
     const head = Bun.spawnSync(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.toString().trim();
     expect(installedRevision(repo)).toBe(head);
@@ -408,7 +670,7 @@ esac
       const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       return { out, err, code, calls: readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) };
     };
-    return { home, privateDir, run };
+    return { home, privateDir, run, loaded: () => existsSync(join(fixtures, "loaded")) };
   }
 
   test("the definition runs at the four times with the given program, folder and PATH", () => {
@@ -450,16 +712,24 @@ esac
     expect((await m.run("10:05", "--install")).calls.slice(4).map((c) => c.split(" ")[0])).toEqual(["print", "print", "bootout", "bootstrap", "print"]);
   }, 30000);
 
-  test("installing fails when the loaded job's PATH or working directory differs from the rehearsal job", async () => {
+  test("a job whose loaded PATH or working directory differs from the rehearsal job is unloaded again, and installing fails", async () => {
     for (const readback of [{ path: "/usr/bin:/bin" }, { directory: "/Users/fictional/trial-copy" }]) {
-      const result = await machine(readback).run("10:00", "--install");
+      const m = machine(readback);
+      const result = await m.run("10:00", "--install");
       expect(result.code).not.toBe(0);
       expect(result.err).toContain("loaded definition differs from the rehearsal job");
+      expect(result.err).toContain("it was unloaded again");
+      // Nothing is left scheduled: the job is booted out and its definition moved out of LaunchAgents into the receipts.
+      expect(result.calls.map((c) => c.split(" ")[0])).toEqual(["print", "print", "bootstrap", "print", "bootout"]);
+      expect(m.loaded()).toBe(false);
+      expect(readdirSync(join(m.home, "Library/LaunchAgents"))).toEqual([]);
+      const [receipt] = readdirSync(join(m.privateDir, "receipts"));
+      expect(readdirSync(join(m.privateDir, "receipts", receipt!)).sort()).toEqual([`${MORNING_LABEL}.refused.plist`, "undo.txt"]);
     }
   }, 20000);
 });
 
-test("the real entry point reads only, releases nothing and leaves the wallet and the freeze alone", async () => {
+test("the real entry point keeps no billing file, releases nothing, leaves the wallet and the freeze alone, and only notes the hold while there is no batch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "morning-entry-"));
   const bin = join(dir, "bin");
   const mail = join(dir, "mail.sqlite");
@@ -472,21 +742,35 @@ test("the real entry point reads only, releases nothing and leaves the wallet an
   writeFileSync(join(dir, "release-billing-source.json"), JSON.stringify({ profile: "fixture", accountId: "123456789012", budgetName: "fixture" }));
   const budget = { BudgetType: "COST", TimeUnit: "MONTHLY", BudgetLimit: { Amount: "75", Unit: "USD" }, CostTypes: { IncludeTax: true, IncludeSubscription: true, IncludeRefund: false, IncludeCredit: false }, TimePeriod: { Start: `${today.slice(0, 7)}-01T00:00:00Z` }, LastUpdatedTime: new Date(now).toISOString(), CalculatedSpend: { ActualSpend: { Amount: "1", Unit: "USD" }, ForecastedSpend: { Amount: "5", Unit: "USD" } } };
   writeFileSync(join(bin, "aws"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in 'budgets describe-budget '*) printf '%s' '${JSON.stringify({ Budget: budget })}';; *) exit 90;; esac\n`, { mode: 0o700 });
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in 'api --method GET '*) printf '{}';; *) exit 91;; esac\n`, { mode: 0o700 });
+  // The QA hold is valid and off. There is no batch for today, so nothing to compare its identity with.
+  const hold = JSON.stringify({ value: JSON.stringify({ version: 1, id: "fictional-off", held: false, legacy_issue: null, reason: "Fictional open batch", by: "fixture", at: "2026-11-12T12:00:00Z" }) });
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in 'api --method GET repos/fulmar-hq/alido/actions/variables/QA_HOLD') printf '%s' '${hold}';; 'api --method GET '*) printf '{}';; *) exit 91;; esac\n`, { mode: 0o700 });
   const db = new Database(mail);
   db.exec(MESSAGES);
   db.close();
   const prepared = new Store(join(dir, "controller.sqlite"));
   prepared.set("paused", false);
   prepared.close();
+  const before = readdirSync(dir);
   const run = Bun.spawn([process.execPath, join(repo, "scripts/release-morning.ts")], { env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, FACTORY_PRIVATE_DIR: dir, FACTORY_MAIL_DB: mail }, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]);
   expect({ code, err }).toEqual({ code: 0, err: "" });
   const report = JSON.parse(out);
   expect(report).toMatchObject({ day: today, failures: [], installed: installedRevision(repo), evidence: { usage: { releaseGate: 0.7 } } });
   expect(report.findings.map((f: { input: string }) => f.input)).toEqual(expect.arrayContaining(["release qualification", "PR checks"]));
+  // The billing read worked, so it is not a finding; and it is the one Budgets call the release itself makes.
+  expect(report.findings.map((f: { input: string }) => f.input)).not.toContain("fresh billing");
+  expect(report.findings.find((f: { input: string }) => f.input === "release holds")).toEqual({ input: "release holds", level: "informational", reason: "the QA hold cannot be compared with tonight's batch until there is one" });
+  const sent = new Database(mail, { readonly: true });
+  expect((sent.query("SELECT id FROM messages").all() as { id: string }[]).filter((m) => m.id.includes("release-holds"))).toEqual([]);
+  sent.close();
   const calls = readFileSync(log, "utf8").trim().split("\n");
-  expect(calls.filter((c) => c.startsWith("budgets describe-budget"))).toHaveLength(1);
+  expect(calls.filter((c) => c.startsWith("budgets describe-budget"))).toEqual(["budgets describe-budget --profile fixture --region us-east-1 --account-id 123456789012 --budget-name fixture --output json --no-cli-pager"]);
+  // The file the health job reads as its billing reading is not written. All the run adds to the private
+  // directory is the ledger inbox ("commands" is this test's own call log; "Library" is Bun's cache under the fixture HOME).
+  expect(existsSync(join(dir, "release-billing.json"))).toBe(false);
+  expect(readdirSync(dir).filter((name) => !before.includes(name) && !name.startsWith("controller.sqlite") && name !== "Library").sort()).toEqual(["commands", "health"]);
+  expect(readdirSync(join(dir, "health"))).toEqual(["ledger-inbox"]);
   expect(calls.every((c) => c.startsWith("budgets describe-budget") || c.startsWith("api --method GET"))).toBe(true);
   const check = new Store(join(dir, "controller.sqlite"));
   try {

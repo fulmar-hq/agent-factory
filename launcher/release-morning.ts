@@ -10,7 +10,8 @@
 // once per installed revision for a fresh proof, and put one ask a day in front
 // of Vincent for a step only he can do. It changes no gate, pause, wallet,
 // schedule or freeze. For the freeze it only reports: it never writes, moves,
-// shortens or removes one.
+// shortens or removes one. After 18:30, the time every message here names, it
+// still reports and records but sends nothing.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Store } from "../tracking/store";
@@ -50,6 +51,7 @@ const NOON = at(12, 0);
 const LATE = at(16, 45);
 export const FREEZE_FROM = at(17, 30);
 export const FREEZE_UNTIL = at(22, 35);
+/** Every message this check sends names 18:30. From then on it only reports; the 19:00 preflight speaks for itself. */
 const PROOF_DUE = at(18, 30);
 const VALID_THROUGH = at(22, 30);
 const TOMORROW_MORNING = at(24 + 9, 0);
@@ -61,9 +63,19 @@ export const morningSlot = (minute: number): MorningSlot => (minute < NOON ? "09
 const PROOF_INPUT = "hosted acceptance path";
 const BATCH_INPUT = "PR checks";
 const TICKET_INPUT = "quality qualification";
+const HOLDS_INPUT = "release holds";
+const RUNNER_INPUT = "Quality runner";
+const STOPPED_INPUTS = ["factory state", "billing and factory state"];
 const FREEZE_INPUT = "install freeze configuration";
-const EXPIRY_INPUT = "qualification expiry";
+// Renewing a qualification is Platform's. The contract takes a release input's
+// owner from its name, and this name is what makes that rule answer Platform.
+const EXPIRY_INPUT = "worker environment qualifications";
 const SOURCE = "release-morning";
+// The tick renews the Codex keys by itself six hours before they lapse. One of
+// those is acted on only once that renewal is an hour late; until then it is
+// on schedule. No other key renews by itself.
+const AUTO_RENEWED = /^codex(?::|$)/;
+const RENEWAL_LATE = 5 * 60 * MINUTE;
 
 export type Finding = {
   input: string;
@@ -77,6 +89,7 @@ export type MorningReport = {
   at: number;
   slot: MorningSlot;
   installed: string | null;
+  /** True when tonight's 17:30–22:35 install freeze is in force at this run. A dated hold at another hour does not count. */
   frozen: boolean;
   /** True when nothing is missing. Informational findings do not count. */
   ready: boolean;
@@ -160,14 +173,23 @@ export function freezeProblem(dir: string, now: number, active: typeof integrati
   return null;
 }
 
-/** Qualification keys that lapse between now and 09:00 tomorrow. A key that has already lapsed is a limit in force, not something about to run out. */
-export function expiringQualifications(raw: unknown, now: number): string | null {
+/**
+ * Qualification keys that lapse between now and 09:00 tomorrow. Always
+ * reported. Acted on when a lapsing key has no automatic renewal, or its
+ * automatic renewal is late. A key that has already lapsed is a limit in
+ * force, not something about to run out.
+ */
+export function expiringQualifications(raw: unknown, now: number): Pick<Finding, "reason" | "level"> | null {
   if (!isRecord(raw)) return null;
   const through = deadlineAt(now, TOMORROW_MORNING);
-  const lapsing = Object.entries(raw)
-    .filter(([, q]) => isRecord(q) && Number.isSafeInteger(q.expiresAt) && (q.expiresAt as number) > now && (q.expiresAt as number) <= through)
-    .map(([key, q]) => `${key} at ${eastern((q as { expiresAt: number }).expiresAt)}`);
-  return lapsing.length ? `qualifications lapse before 09:00 tomorrow: ${lapsing.join(", ")}`.slice(0, 600) : null;
+  const lapsing = Object.entries(raw).flatMap(([key, q]) => {
+    const expiresAt = isRecord(q) && Number.isSafeInteger(q.expiresAt) ? (q.expiresAt as number) : 0;
+    return expiresAt > now && expiresAt <= through ? [{ key, expiresAt }] : [];
+  });
+  if (!lapsing.length) return null;
+  const reason = `qualifications lapse before 09:00 tomorrow: ${lapsing.map((q) => `${q.key} at ${eastern(q.expiresAt)}`).join(", ")}`.slice(0, 520);
+  if (lapsing.some((q) => !AUTO_RENEWED.test(q.key) || q.expiresAt - now < RENEWAL_LATE)) return { reason, level: "missing" };
+  return { reason: `${reason}; the automatic renewal is due six hours before each lapse`, level: "informational" };
 }
 
 const dayOf = (raw: unknown) => (isRecord(raw) && typeof raw.day === "string" ? raw.day : null);
@@ -188,6 +210,14 @@ async function morningFindings(o: { dir: string; now: number; readiness: Release
   // The night's batch and acceptance ticket are made during the day. Before
   // noon a file that is not yet today's is only noted; from noon it is missing.
   const early = minute < NOON;
+  const noBatch = dayOf(batch) !== day || o.readiness.missing.some((gap) => gap.input === BATCH_INPUT && /batch carrier is missing$/.test(gap.reason));
+  // Without tonight's batch the preflight has no hold identity to compare the
+  // QA hold with, and reports that as a holds problem. It is the missing batch
+  // again, not a second input, so it is only noted until the batch exists.
+  if (noBatch && /QA hold identity differs$/.test(found.get(HOLDS_INPUT)?.reason ?? "")) set(HOLDS_INPUT, "the QA hold cannot be compared with tonight's batch until there is one", "informational");
+  // A Quality session in progress right now is not an input anyone can supply
+  // hours ahead. The 17:40 rehearsal and the preflight judge it when it counts.
+  if (/Quality owner is still running$/.test(found.get(RUNNER_INPUT)?.reason ?? "")) note(RUNNER_INPUT);
   if (dayOf(batch) !== day) set(BATCH_INPUT, batch === null ? "release-batch.json is missing or unreadable" : `release-batch.json is dated ${dayOf(batch) ?? "with no day"}, not today`, early ? "informational" : "missing");
   // The ticket is an optional override: with none, the configured Quality role applies.
   if (ticket !== null && dayOf(ticket) !== day) {
@@ -197,14 +227,14 @@ async function morningFindings(o: { dir: string; now: number; readiness: Release
   }
   const staleProof = o.installed ? proofProblem(proof, o.installed, o.readiness.validThrough) : null;
   if (staleProof) set(PROOF_INPUT, staleProof);
-  // Quality proves the installed revision once the freeze holds it still.
+  // Quality proves the installed revision once tonight's freeze holds it still.
   // Before that an install would undo the proof, so a stale one is only noted.
   if (!o.frozen) note(PROOF_INPUT);
   const freeze = freezeProblem(o.dir, o.now, o.freeze);
   if (freeze) set(FREEZE_INPUT, freeze);
   const expiring = expiringQualifications(qualifications, o.now);
-  if (expiring) set(EXPIRY_INPUT, expiring);
-  return { findings: [...found.values()], staleProof };
+  if (expiring) set(EXPIRY_INPUT, expiring.reason, expiring.level);
+  return { findings: [...found.values()], staleProof, noBatch };
 }
 
 /** Adds one record to the ledger inbox: a temporary name, then a rename. Harmless before the ledger job exists. */
@@ -250,13 +280,15 @@ export async function runMorningCheck(o: MorningOptions): Promise<MorningReport>
   } catch (error) {
     readiness = { day, at: now, validThrough: deadlineAt(now, VALID_THROUGH), ready: false, missing: [{ input: "release configuration", reason: String(error) }], evidence: {} };
   }
+  // Only tonight's window keeps the installed revision still for the release.
+  // An operator's dated hold at another hour of the day says nothing about it.
   let frozen = false;
   try {
-    frozen = freeze(o.dir, now) !== null;
+    frozen = minute >= FREEZE_FROM && minute < FREEZE_UNTIL && freeze(o.dir, now) !== null;
   } catch {
     // An unreadable freeze file is a finding below.
   }
-  const { findings, staleProof } = await morningFindings({ dir: o.dir, now, readiness, installed, frozen, freeze, readJSON: o.readJSON ?? optionalJSON });
+  const { findings, staleProof, noBatch } = await morningFindings({ dir: o.dir, now, readiness, installed, frozen, freeze, readJSON: o.readJSON ?? optionalJSON });
 
   const actions: MorningAction[] = [];
   const failures: string[] = [];
@@ -269,19 +301,32 @@ export async function runMorningCheck(o: MorningOptions): Promise<MorningReport>
   };
   const due = `${day} 18:30 Eastern`;
   const standing = "No pause, gate, spending or release-time exception is granted.";
+  const inTime = minute < PROOF_DUE;
+  // The contract calls any input whose text mentions a password, passkey or
+  // MFA a sign-in step. Here only the AWS sign-in is known to be Vincent's
+  // alone; a login error inside another input's reason goes to its role first.
+  const vincentOnly = (f: Finding) => /AWS sign-in/i.test(`${f.input} ${f.reason}`) && releaseInputHumanStep(f.input, f.reason) !== null;
   const human: Finding[] = [];
   for (const f of findings) {
     if (f.level !== "missing") continue;
-    const classId = releaseInputClassId(f.input);
+    let classId: string;
+    try {
+      classId = releaseInputClassId(f.input);
+    } catch (error) {
+      // One input the contract cannot name must not cost the others their mail.
+      failures.push(`class for ${JSON.stringify(f.input)}: ${String(error)}`);
+      continue;
+    }
     const reason = f.reason.trim().slice(0, 600) || "no reason given";
     attempt(`ledger record for ${f.input}`, () =>
       dropInboxRecord(o.dir, keep<InboxRecord>(`release-morning:record:${day}:${classId}`, { version: 1, id: `${SOURCE}:${day}:${classId}`, at: now, source: SOURCE, type: "release-input", classId, input: f.input, reason, day })),
     );
     // A step only Vincent can do is an ask for him, not work for a role.
-    if (releaseInputHumanStep(f.input, f.reason)) {
+    if (vincentOnly(f)) {
       human.push(f);
       continue;
     }
+    if (!inTime) continue;
     const role = actionRole({ kind: "release-input", input: f.input, reason: f.reason });
     if (f.input === PROOF_INPUT && staleProof && installed) {
       const revision = installed;
@@ -295,7 +340,7 @@ export async function runMorningCheck(o: MorningOptions): Promise<MorningReport>
         const request = keep(`release-morning:proof:${day}:${revision}`, {
           source: revision,
           summary: `${role}: prove the release path for installed ${short(revision)} by ${due}.`,
-          body: `${reason.slice(0, 400)}\nThe install freeze is active, so this revision will not move tonight. Prove the hosted HTTP and trusted acceptance receipt path for exact installed factory source ${revision}, valid through 22:30 tonight, and retain release-quality-path.json. No source install, activation, real-person send or gate exception is authorized.`.slice(0, 800),
+          body: `${reason.slice(0, 400)}\nTonight's 17:30–22:35 install freeze has begun, so the installed revision is held. Prove the hosted HTTP and trusted acceptance receipt path for exact installed factory source ${revision}, valid through 22:30 tonight, and retain release-quality-path.json. No source install, activation, real-person send or gate exception is authorized.`.slice(0, 800),
         });
         send(id, role, request.summary, request.body, now, mail);
         // Role mail alone does not reach a role that has no chat thread. The
@@ -317,14 +362,17 @@ export async function runMorningCheck(o: MorningOptions): Promise<MorningReport>
     });
   }
 
-  if (human.length) {
-    const aws = human.some((f) => /AWS/i.test(`${f.input} ${f.reason}`));
-    const subject = aws ? SHARED_SUBJECTS.awsSignIn : "sign-in";
-    const what = aws ? "your AWS sign-in" : "a sign-in only you can do";
+  // His sign-in is worth his attention only while a release can still follow
+  // it tonight: before 18:30, and not while the factory is paused or stopped.
+  const stopped = readiness.missing.some((gap) => STOPPED_INPUTS.includes(gap.input));
+  if (human.length && inTime && !stopped) {
+    const subject = SHARED_SUBJECTS.awsSignIn;
     const input = (human.find((f) => releaseInputHumanStep(f.input)) ?? human[0]!).input;
-    const classId = releaseInputClassId(input);
     attempt("ledger record for the sign-in step", () =>
-      dropInboxRecord(o.dir, keep<InboxRecord>(`release-morning:record:${day}:human-step:${subject}`, { version: 1, id: `${SOURCE}:${day}:human-step:${subject}`, at: now, source: SOURCE, type: "human-step-request", classId, step: "sign-in", what: `Tonight's release needs ${what} before 18:30 Eastern.`, dueAt: deadlineAt(now, PROOF_DUE) })),
+      dropInboxRecord(
+        o.dir,
+        keep<InboxRecord>(`release-morning:record:${day}:human-step:${subject}`, { version: 1, id: `${SOURCE}:${day}:human-step:${subject}`, at: now, source: SOURCE, type: "human-step-request", classId: releaseInputClassId(input), step: "sign-in", what: "Tonight's release needs your AWS sign-in before 18:30 Eastern.", dueAt: deadlineAt(now, PROOF_DUE) }),
+      ),
     );
     const tell = (did: "asked" | "hard-stop", id: string, text: string) =>
       attempt(`${did} row for Vincent`, () => {
@@ -337,9 +385,11 @@ export async function runMorningCheck(o: MorningOptions): Promise<MorningReport>
         actions.push({ input, did, to: "Vincent", id });
       });
     // One ask a day, for the noon line. The 09:00 run only records it.
-    if (minute >= NOON && minute < LATE) tell("asked", ownerMessageId({ tier: "ask", kind: "release-step", subject, day }), `Tonight's release needs ${what} before 6:30 PM. Can you do that?`);
-    // Still open (or first seen) at 16:45: it now blocks tonight's release, which is a hard stop and replaces the ask.
-    if (minute >= LATE) tell("hard-stop", ownerMessageId({ tier: "hard-stop", kind: "human-step", subject, day }), `Tonight's release is still blocked on ${what}. It is needed before 6:30 PM.`);
+    if (minute >= NOON && minute < LATE) tell("asked", ownerMessageId({ tier: "ask", kind: "release-step", subject, day }), "Tonight's release needs your AWS sign-in before 6:30 PM. Can you do that?");
+    // Still open (or first seen) at 16:45 with tonight's batch waiting: it now
+    // blocks the release, which is a hard stop and replaces the ask. With no
+    // batch nothing would ship anyway, and Release has been told about that.
+    if (minute >= LATE && !noBatch) tell("hard-stop", ownerMessageId({ tier: "hard-stop", kind: "human-step", subject, day }), "Tonight's release is still blocked on your AWS sign-in. It is needed before 6:30 PM.");
   }
 
   const report: MorningReport = { day, at: now, slot: morningSlot(minute), installed, frozen, ready: !findings.some((f) => f.level === "missing"), findings, actions, failures, ...(o.evidence ? { evidence: o.evidence } : {}) };
