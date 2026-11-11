@@ -1,8 +1,9 @@
 import { readdir, stat, open } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { MeterSchema, type Meter } from "../launcher/config";
 import { spawn } from "node:child_process";
+import { command } from './github';
 
 // Installed app-server protocol: initialize -> account/rateLimits/read. No
 // thread/turn, model call, reset credit consumption or login operation.
@@ -137,6 +138,19 @@ export function claudeMetadata(x: unknown): Meter | undefined {
 }
 export async function claudeReading(now = Date.now(), base = join(homedir(), ".claude", "projects")): Promise<Meter | undefined> {
   return newest(await receipts(base, 1), now, claudeMetadata);
+}
+
+// Explicit preflight read only: do not start an interactive CLI on every tick.
+// The built-in /usage command makes no model turn. Unknown/trust/login panels
+// return no evidence; this function never answers those prompts or renews auth.
+export async function claudeStatus(execute=command,cwd=resolve(import.meta.dir,'..')):Promise<Meter|undefined> {
+  const started=Date.now();
+  try {
+    const raw=JSON.parse(await execute(['/usr/bin/python3','-I','-B',resolve(import.meta.dir,'../scripts/claude-usage.py')],cwd,10000));
+    const parsed=MeterSchema.safeParse(raw);
+    if(!parsed.success||parsed.data.nativeProvider!=='claude'||parsed.data.source!=='native Claude /usage TUI'||parsed.data.observedAt<started||parsed.data.observedAt>Date.now())return;
+    return parsed.data;
+  }catch{return;}
 }
 export async function localReadings(now = Date.now(), sources = {
   receipt: () => codexReading(now), claude: () => claudeReading(now), status: () => codexStatus(),

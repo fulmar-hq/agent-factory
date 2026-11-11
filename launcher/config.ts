@@ -17,14 +17,31 @@ export const ConfigSchema = z.object({
     missed_window: z.literal("next_day"),
   }),
   owners: z.record(z.string(), role),
+  review_process: z.object({
+    rule: z.literal("one independent exact-head review on the same ticket and PR after green checks; never refill work"),
+    historical_receipts: z.enum(["pending","verified"]).optional(),
+    standard_minutes: z.literal(15),
+    deep_minutes: z.literal(30),
+    deep_when: z.literal("tenant separation, consent, sends, bookings, permissions, money or migrations"),
+  }).optional(),
+  refill: z.object({rule:z.literal("product tasks only from the real backlog; never review or acceptance tickets"), report_mix:z.literal(true)}).optional(),
+  model_override: z.literal("per_ticket_wins_then_per_role").optional(),
   usage_gates: z.object({
     admit_below: z.literal(0.7),
     high_benefit_only_below: z.literal(0.9),
     stop_at: z.literal(0.9),
     max_meter_age_minutes: finite.positive().max(15),
   }),
+  board: z.object({
+    quiet_after_minutes: finite.positive().default(15),
+    aws_red_above_usd: finite.default(65),
+  }).prefault({}),
   usage_windows: z.object({
     rule: z.literal("gate on every window the provider actually exposes; require at least one fresh native window (<= max age); 70/90% thresholds apply to each exposed window; missing data = refuse"),
+  }).optional(),
+  usage_push: z.object({
+    until: z.union([z.iso.datetime({offset: true}), z.iso.datetime({offset: true, precision: -1})]),
+    ready_buffer: z.literal("slots + 6"),
   }).optional(),
   overrun: z.object({ checkpoint_at: z.literal(1.8), pause_at: z.literal(2) }),
   ticket_budget_default: z.object({
@@ -33,7 +50,9 @@ export const ConfigSchema = z.object({
     rule:z.string().optional(),
   }).optional(),
   autonomy: z.object({
+    intake_mode: z.enum(["drain", "build"]).default("drain"),
     intake_owner: z.string().min(1),
+    idle_wake_minutes: z.number().int().min(1).max(60).default(10),
     ready_buffer: z.literal(3),
     auto_approval: z.object({
       max_minutes: z.literal(30),
@@ -50,6 +69,7 @@ export const ConfigSchema = z.object({
   wallet: z.object({
     aws: z.object({
       ceiling_usd_month: finite,
+      planned_usd: finite.optional(),
       reserve_usd: finite,
       hold_at_projected: finite,
       stop_at_actual: finite,

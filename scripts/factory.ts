@@ -37,7 +37,7 @@ export async function addProject(repo: string, options: {
     await reconcile(preview, { ...config, projects: { [key]: entry } }, Date.now(), options.execute ?? command);
     const source = preview.get<{ error: string | null; count: number; truncated: boolean }>(`github:${entry.repo}`);
     if (!source || source.error) throw Error(source?.error ?? "Backfill failed");
-    if (source.truncated) throw Error("Backfill reached 1000 issues; enrollment refused");
+    if (source.truncated) throw Error("Backfill incomplete; enrollment refused");
     if (!options.dryRun) {
       if (await readFile(path, "utf8") !== original) throw Error("Config changed; retry enrollment");
       const id = randomUUID(), archive = join(dir, "archive", `add-project-${id}`);
