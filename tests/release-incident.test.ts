@@ -29,3 +29,8 @@ test('a CLI refusal is escalated immediately and an unchanged reconciliation add
  const s=new Store(':memory:'),send=(id:string)=>({id,queued:true}),day='2026-11-11';
  try{s.event('executor-cli:'+day+':qa:missing-command','release-executor-refusal',{stage:'qa',error:'aws not found'},'fixture',at(day,'20:00'));expect(releaseIncident(s,day,at(day,'20:00'),send).queued).toBe(true);const before=s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-incident'").get();releaseIncident(s,day,at(day,'20:00')+1000,send);expect(s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-incident'").get()).toEqual(before);expect((s.get<any>('release-incident:'+day)).gaps[0].reason).toBe('aws not found');}finally{s.close();}
 });
+
+test('a rehearsal error or refused off-schedule attempt is not a missed release night',()=>{
+ const s=new Store(':memory:'),day='2026-11-11',send=()=>{throw Error('must not mail');};
+ try{s.event('executor-cli:'+day+':rehearsal:failure','release-executor-refusal',{stage:'rehearsal',error:'missing input'},'fixture',at(day,'14:00'));s.event('off-hour','release-executor',{day,kind:'refused:qa outside window',data:{reason:'qa outside window'}},'fixture',at(day,'14:00'));s.set('executor:'+day+':preflight',{state:'running'});expect(releaseIncident(s,day,at(day,'19:01'),send).queued).toBe(false);}finally{s.close();}
+});

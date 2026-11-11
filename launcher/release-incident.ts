@@ -29,7 +29,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
   else if(effect?.state==='failure')windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`});
   else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`});
  }
- const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped')) OR (kind='release-executor-refusal' AND id LIKE ?) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
+ const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') AND json_extract(data,'$.kind') NOT LIKE '%outside window%') OR (kind='release-executor-refusal' AND id LIKE ? AND json_extract(data,'$.stage') IN ('preflight','qa','production')) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
  if(refusals.length>1000)throw Error('release refusal inventory exceeds incident bound');
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
