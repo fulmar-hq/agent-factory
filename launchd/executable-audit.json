@@ -21,7 +21,7 @@
   "adapters/usage.ts": "949ea4fb2f23d67eefa7239990a7a8f25c0bd116b8484a8b61204b22c1d03764",
   "adapters/github.ts": "9367f8b57bba56f0aaa01f51cad99cf3b29bc201a1d00e092045a82af4402fed",
   "adapters/workers.ts": "efc0b45bf4b7d7c61dc60ca85e011f104276c619f8a2fa6769d32c774fa1f46e",
-  "adapters/codex-renewal.ts": "6bade641c02f5670459662ffc69991fec67c8bbd1bd4e3587e20a4dabd085c88",
+  "adapters/codex-renewal.ts": "14f6a75bd6d2d3241861ce38bf8ad447303a98d8c34ea4f43af56f76daaf4ccf",
   "adapters/browser.ts": "a28b1e3c0ab5b61e1b29d222d066e92b0d89bba73671ee0f423ad94d9b788614",
   "adapters/factory-challenge.ts": "adbc9097f3d3d8ad5f599a3c9266593ddecc763ed25a6ea39433a63a91a93877",
   "adapters/hosted-acceptance.ts": "b1838ba9b1c476af6868a36182963e7347294339d8ef910252d5978f8567ccdd",
