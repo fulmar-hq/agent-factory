@@ -207,6 +207,57 @@ Tool caches need a separate activity check. Bun's install cache and npm's `_caca
 
 The recurring guard must clean after a verified finished session, **after** publication/tests/browser handoff consumers release the workspace, and run a daily idle sweep with the same protections. Finished native generation alone is insufficient. Waiting-browser, live, recent, unknown or unverified cleanup custody stays intact. All private-root workspaces are excluded under the current cleanup authority; resolving their build-material retention needs explicit scoped policy before enabling deletion there. The job must serialize sweeps, support dry-run, retain deletion intents/results, recheck process/path/ignore evidence immediately before each deletion, and visibly retain failures. The tick records actual disk readings under `disk-capacity` and an append-only event on warning/unknown/recovery transitions. At 80% it emits an actionable stderr warning once per episode; repeated ticks retain updated readings without repeating the warning. Unknown filesystem evidence is visible and never clears a pause. The warning is source-implemented here; installed readback still follows review. No launchd install, live checkout patch, automatic session retry, model call or AWS change is part of this rule. #138 owns implementation, synthetic safety tests, normal signed PR review, Coordinator activation and installed readback; this document does not claim that automation is already active.
 
+### Factory cache lifecycle — archive-only policy (Nov 11)
+
+The current acting instruction, **archive, never delete**, supersedes earlier
+factory-cache removal proposals. The command
+`scripts/cache-retention.py --root "$FACTORY_PRIVATE_DIR"` is an audit only;
+`--apply` is rejected. No automatic cache sweep is added to maintenance; an
+operator may run this read-only audit separately.
+It retains every source, dependency, build output, Git object, log, receipt,
+transcript and database recovery sidecar in place. It creates no eviction marker
+and reports recovered bytes as **zero**; an observation is not cleanup authority.
+
+The auditor opens controller.sqlite read-only with a half-second timeout,
+materializes only the target session/binding/manifest rows, and closes the
+controller before process, Git and filesystem probes. Complete custody,
+provenance, ignore/HEAD and process/cwd/descriptor evidence are still required
+before recording a cache candidate. Unknown or changed evidence refuses that
+observation. Receipts remain under `receipts/cache-retention`; no SQLite writer
+transaction is held across probes. A later archive implementation needs its own
+reviewed scoped policy and undo manifest, never an implicit deletion switch.
+
+Source setup initializes the independent Git index without checking out a
+second source tree in the retained local-clone setup directory. APFS directory
+growth and actual free-space deltas remain separate measurements. This change
+reduces future redundant copies; it makes no physical disk reclamation claim.
+
+New worker and publisher source is materialized from one trusted immutable seed
+per expected base under `runs/source-seeds`. The seed uses independent Git objects
+and a checked-out clean committed tree. Consumers receive independent APFS
+copy-on-write files; dirty canonical source is never copied. Missing, changed or
+incomplete seed custody refuses setup. Other platforms copy independent files.
+Worker setup pins `refs/factory/base` and requests an incremental delivery bundle
+(`HEAD ^refs/factory/base`) so each task retains its new objects rather than a
+second full repository history. Publication still imports against its original
+expected base and checks every intermediate commit and the exact tested tree.
+Existing full bundles, source snapshots and Git objects remain preserved.
+
+Previously recorded dependency-restoration bindings remain fail-closed. If an
+older authorized operation left an eviction marker, resume still verifies the
+original controller installation fingerprint and archives in-cache evidence
+before restoration. Missing provenance or changed canonical dependencies refuse
+resume. This audit creates no new eviction and grants no new restoration scope.
+
+The Nov 10 longer sample also identified `runs/browser-drain` recovery publication
+copies. Their audit uses original session cleanup/status and fresh process
+evidence rather than the unrelated-rehearsal age gate. All publisher
+callers now default to the shared immutable source seed under their enclosing
+`runs`, including recovery scripts using the installed adapter directly. Original
+bundles, Git objects, source and exact-tree test/publication receipts remain.
+
+Publisher dependency provenance records a trusted pre-test inventory for each new checkout under the session’s `runs/delivery` or `runs/browser-drain` path. The launcher binds its exact path and session to an immutable fingerprint in controller state; inventory bytes are shared by fingerprint. Worker-written receipts and legacy clones cannot establish this provenance. Audit observations also require the original supervisor to have exited and no unconsumed browser request, even after `sessions.pid` is cleared. Browser-drain callers must pass `publisherDependencyRecorder` to `testSnapshot`; older callers remain unbound and retained. These trusted source changes invalidate publisher and renewal fingerprints and require normal independent review and qualification before installation.
+
 ## GitHub quota and outage recovery
 
 The launcher keeps REST and GraphQL quota accounting distinct. The issue scheduler no longer rereads closed issue bodies and nested labels. Owner/board PR evidence is shared for ten minutes, and already-reviewing publications defer their nontransactional review polling to that shared reader, including at cache-expiry boundaries, instead of rereading every issue and PR each minute. Maintenance caches immutable commit trees and blocked check/base observations for ten minutes; an eligible merge still requires a fresh final PR/check read. A review read failure stops the pass instead of repeating the same failed request for every finished session. A full builder pool stops the admission loop before per-ticket GitHub validation; final atomic admission still rechecks capacity and every other gate after a slot becomes available.

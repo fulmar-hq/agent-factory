@@ -1,5 +1,5 @@
 import { existsSync, renameSync, mkdirSync, realpathSync, openSync, closeSync, readSync, writeSync, constants, fstatSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, readFileSync, cpSync, lstatSync } from "node:fs";
-import { join, dirname, relative, resolve, isAbsolute } from "node:path";
+import { join, dirname, relative, resolve, isAbsolute, basename } from "node:path";
 import { command } from "./github";
 import type { Ticket } from "../launcher/config";
 
@@ -84,6 +84,42 @@ export async function cloneStandalone(source:string,target:string,execute=comman
   await execute(["git","-C",target,"cat-file","-e","HEAD^{commit}"]);
 }
 
+// One trusted immutable source seed per base. Every consumer receives independent
+// APFS clone files, never hardlinks or writable access to the seed. Historical
+// source and Git receipts are retained; only future redundant writes are avoided.
+export async function materializeTree(source:string,target:string,base:string,seeds:string,execute=command,platform:NodeJS.Platform=process.platform) {
+  if(!/^[a-f0-9]{40}$/.test(base))throw Error("immutable source base required");
+  mkdirSync(seeds,{recursive:true,mode:0o700});
+  if(realpathSync(seeds)!==resolve(seeds))throw Error("linked source seed root refused");
+  const seed=join(seeds,base),ready=join(seeds,`${base}.ready.json`);
+  let owns=false;
+  try{mkdirSync(seed,{mode:0o700});owns=true;}catch(error){if((error as NodeJS.ErrnoException).code!=="EEXIST")throw error;}
+  const git=(dir:string,...args:string[])=>execute(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",dir,...args]);
+  if(owns) {
+    // cloneStandalone expects an absent destination; retain a separate setup
+    // claim directory rather than deleting it to make room.
+    const checkout=join(seed,"source");
+    await cloneStandalone(source,checkout,execute,platform);
+    await git(checkout,"checkout","--detach",base);
+    if((await git(checkout,"status","--porcelain")).trim())throw Error("dirty source seed refused");
+    const {writeFileSync}=await import("node:fs");
+    writeFileSync(ready,JSON.stringify({base,source:checkout}),{flag:"wx",mode:0o600});
+  } else {
+    for(let n=0;n<300&&!existsSync(ready);n++)await new Promise(r=>setTimeout(r,100));
+  }
+  const checkout=join(seed,"source");
+  if(!existsSync(ready)||lstatSync(ready).isSymbolicLink()||realpathSync(checkout)!==checkout ||
+    JSON.parse(readFileSync(ready,"utf8")).base!==base || (await git(checkout,"rev-parse","HEAD")).trim()!==base ||
+    (await git(checkout,"status","--porcelain")).trim())throw Error("source seed custody incomplete");
+  const names=(await git(checkout,"ls-tree","-z","--name-only",base)).split("\0").filter(Boolean);
+  for(const name of names) {
+    if(name===".git"||name.includes("/")||existsSync(join(target,name)))throw Error("source destination already populated");
+    await execute(["cp",platform==="darwin"?"-cRPn":"-RPn",join(checkout,name),join(target,name)]);
+  }
+  await git(target,"read-tree",base);
+  if((await git(target,"status","--porcelain")).trim())throw Error("materialized source changed during setup");
+}
+
 export const deliveryRepo = "fulmar-hq/alido";
 export const isDeliveryRepo = (repo:string) => [deliveryRepo,"fulmar-hq/agent-factory"].includes(repo);
 export const branchFor = (id:string) => `feat/factory-${id.slice(0,16)}`;
@@ -150,19 +186,41 @@ export function prepareTestScratch(checkout:string) {
 }
 // Trusted setup runs before model tools. No shared writable Git metadata or
 // dependency symlinks into another checkout. Original gitfile stays archived.
-export async function prepareDelivery(workspace:string, source:string, archive:string, id:string) {
+export async function prepareDelivery(workspace:string, source:string, archive:string, id:string, expectedBase?:string, pinnedDependencies?:string|null, recordDependencies?:(manifest:unknown,fingerprint:string)=>void) {
   mkdirSync(archive,{recursive:true,mode:0o700});
   workspace=realpathSync(workspace);
-  const git = (...args:string[]) => command(["git","-C",workspace,...args]);
+  const git = (...args:string[]) => command(["git","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-C",workspace,...args]);
   if (!existsSync(join(workspace,".git/HEAD"))) {
     const head=(await git("rev-parse","HEAD")).trim();
     const branch=(await git("branch","--show-current")).trim();
     if (branch !== branchFor(id)) throw Error("worker branch mismatch");
     const clone=join(archive,"local-clone");
     await cloneStandalone(source,clone);
-    await command(["git","-C",clone,"checkout","-b",branch,head]);
+    // Populate only the independent index/ref. The real workspace already has
+    // its source; checking out here retained a second full source tree per task.
+    await command(["git","-C",clone,"update-ref",`refs/heads/${branch}`,head]);
+    await command(["git","-C",clone,"symbolic-ref","HEAD",`refs/heads/${branch}`]);
+    await command(["git","-C",clone,"read-tree",head]);
     renameSync(join(workspace,".git"),join(archive,"original-gitfile"));
     renameSync(join(clone,".git"),join(workspace,".git"));
+  }
+  // A trusted immutable expected base also bounds the worker delivery bundle.
+  const bundleBase=expectedBase ?? ((await git("show-ref","--verify","--hash","refs/factory/base").catch(()=>"" )).trim() || (await git("rev-parse","HEAD")).trim());
+  if(!/^[a-f0-9]{40}$/.test(bundleBase))throw Error("immutable bundle base required");
+  await git("update-ref","refs/factory/base",bundleBase);
+  const scratch=join(workspace,".factory-tmp");
+  if(existsSync(scratch) && (lstatSync(scratch).isSymbolicLink() || !lstatSync(scratch).isDirectory() || realpathSync(scratch)!==scratch))throw Error("linked dependency receipt root refused");
+  const eviction=join(scratch,"dependencies-evicted.jsonl");
+  const expectedDependencies=pinnedDependencies ?? undefined;
+  const dependencyFingerprint=(deps:string)=>command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",deps],undefined,120000).then(s=>s.trim());
+  if(existsSync(eviction)) {
+    if(lstatSync(eviction).isSymbolicLink() || !lstatSync(eviction).isFile())throw Error("invalid dependency restoration marker");
+    const receipt=JSON.parse(readFileSync(eviction,"utf8").trim().split("\n")[0]!);
+    if(!expectedDependencies || receipt.dependencyFingerprint!==expectedDependencies || !/^[a-f0-9]{64}$/.test(expectedDependencies))throw Error("pinned dependency identity unavailable; retain parent and receipt");
+    if(await dependencyFingerprint(join(source,"node_modules"))!==expectedDependencies)throw Error("pinned dependency installation changed; retain parent and receipt");
+    // Keep in-cache logs/receipts and the eviction receipt. Resume gets a
+    // complete pinned dependency copy before any native process starts.
+    if(existsSync(join(workspace,"node_modules")))renameSync(join(workspace,"node_modules"),join(archive,`dependency-evidence-${crypto.randomUUID()}`));
   }
   if (!existsSync(join(workspace,"node_modules"))) {
     if (!existsSync(join(source,"node_modules"))) throw Error("installed dependencies missing");
@@ -170,6 +228,14 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
   }
   verifyDependencyObjects(join(workspace,"node_modules"));
   localizeDependencies(workspace,source,archive);
+  const installedDependencies=await dependencyFingerprint(join(workspace,"node_modules"));
+  if(!expectedDependencies && recordDependencies) {
+    const manifest=JSON.parse(await command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",join(workspace,"node_modules"),"--inventory"],undefined,120000));
+    if(manifest.version!==1 || manifest.fingerprint!==installedDependencies || !manifest.entries || typeof manifest.entries!=="object")throw Error("dependency cache provenance changed during setup");
+    recordDependencies(manifest,installedDependencies);
+  }
+  if(expectedDependencies && installedDependencies!==expectedDependencies)throw Error("restored dependency installation differs; retain parent and receipt");
+  if(existsSync(eviction))renameSync(eviction,join(archive,`dependency-restored-${crypto.randomUUID()}.jsonl`));
   const metadata=join(workspace,".git");
   if(realpathSync(metadata)!==metadata || existsSync(join(metadata,"commondir")) || existsSync(join(metadata,"objects/info/alternates")))throw Error("standalone worker Git required");
   const checkGit=(dir:string)=>{for(const entry of readdirSync(dir,{withFileTypes:true})) {
@@ -185,6 +251,7 @@ export async function prepareDelivery(workspace:string, source:string, archive:s
     ["user.name","Vincent Messina"], ["user.email","72951696+vincentmessina@users.noreply.github.com"],
     ["commit.gpgsign","false"], ["core.hooksPath","/dev/null"], ["core.excludesFile","/dev/null"],
   ]) await git("config","--local",key,value);
+  return installedDependencies;
 }
 
 // Snapshot through a non-following descriptor before trusted Git reads the
@@ -217,8 +284,12 @@ export type PublishAuthority = {
   testTree: (checkout:string, tree:string) => Promise<{tree:string; passed:boolean}>;
   isolationVerified: boolean;
 };
+function publicationSeedDirectory(dir:string) {
+  for(let p=resolve(dir);dirname(p)!==p;p=dirname(p))if(basename(p)==="runs")return join(p,"source-seeds");
+  return join(dirname(dir),"source-seeds");
+}
 export async function publish(t:Ticket, id:string, workspace:string, dir:string, baseline:string,
-  authority:PublishAuthority, execute=command, trustedSource=workspace) {
+  authority:PublishAuthority, execute=command, trustedSource=workspace, seeds=publicationSeedDirectory(dir)) {
   if (!authority.isolationVerified) throw Error("publisher blocked: isolation unproven");
   if (![deliveryRepo,"fulmar-hq/agent-factory"].includes(t.repo) || !/^[a-f0-9]{40}$/.test(baseline)) throw Error("publisher destination/base refused");
   authority.verifyClaim();
@@ -246,6 +317,10 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
   }
   const changed=(await git("diff","--name-only",baseline,head)).trim().split("\n").filter(Boolean);
   if(!changed.length || changed.some(p=>!t.paths.includes(p)))throw Error("delivery paths outside approved scope");
+  if(seeds) {
+    await git("update-ref","--no-deref","HEAD",baseline);
+    await materializeTree(trustedSource,checkout,baseline,seeds,execute);
+  }
   await git("checkout","--detach",head);
   if((await git("status","--porcelain")).trim())throw Error("publisher checkout not clean");
   const tree=(await git("rev-parse","HEAD^{tree}")).trim();
@@ -272,13 +347,18 @@ export async function publish(t:Ticket, id:string, workspace:string, dir:string,
 
 // Tests run in the worker boundary, never with launcher credentials. The caller
 // checks clean status and the tree again after this process exits.
-export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string) {
+export type DependencyRecorder = (checkout:string, manifest:unknown, fingerprint:string)=>void;
+export async function testSnapshot(t:Ticket, checkout:string, tree:string, source:string, recordDependencies?:DependencyRecorder) {
   executableTest(t.test);
   assertMacCrashSafe(checkout,t.test);
   const {workerSpec}=await import("./workers");
   if(existsSync(join(source,"node_modules"))) {
     await copyDependencies(join(source,"node_modules"),join(checkout,"node_modules"));
     localizeDependencies(checkout,source,join(dirname(checkout),"test-dependency-archive"));
+    if(recordDependencies) {
+      const manifest=JSON.parse(await command(["python3",resolve(import.meta.dir,"../scripts/cache-retention.py"),"--fingerprint",join(checkout,"node_modules"),"--inventory"],undefined,120000));
+      recordDependencies(checkout,manifest,manifest.fingerprint);
+    }
   }
   // Tests retain scratch receipts (including Vitest's local token). They are
   // declared non-source assets, just as in the prepared worker checkout.
