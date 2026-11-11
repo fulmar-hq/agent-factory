@@ -18,6 +18,8 @@ test('dry rehearsal routes all gaps, retains clean logs, and deduplicates immuta
  recordRehearsal(s,{...report,at:at+2,ready:true,missing:[]},'17:40',send);expect(sent.size).toBe(4);
  expect(s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-rehearsal'").get()).toEqual({n:3});
  expect(gapOwner('fresh billing','expired AWS sign-in')).toBe('Coordinator');
+ expect(gapOwner('factory state','AWS stop remains latched')).toBe('Coordinator');
+ expect(gapOwner('fresh billing','owner decision required')).toBe('Coordinator');
  }finally{s.close();}
 });
 test('action mail uses existing outbox once and refuses conflicting readback or a replacement store',()=>{

@@ -2,7 +2,7 @@ import {Database} from 'bun:sqlite';
 import {createHash} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {mailPath} from './alerts';
-export type ReleaseOwner='Release'|'Quality'|'Platform'|'Coordinator';
+export type ReleaseOwner='Release'|'Quality'|'Platform'|'Product'|'Coordinator';
 // Existing Alido Mail only. Stable IDs and exact readback make a lost reply safe
 // to retry; no Telegram/customer recipient or new mail store is permitted.
 export function releaseAction(id:string,to:ReleaseOwner,summary:string,body:string,now=Date.now(),path=mailPath()) {
