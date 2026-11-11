@@ -9,7 +9,7 @@ import {ConfigSchema,QualificationSchema,BillingSchema,MeterSchema,type Meter} f
 import {releaseAvailable} from '../wallet/release';
 import {awsRefusal} from '../wallet/ledger';
 import {readReleaseBatch} from './release-batch';
-import {originalSessionExpiry,supportedReleaseHold,collectReleaseReadiness} from './release-readiness';
+import {originalSessionMetadata,supportedReleaseHold,collectReleaseReadiness} from './release-readiness';
 import {relatedFactoryAlarm} from './alerts';
 import {command} from '../adapters/github';
 import {diskReading} from './disk';
@@ -123,7 +123,7 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
  }catch(error){snapshot.controller=failed(now,String(error));snapshot.work=failed(now,String(error));}
  // Existing non-secret sign-in provenance and cached budget import; never SSO
  // tokens, credential contents, AWS requests or a manufactured ready decision.
- try{const p=originalSessionExpiry(JSON.parse(readFileSync(join(dir,'release-auth-session.json'),'utf8')),now,0);snapshot.aws=ok(now,p.receipt,{verified:true,credentialId:createHash('sha256').update(p.receipt).digest('hex'),expiresAt:p.expiresAt});}catch(error){snapshot.aws=failed(now,String(error));}
+ try{const p=originalSessionMetadata(JSON.parse(readFileSync(join(dir,'release-auth-session.json'),'utf8')),now);snapshot.aws=ok(now,p.receipt,{verified:true,credentialId:createHash('sha256').update(p.receipt).digest('hex'),expiresAt:p.expiresAt});}catch(error){snapshot.aws=failed(now,String(error));}
  try{const [variable,issue]=await Promise.all([execute(['gh','api','--method','GET','repos/fulmar-hq/alido/actions/variables/QA_HOLD'],undefined,8000),execute(['gh','api','--method','GET','repos/fulmar-hq/alido/issues/1192'],undefined,8000)]),v=supportedReleaseHold(JSON.parse(JSON.parse(variable).value)),i=JSON.parse(issue);if(!Array.isArray(i.labels)||i.labels.length>=100)throw Error('supported release hold readback unavailable');let blocking=v.held||i.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));if(v.legacy_issue!==null&&v.legacy_issue!==1192){if(!Number.isSafeInteger(v.legacy_issue)||v.legacy_issue<1)throw Error('legacy hold identity unavailable');const legacy=JSON.parse(await execute(['gh','api','--method','GET',`repos/fulmar-hq/alido/issues/${v.legacy_issue}`],undefined,8000));if(!Array.isArray(legacy.labels)||legacy.labels.length>=100)throw Error('legacy hold labels unavailable');blocking ||= legacy.labels.some((l:{name:string})=>['qa hold','qa-hold'].includes(l.name.toLowerCase()));}snapshot.holds=ok(now,'fresh supported GitHub hold and release-board labels',{blocking});}catch(error){snapshot.holds=failed(now,String(error));}
  return {snapshot,inactive};
 }
