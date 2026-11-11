@@ -43,3 +43,7 @@ test('a resolved rehearsal gap is not blamed for a later QA failure, whose real 
 test('an outbox failure on an older night cannot suppress recording the other missed nights',()=>{
  const s=new Store(':memory:');try{for(const day of ['2026-11-09','2026-11-10','2026-11-11'])report(s,day,'19:00',[{input:'fresh billing',reason:'missing'}],'release-readiness');const results=reconcileReleaseIncidents(s,at('2026-11-11','22:30'),()=>{throw Error('outbox unavailable');});expect(results).toHaveLength(3);for(const day of ['2026-11-09','2026-11-10','2026-11-11'])expect(s.get('release-incident:'+day)).not.toBeNull();}finally{s.close();}
 });
+
+test('the Monday pause is first knowable when set at 20:45, not when Production refuses at 21:30',()=>{
+ const s=new Store(':memory:'),day='2026-11-09';try{report(s,day,'14:00',[{input:'fresh billing',reason:'wallet billing unknown'}]);report(s,day,'19:00',[{input:'fresh billing',reason:'wallet billing unknown'}],'release-readiness');s.event('evening-pause','pause',{owner:'Platform'},'fixture',at(day,'20:45'));s.event('production-refused','release-executor',{day,kind:'refused:factory paused',data:{reason:'factory paused'}},'fixture',at(day,'21:30'));releaseIncident(s,day,at(day,'21:31'),id=>({id,queued:true}));const incident=s.get<any>('release-incident:'+day);expect(incident.gaps.find((g:any)=>g.input==='factory state').knownBy).toBe(at(day,'20:45'));expect(incident.body).toContain('20:45');}finally{s.close();}
+});

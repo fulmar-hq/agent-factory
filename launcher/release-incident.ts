@@ -37,15 +37,17 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  const gaps:Gap[]=[];
  const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
  const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else first=undefined;}return first;};
- for(const gap of failing?.missing??[]){const first=firstCurrentGap(gap.input,failing!.at);gaps.push({...gap,knownBy:first??failing!.at,basis:'recorded observation'});}
- for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){const first=firstCurrentGap(input,row.at);gaps.push({input,reason,knownBy:first??row.at,basis:'recorded observation'});}}
+ const knownPause=(until:number)=>{const row=s.db.query("SELECT at FROM events WHERE kind='pause' AND at<=? AND rowid>COALESCE((SELECT MAX(rowid) FROM events WHERE kind='resume' AND at<=?),0) ORDER BY rowid LIMIT 1").get(until,until) as {at:number}|null;return row?.at;};
+ const knownInput=(input:string,reason:string,until:number)=>{const report=firstCurrentGap(input,until),pause=input==='factory state'&&/paused/i.test(reason)?knownPause(until):undefined;return Math.min(report??until,pause??until);};
+ for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}
+ for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});
  const shipped=releaseOutcome(s,day).shipped;
  let consecutiveMisses=shipped?0:1,prior=previousDay(day);
  while(!shipped&&consecutiveMisses<30&&missedNight(s,prior)){consecutiveMisses++;prior=previousDay(prior);}
  const key=`release-incident:${day}`,earlier=s.get<{firstObservedAt:number;mail:{summary:string;body:string}}>(key);
  const summary=consecutiveMisses>=2?`Release incident: ${consecutiveMisses} consecutive missed nights.`:`Release incident for ${day}.`;
- const body=`${shipped?'Release later shipped. ':''}${windows.map(w=>`${w.name} ${w.state}`).join('; ')||'Release admission refused'}. ${gaps.map(g=>`${g.input}: known by ${clock(g.knownBy)} Eastern (${g.basis})`).join('; ')}. Resolve the inputs before the next scheduled night; no catch-up release.`.slice(0,800);
+ const body=`${shipped?'Release later shipped. ':''}${windows.map(w=>`${w.name} ${w.state}`).join('; ')||'Release admission refused'}. ${gaps.map(g=>`${g.input}: known by ${toronto(g.knownBy).day===day?'':toronto(g.knownBy).day+' '}${clock(g.knownBy)} Eastern (${g.basis})`).join('; ')}. Resolve the inputs before the next scheduled night; no catch-up release.`.slice(0,800);
  const incident={day,firstObservedAt:earlier?.firstObservedAt??now,at:now,shipped,consecutiveMisses,windows,gaps,summary,body,mail:earlier?.mail??{summary,body}};
  // The plain current summary is updated as later windows settle. The immutable
  // first action is mailed once/night; retries recover the same cross-store ID.
