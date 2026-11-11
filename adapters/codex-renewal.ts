@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
 import {lookup} from 'node:dns/promises';
+import {createConnection} from 'node:net';
 import {publisherBoundary,readPublisherProof,type PublisherPublication} from '../launcher/publisher-evidence';
 import {readFileSync,writeFileSync,mkdirSync,copyFileSync,statSync,openSync,closeSync,fsyncSync,renameSync,existsSync,realpathSync,readdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
@@ -26,6 +27,27 @@ const snapshot=():Snapshot=>{const at=Date.now(),rows=processRows();return {at,e
 function durable(path:string,bytes:string){const fd=openSync(path,'wx',0o600);try{writeFileSync(fd,bytes);fsyncSync(fd);}finally{closeSync(fd);}}
 function sync(path:string){const fd=openSync(path,'r');try{fsyncSync(fd);}finally{closeSync(fd);}}
 const json=(x:unknown)=>JSON.stringify(x,null,2)+'\n';
+function connectNetworkTarget(address:string):Promise<void>{
+ return new Promise((resolve,reject)=>{
+  const socket=createConnection({host:address,port:443});
+  socket.setTimeout(3000);
+  socket.once('connect',()=>{socket.destroy();resolve();});
+  socket.once('error',error=>{socket.destroy();reject(error);});
+  socket.once('timeout',()=>{socket.destroy();reject(Error('TCP443 timed out'));});
+ });
+}
+// DNS rotation does not change the literal endpoints bound into the hashed
+// probe. Prove those endpoints are reachable by the trusted parent, rather than
+// requiring a later DNS answer to repeat a load-balanced address.
+export async function verifyKnownNetworkTargets(network:{githubIPv4:string;exampleIPv4:string},connect=connectNetworkTarget,clock=Date.now){
+ const targets=[];
+ for(const [host,address] of [['github.com',network.githubIPv4],['example.com',network.exampleIPv4]] as const){
+  z.ipv4().parse(address);
+  try{await connect(address);}catch(error){throw Error(`known network target unreachable: ${host} ${address}:443: ${String(error)}`);}
+  targets.push({host,address,port:443,reachable:true});
+ }
+ return {observedAt:clock(),targets};
+}
 function ref(path:string):ReceiptRef{return {path,sha256:renewalDigest(readFileSync(path,'utf8'))};}
 export function readLiveUsage(path:string,clock=Date.now){
  const bytes=readFileSync(path);if(bytes.length>16*1024*1024)throw Error('native receipt exceeds capture bound');
@@ -74,6 +96,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   for(const path of Object.values(targets).slice(1))if(!statSync(path).isFile())throw Error('known-existing probe target unavailable');
   const [githubAddresses,exampleAddresses]=await Promise.all([lookup('github.com',{family:4,all:true}),lookup('example.com',{family:4,all:true})]);
   const network={githubIPv4:githubAddresses[0]!.address,exampleIPv4:exampleAddresses[0]!.address,dnsIPv4:'1.1.1.1' as const,observedAt:Date.now()};
+  durable(join(run,'network-preflight.json'),json(await verifyKnownNetworkTargets(network)));
   const probe=securityProbe(targets,network),probePath=join(workspace,'probe.py');durable(probePath,probe);
   durable(join(workspace,'lifecycle.py'),`import os,subprocess,json,signal,sys\nfrom pathlib import Path\np=subprocess.Popen(['/bin/sh','-c',"trap '' TERM; exec sleep 240"])\nPath('probe-pids.json').write_text(json.dumps({'parent':os.getpid(),'child':p.pid,'group':os.getpgrp()}))\nsignal.signal(signal.SIGTERM,lambda *args:sys.exit(0))\np.wait()\n`);
   const manifest:CodexRenewalManifest={version:1,runId,startedAt,expiresAt,model:'gpt-6.1-sol',targets,network,qualifications:ref(join(run,'qualifications.original.json')),sources:renewalSources.map(path=>ref(join(checkout,path))),probe:ref(probePath),subscription:ref(join(run,'subscription.json')),runs:[]};
@@ -134,7 +157,7 @@ export async function executeCodexRenewal(dir:string,id:string,checkout=resolve(
   }
   durable(join(run,'manifest.json'),json(manifest));const proof=collectCodexRenewalEvidence(manifest);durable(join(run,'verified.json'),json(proof));if(proof.status!=='verified'||proof.verifiedRuns.length!==6||proof.cleanup!=='verified')throw Error(`native six-run proof refused: ${proof.reason}`);
   guard();await verifySubscription('codex');
-  for(const [host,expected] of [['github.com',network.githubIPv4],['example.com',network.exampleIPv4]] as const)if(!(await lookup(host,{family:4,all:true})).some(a=>a.address===expected))throw Error('known network target changed during renewal');
+  durable(join(run,'network-readback.json'),json(await verifyKnownNetworkTargets(network)));
   if(renewalDigest(renewalFingerprint(checkout,(await command(['codex','--version'])).trim()))!==renewalDigest(fingerprint))throw Error('boundary or CLI changed during renewal');
   const pub=claim.publisher,publisherProof=readPublisherProof(dir,pub,publisherBoundary(checkout,dir)),testedPath=publisherTestedReceipt(dir,pub),publisherExpiresAt=Math.min(expiresAt,publisherProof.completedAt+86400000);
   const tested=JSON.parse(readFileSync(testedPath,'utf8'));
