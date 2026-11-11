@@ -348,7 +348,11 @@ it never invents an earlier observation. Full reasons remain in the incident.
 One immutable Alido Mail action/night goes to Coordinator. Later windows update
 the retained incident, and delivery failures retry that original action ID and
 payload. Existing historical release evidence lets a restarted reconciler
-recover the last two nights. A prior unshipped night increments the consecutive
+recover the last two nights, including admitted scheduled refusals that failed
+before a night/report record existed. Pending action retries are independent of
+that discovery horizon and continue after longer outbox outages. CLI errors from
+off-schedule attempts are excluded; original invocation time distinguishes a
+scheduled job whose setup failed later. A prior unshipped night increments the consecutive
 miss count and flags the second consecutive missed night. A later proven ship
 is retained as recovery. Incidents, original messages and old release records
 are archived/retained, never erased. Notification failure cannot suppress other

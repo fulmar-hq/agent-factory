@@ -103,7 +103,7 @@ try {
  }
 }
 }catch(error){
- const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
+ const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,invokedAt,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
  if(rehearsal){
   const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'release configuration',reason:String(error)}],evidence:{error:String(error)}};
   try{recordRehearsal(s,failed,rehearsalSlot as '14:00'|'17:40');}catch(mailError){s.event(`rehearsal-mail-failed:${invokedAt}`,'release-rehearsal-alert-failure',{error:String(mailError)},'Restore mail and retry the same rehearsal gap IDs');}

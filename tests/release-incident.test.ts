@@ -51,3 +51,17 @@ test('the Monday pause is first knowable when set at 20:45, not when Production 
 test('an incomplete configuration report cannot erase earlier knowledge of an unresolved input',()=>{
  const s=new Store(':memory:'),day='2026-11-11';try{report(s,day,'14:00',[{input:'fresh billing',reason:'stale'}]);report(s,day,'17:40',[{input:'release configuration',reason:'config could not be read'}]);report(s,day,'19:00',[{input:'fresh billing',reason:'still stale'}],'release-readiness');releaseIncident(s,day,at(day,'19:01'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps[0].knownBy).toBe(at(day,'14:00'));}finally{s.close();}
 });
+
+test('pending incident mail retries beyond the two-night discovery horizon, without replaying queued mail',()=>{
+ const s=new Store(':memory:'),day='2026-11-08';let sends=0;
+ try{report(s,day,'19:00',[],'release-readiness');expect(()=>releaseIncident(s,day,at(day,'20:01'),()=>{throw Error('bridge offline');})).toThrow('offline');reconcileReleaseIncidents(s,at('2026-11-11','12:00'),id=>{expect(id).toBe('release-incident-action:'+day);sends++;return {id,queued:true};});expect(sends).toBe(1);reconcileReleaseIncidents(s,at('2026-11-12','12:00'),()=>{throw Error('queued action replay');});expect(sends).toBe(1);}finally{s.close();}
+});
+test('an off-schedule CLI setup error is excluded during an otherwise healthy preflight',()=>{
+ const s=new Store(':memory:'),day='2026-11-11';try{s.event('executor-cli:'+day+':qa:early-error','release-executor-refusal',{stage:'qa',error:'synthetic config error'},'fixture',at(day,'14:00'));report(s,day,'19:00',[],'release-readiness');s.set('executor:'+day+':preflight',{state:'success'});expect(releaseIncident(s,day,at(day,'19:00'),()=>{throw Error('no failed window');}).queued).toBe(false);}finally{s.close();}
+});
+test('historical recovery and consecutive counting include admitted event-only CLI failures',()=>{
+ const s=new Store(':memory:');try{for(const day of ['2026-11-09','2026-11-10'])s.event('executor-cli:'+day+':qa:config','release-executor-refusal',{stage:'qa',error:'synthetic config error'},'fixture',at(day,'20:00'));const sent:string[]=[];reconcileReleaseIncidents(s,at('2026-11-11','12:00'),id=>{sent.push(id);return {id,queued:true};});expect(sent).toHaveLength(2);expect(s.get<any>('release-incident:2026-11-10').consecutiveMisses).toBe(2);}finally{s.close();}
+});
+test('late setup failure retains its genuinely scheduled invocation time',()=>{
+ const s=new Store(':memory:'),day='2026-11-11';try{s.event('executor-cli:'+day+':qa:late-config','release-executor-refusal',{stage:'qa',invokedAt:at(day,'20:00'),error:'synthetic config error'},'fixture',at(day,'20:02'));releaseIncident(s,day,at(day,'20:02'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps).toContainEqual({input:'release configuration',reason:'synthetic config error',knownBy:at(day,'20:02'),basis:'recorded observation'});}finally{s.close();}
+});

@@ -13,7 +13,19 @@ function reports(s:Store,day:string){
  const result=rows.map(r=>JSON.parse(r.data) as ReleaseReadiness),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`);
  if(preflight)result.push(preflight);return result.sort((a,b)=>a.at-b.at);
 }
-function knownNight(s:Store,day:string){return !!(s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`));}
+type Refusal={kind:string;at:number;data:string};
+function scheduledCli(day:string,at:number,data:{stage?:string;invokedAt?:number}){
+ const target=({preflight:1140,qa:1200,production:1290} as Record<string,number>)[data.stage??''];
+ const invoked=data.invokedAt??at;
+ if(target===undefined||!Number.isSafeInteger(invoked)||invoked<=0||invoked>at)return false;
+ const time=toronto(invoked);return time.day===day&&time.minute===target;
+}
+function releaseRefusals(s:Store,day:string){
+ const rows=s.db.query("SELECT kind,at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') AND json_extract(data,'$.kind') NOT LIKE '%outside window%') OR (kind='release-executor-refusal' AND id LIKE ?) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as Refusal[];
+ if(rows.length>1000)throw Error('release refusal inventory exceeds incident bound');
+ return rows.filter(r=>r.kind!=='release-executor-refusal'||scheduledCli(day,r.at,JSON.parse(r.data)));
+}
+function knownNight(s:Store,day:string){return !!(s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
 function missedNight(s:Store,day:string){
  const result=s.get<{shipped:boolean}>(`release-window-result:${day}`);
  return knownNight(s,day)&&(result?result.shipped!==true:!releaseOutcome(s,day).shipped);
@@ -31,8 +43,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
   else if(effect?.state==='failure'){const event=s.db.query('SELECT MIN(at) AS at FROM events WHERE id IN (?,?)').get(`executor:${day}:${step}:failure`,`executor:${day}:${step}:deadline`) as {at:number|null};windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`,knownBy:event.at??retainedWindows.find(w=>w.name===name&&w.state==='refused')?.knownBy??now});}
   else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`,knownBy:windowBoundary(time)});
  }
- const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') AND json_extract(data,'$.kind') NOT LIKE '%outside window%') OR (kind='release-executor-refusal' AND id LIKE ? AND json_extract(data,'$.stage') IN ('preflight','qa','production')) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
- if(refusals.length>1000)throw Error('release refusal inventory exceeds incident bound');
+ const refusals=releaseRefusals(s,day);
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
  const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
@@ -40,7 +51,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  const knownPause=(until:number)=>{const row=s.db.query("SELECT at FROM events WHERE kind='pause' AND at<=? AND rowid>COALESCE((SELECT MAX(rowid) FROM events WHERE kind='resume' AND at<=?),0) ORDER BY rowid LIMIT 1").get(until,until) as {at:number}|null;return row?.at;};
  const knownInput=(input:string,reason:string,until:number)=>{const report=firstCurrentGap(input,until),pause=input==='factory state'&&/paused/i.test(reason)?knownPause(until):undefined;return Math.min(report??until,pause??until);};
  for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}
- for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
+ for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':/config/i.test(reason)?'release configuration':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});
  const shipped=releaseOutcome(s,day).shipped;
  let consecutiveMisses=shipped?0:1,prior=previousDay(day);
@@ -56,13 +67,30 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  if(!priorIncident||material(priorIncident)!==material(incident)){
   s.set(key,incident);s.event(`${key}:${now}`,'release-incident',incident,'Retain each incident observation and first mail; correct through later evidence, never replay releases',now);
  }
- send(`release-incident-action:${day}`,'Coordinator',incident.mail.summary,incident.mail.body,now);
+ const id=`release-incident-action:${day}`,pending=s.get<IncidentAction>(id);
+ const action=pending??{id,day,at:now,summary:incident.mail.summary,body:incident.mail.body};
+ if(!pending)s.set(id,action);
+ deliverIncidentAction(s,action,now,send);
  return {queued:true,day,consecutiveMisses};
+}
+type IncidentAction={id:string;day:string;at:number;summary:string;body:string;queuedAt?:number};
+function deliverIncidentAction(s:Store,action:IncidentAction,now:number,send:typeof releaseAction){
+ if(action.queuedAt!==undefined)return;
+ send(action.id,'Coordinator',action.summary,action.body,now);
+ s.set(action.id,{...action,queuedAt:now});
+ s.event(`${action.id}:queued`,'release-incident-action-queued',{day:action.day,id:action.id},'Retain queue readback; never claim delivery or replay this completed action',now);
 }
 export function reconcileReleaseIncidents(s:Store,now=Date.now(),send=releaseAction){
  const today=toronto(now).day,days=[today];let prior=previousDay(today);
- // Recover a watcher that was itself asleep over a window. Only existing
- // release/rehearsal evidence establishes an expected historical night.
  for(let i=0;i<2;i++){if(knownNight(s,prior))days.unshift(prior);prior=previousDay(prior);}
- return days.map(day=>{try{return releaseIncident(s,day,now,send);}catch(error){s.event(`release-incident-mail-failure:${day}:${String(error)}`,'release-incident-mail-failure',{day,error:String(error)},'Retain all nightly summaries; retry each original mail ID independently',now);return {queued:false,day,error:String(error)};}});
+ const attempted=new Set<string>();
+ const once:typeof releaseAction=(id,to,summary,body,at,path)=>{attempted.add(id);return send(id,to,summary,body,at,path);};
+ const failure=(day:string,error:unknown)=>s.event(`release-incident-mail-failure:${day}:${String(error)}`,'release-incident-mail-failure',{day,error:String(error)},'Retain all summaries and pending actions; retry each original identity independently',now);
+ const results=days.map(day=>{try{return releaseIncident(s,day,now,once);}catch(error){failure(day,error);return {queued:false,day,error:String(error)};}});
+ // Discovery is bounded to two past nights; already-retained pending actions
+ // have independent retry custody and cannot age out during a bridge outage.
+ const rows=s.db.query("SELECT value FROM kv WHERE key LIKE 'release-incident-action:%' AND json_extract(value,'$.queuedAt') IS NULL ORDER BY json_extract(value,'$.at') LIMIT 2001").all() as {value:string}[];
+ if(rows.length>2000)throw Error('pending incident action inventory exceeds bound');
+ for(const row of rows){const action=JSON.parse(row.value) as IncidentAction;if(attempted.has(action.id))continue;try{deliverIncidentAction(s,action,now,once);}catch(error){failure(action.day,error);}}
+ return results;
 }
