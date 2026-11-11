@@ -232,3 +232,9 @@ starting despite `launchctl disable`; that flag is not an admission interlock.
 Installation therefore uses the application's existing deterministic pause and
 effect inventory instead. No fixture or Disabled readback can substitute for
 those checks.
+
+Dormant worker states require a cleared PID and positive retained descendant
+cleanup, including paused/waiting custody. A failed release state alone is never
+settled proof: deadline and identity/inventory failures retain uncertainty. The
+existing adapter's observed completed-run conclusion can prove a terminal remote
+failure; other failures remain with Release for real custody reconciliation.
