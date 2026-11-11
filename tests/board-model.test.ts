@@ -1,6 +1,7 @@
+import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { boardModel, plainText } from "../board/model";
 import { intakeLabel, reconcile, type Issue } from "../adapters/github";
 import { githubWakes } from "../launcher/wake";
@@ -262,7 +263,7 @@ test("each GitHub reconciliation refreshes closures and includes closedAt", asyn
     };
     await reconcile(s, e.c, now, async (args) => {
       expect(args.join(",")).toContain("closedAt");
-      return JSON.stringify([closed]);
+      return githubPage('issues',[closed]);
     });
     const m = boardModel(e, {}, now);
     expect(m.upNext).toHaveLength(0);
@@ -288,7 +289,7 @@ test("waiting uses the tick’s read-only PR evidence and never invents passing 
       url = "https://github.com/example/demo/pull/2";
     s.event("published", "launcher-publish", { id, url }, "retain", now);
     const execute = async () =>
-      JSON.stringify([
+      githubPage('pullRequests',[
         {
           number: 2,
           url,
@@ -538,4 +539,14 @@ test('owner run uses task text, real identity, explicit/configured/median estima
     const m=boardModel(e,{},now,'en',{activity:{},ownerRuns:[{id:'launcher/run-example',...ownerSummary(brief),owner:'product',started:now-600000,lastActivity:now-10000,estimateSeconds:1800}]});
     expect(m.running[0].owner).toBe('Product');expect(m.running[0].purpose).toContain('colour system');expect(m.running[0].issue).toContain('/api/owner-work?');
   }finally{s.close();}
+});
+
+test('degraded ticks remain visible and shared PR evidence uses its actual ten-minute polling lifetime',()=>{
+ const {s,e}=fixture();try{
+  s.set('heartbeat',{at:now,status:'degraded',ready:null});
+  expect(boardModel(e,{},now).notice).toContain('needs attention');
+  s.set('heartbeat',{at:now,status:'ok'});s.set('github:example/demo',{observedAt:now,error:null,truncated:false});
+  s.set('board-pulls:example/demo',{at:now-599999,pulls:[]});expect(boardModel(e,{},now).notice).toBeNull();
+  s.set('board-pulls:example/demo',{at:now-600001,pulls:[]});expect(boardModel(e,{},now).notice).toContain('GitHub');
+ }finally{s.close();}
 });

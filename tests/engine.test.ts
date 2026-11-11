@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { available } from "../wallet/ledger";
 import {
   config,
@@ -14,9 +14,10 @@ import {
   admission,
   billing,
 } from "./fixtures";
+const fictionalProcesses = { identity: () => "fictional-process-start", absent: () => false };
 function setup() {
   const s = new Store(":memory:"),
-    e = new Engine(s, config());
+    e = new Engine(s, config(), fictionalProcesses);
   e.pause(false, "owner");
   return e;
 }
@@ -243,7 +244,7 @@ test("pause, custody and debits survive controlled reboot", () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-reboot-")),
     path = join(dir, "state.sqlite");
   let s = new Store(path),
-    e = new Engine(s, config());
+    e = new Engine(s, config(), fictionalProcesses);
   expect(s.get("paused")).toBe(true);
   e.pause(false, "owner");
   const x = e.admit({ ...ticket(), costCents: 100 }, admission());
@@ -252,7 +253,7 @@ test("pause, custody and debits survive controlled reboot", () => {
   e.pause(true, "owner");
   s.close();
   s = new Store(path);
-  e = new Engine(s, config());
+  e = new Engine(s, config(), fictionalProcesses);
   expect(s.get("paused")).toBe(true);
   expect(e.sessions()[0].native_id).toBe("native-custody");
   expect(available(s, e.c, "other", now)).toBe(0);

@@ -1,0 +1,352 @@
+import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, linkSync, readFileSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { collectCodexRenewalEvidence, readCodexRenewalReceipt, securityChecks, securityProbe, qualificationCodeCommand, type CodexRenewalManifest, type ReceiptRef } from "../launcher/codex-renewal-evidence";
+
+// Entirely fictional retained owner captures. No model, target, process, socket,
+// subscription command or qualification replacement is executed by this suite.
+const startedAt = Date.parse("2026-11-09T12:00:00Z"), now = startedAt + 700000;
+const digest = (x: Uint8Array) => createHash("sha256").update(x).digest("hex");
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const bytes = (x: unknown) => Buffer.from(typeof x === "string" ? x : JSON.stringify(x));
+const jsonl = (rows: unknown[]) => rows.map(x => JSON.stringify(x)).join("\n") + "\n";
+function fixture(root = "/fictional") {
+  const files = new Map<string, Uint8Array>();
+  const put = (name: string, value: unknown): ReceiptRef => {
+    const data = bytes(value), path = `${root}/${name}`;
+    files.set(path, data); return { path, sha256: digest(data) };
+  };
+  const targets={socket:"/fictional/known-known_agent_socket",credential:"/fictional/known-credential",sentinel:"/fictional/known-private_sentinel",publisher:"/fictional/known-publisher_write",dependencies:"/fictional/known-dependencies_write",toolchain:"/fictional/known-toolchain_write"};
+  const probe = put("probe.py", securityProbe(targets));
+  const q = { codex: { phoneVerified: false, waiver: { phone: "deferred" }, expiresAt: startedAt - 1, evidence: "retained old receipt" },
+    "codex:medium": { phoneVerified: false, waiver: { phone: "deferred" } }, "codex:high": { phoneVerified: false, waiver: { phone: "deferred" } },
+    claude: { expiresAt: 123, evidence: "opaque original", phoneVerified: false, waiver: { phone: "deferred" } }, unknown: ["preserved"] };
+  const m: CodexRenewalManifest = { version: 1, runId: id(99), startedAt, expiresAt: startedAt + 86400000, model: "gpt-6.1-sol", probe, targets,
+    qualifications: put("qualifications.json", JSON.stringify(q, null, 4) + "\n"), sources: [put("workers.ts", "fictional adapter fingerprint")],
+    subscription: put("subscription.json", { argv: ["codex", "login", "status"], code: 0, signal: null, stdout: "", stderr: "Logged in using ChatGPT\n", observedAt: startedAt }), runs: [] };
+  const output = JSON.stringify({...Object.fromEntries(securityChecks.map(k => [k, true])),policy_denials:{external_dns:1,external_ip:1,push_QA:1}}) + "\n";
+  for (const effort of ["medium", "high"] as const) for (const kind of ["security", "time", "tokens"] as const) {
+    const n = m.runs.length + 1, start = startedAt + n * 100000, end = start + (kind === "time" ? 55000 : 2000), nativeId = id(n), workspace = root;
+    const u = { input_tokens: kind === "tokens" ? 200 : 100, cached_input_tokens: 20, output_tokens: 10, total_tokens: kind === "tokens" ? 210 : 110 };
+    const row = (offset: number, type: string, payload: unknown) => ({ timestamp: new Date(start + offset).toISOString(), type, payload });
+    const command = `/usr/bin/python3 ${probe.path}`;
+    const rollout: unknown[] = [row(0, "session_meta", { id: nativeId, cwd: workspace }), row(1, "turn_context", { model: m.model, effort, cwd: workspace })];
+    if (kind === "security") rollout.push(row(20, "response_item", { type: "function_call", name: "exec_command", call_id: "tool-1", arguments: JSON.stringify({ cmd: command }) }),
+      row(50, "response_item", { type: "function_call_output", call_id: "tool-1", output: "Wall time: 0.1 seconds\nOutput:\n" + output }));
+    if(kind==='time')rollout.push(row(20,'response_item',{type:'function_call',name:'exec_command',call_id:'lifecycle',arguments:JSON.stringify({cmd:'/usr/bin/python3 lifecycle.py'})}),row(50,'response_item',{type:'function_call_output',call_id:'lifecycle',output:JSON.stringify({session_id:n,output:''})}));
+    rollout.push(row(100, "event_msg", { type: "token_count", info: { total_token_usage: { ...u, reasoning_output_tokens: 2 } } }));
+    if (kind === "security") rollout.push(row(900, "event_msg", { type: "task_complete" }));
+    const stream: unknown[] = [{ type: "thread.started", thread_id: nativeId }];
+    if (kind === "security") stream.push({ type: "item.completed", item: { id: "tool-1", type: "command_execution", command, exit_code: 0, aggregated_output: output } }, { type: "turn.completed", usage: u });
+    const parent = { pid: n * 100, parent: 1, group: n * 100, identity: `parent-start-${n}`, state: "S" };
+    const child = { pid: n * 100 + 1, parent: parent.pid, group: n * 100 + 1, identity: `child-start-${n}`, state: "S" };
+    const stopAt = kind === "time" ? start + 50000 : kind === "tokens" ? start + 1000 : null;
+    const snapshot = (at: number, rows: unknown[]) => ({ at, error: null, rows });
+    const supervisor = { runId: m.runId, nativeId, workspace, startedAt: start, endedAt: end, pid: parent.pid, identity: parent.identity,
+      probeBeforeSha256: probe.sha256, probeAfterSha256: probe.sha256,
+      reason: kind === "security" ? "complete" : kind, timeBudget: kind === "time" ? { estimateSeconds: 25, pauseSeconds: 50 } : null, tokenBudget: kind === "tokens" ? { estimateTokens: 100, pauseTokens: 200 } : null, exitCode: kind === "security" ? 0 : null, signal: kind === "security" ? null : "SIGTERM", stopAt,
+      samples: [{ at: start + 500, alive: true, usage: u },...(kind === "time"?[{at:start+49500,alive:true,usage:u}]:[])], before: snapshot(start + (kind === "time"?49500:500), kind === "time" ? [parent, child] : [parent]),
+      afterTerm: kind === "time" ? snapshot(start + 52000, [child]) : null, final: snapshot(end, []),
+      descendant: kind === "time" ? { pid: child.pid, identity: child.identity } : null,
+      signals: kind === "security" ? [] : [{ pid: parent.pid, identity: parent.identity, at: stopAt, signal: "SIGTERM",result:"sent" },
+        ...(kind === "time" ? [{ pid: child.pid, identity: child.identity, at: stopAt, signal: "SIGTERM",result:"sent" }, { pid: child.pid, identity: child.identity, at: start + 53000, signal: "SIGKILL",result:"sent" }] : [])] };
+    m.runs.push({ nativeId, effort, kind, workspace, startedAt: start, endedAt: end,
+      stream: put(`stream-${n}`, "OpenAI Codex v0.0.0\n" + jsonl(stream)), rollout: put(`rollout-${n}`, jsonl(rollout)), supervisor: put(`supervisor-${n}`, supervisor),
+      ...(kind === "security" ? { command, commandProbe: put(`command-${n}`, { runId: m.runId, nativeId, workspace, command, probeSha256: probe.sha256, probeAfterSha256: probe.sha256,
+        startedAt: start - 500, endedAt: start - 100, code: 0, signal: null, stdout: output,
+        targets: securityChecks.slice(0, 6).map(check => ({ check, target: `/fictional/known-${check}`, existedAt: start - 1000, kind: check === "known_agent_socket" ? "socket" : "file" })) }) } : {}) });
+  }
+  const read = (path: string) => { const data = files.get(path); if (!data) throw Error(`missing ${path}`); return data; };
+  const mutate = (ref: ReceiptRef, change: (x: any) => void, native = false) => {
+    const old = Buffer.from(read(ref.path)).toString();
+    const value = native ? old.trimEnd().split("\n").map(x => JSON.parse(x)) : JSON.parse(old);
+    change(value); const data = bytes(native ? jsonl(value) : value); files.set(ref.path, data); ref.sha256 = digest(data);
+  };
+  const collect = (opts: Parameters<typeof collectCodexRenewalEvidence>[1] = {}) => collectCodexRenewalEvidence(m, { read, clock: () => now, ...opts });
+  return { m, files, read, mutate, collect };
+}
+
+test("six independently joined receipts verify without changing any qualification/source bytes", () => {
+  const f = fixture(), before = [...f.files].map(([p, b]) => [p, Buffer.from(b).toString("hex")]);
+  const r = f.collect(); expect(r.reason).toBeUndefined(); expect(r.status).toBe("verified"); expect(r.verifiedRuns).toHaveLength(6);
+  expect(r).toMatchObject({ sourceAcceptance: "verified", installedAcceptance: "not-run", qualificationReplacement: "not-performed", cleanup: "verified", independentExactHeadChallenge: "required-before-release" });
+  expect([...f.files].map(([p, b]) => [p, Buffer.from(b).toString("hex")])).toEqual(before);
+  expect(r.verifiedRuns.map(x => x.usage.total_tokens)).toEqual([110, 110, 210, 110, 110, 210]); // overshoot retained
+});
+
+const rejectionCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
+  ["missing raw receipt", f => f.files.delete(f.m.runs[0].rollout.path)],
+  ["tampered bytes", f => f.files.set(f.m.probe.path, bytes("changed"))],
+  ["different provider", f => { (f.m as any).provider = "claude"; }],
+  ["wrong model request", f => { (f.m as any).model = "other"; }],
+  ["missing high effort", f => { for (const r of f.m.runs) r.effort = "medium"; }],
+  ["reused native ID", f => { f.m.runs[5].nativeId = f.m.runs[0].nativeId; }],
+  ["missing independent token run", f => { f.m.runs[5].kind = "time"; }],
+  ["wrong rollout identity", f => f.mutate(f.m.runs[0].rollout, x => { x[0].payload.id = id(98); }, true)],
+  ["wrong workspace", f => f.mutate(f.m.runs[0].rollout, x => { x[0].payload.cwd = "/unrelated"; }, true)],
+  ["wrong effort", f => f.mutate(f.m.runs[3].rollout, x => { x[1].payload.effort = "medium"; }, true)],
+  ["conflicting model", f => f.mutate(f.m.runs[0].rollout, x => { x.splice(2, 0, { ...x[1], payload: { model: "other", effort: "medium" } }); }, true)],
+  ["stale rollout", f => f.mutate(f.m.runs[0].rollout, x => { x[0].timestamp = new Date(startedAt - 1).toISOString(); }, true)],
+  ["native clock regression", f => f.mutate(f.m.runs[0].rollout, x => { x[3].timestamp = x[0].timestamp; }, true)],
+  ["missing context", f => f.mutate(f.m.runs[0].rollout, x => { x.splice(1, 1); }, true)],
+  ["missing accounting", f => f.mutate(f.m.runs[0].rollout, x => { x.splice(4, 1); }, true)],
+  ["negative native counter", f => f.mutate(f.m.runs[0].rollout, x => { x[4].payload.info.total_token_usage.total_tokens = -1; }, true)],
+  ["double-counted cache", f => f.mutate(f.m.runs[0].rollout, x => { x[4].payload.info.total_token_usage.total_tokens += 20; }, true)],
+  ["inconsistent live sample", f => f.mutate(f.m.runs[0].supervisor, x => { x.samples[0].usage.total_tokens++; })],
+  ["no positive live accounting", f => f.mutate(f.m.runs[0].supervisor, x => { x.samples = []; })],
+  ["supervisor identity mismatch", f => f.mutate(f.m.runs[0].supervisor, x => { x.nativeId = id(98); })],
+  ["missing subscription", f => f.mutate(f.m.subscription, x => { x.stderr = "not logged in"; })],
+  ["API route", f => f.mutate(f.m.subscription, x => { x.stderr += " API key"; })],
+  ["failed login status", f => f.mutate(f.m.subscription, x => { x.code = 1; })],
+  ["future subscription", f => f.mutate(f.m.subscription, x => { x.observedAt = now + 1; })],
+  ["implicit phone waiver", f => f.mutate(f.m.qualifications, x => { delete x.codex.waiver; })],
+  ["fabricated phone verification", f => f.mutate(f.m.qualifications, x => { x["codex:high"].phoneVerified = true; })],
+  ["command probe failure", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.code = 1; })],
+  ["wrong command workspace", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.workspace = "/other"; })],
+  ["wrong command", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.command = "echo success"; })],
+  ["changed probe before run", f => f.mutate(f.m.runs[0].supervisor, x => { x.probeBeforeSha256 = "0".repeat(64); })],
+  ["changed probe after run", f => f.mutate(f.m.runs[0].supervisor, x => { x.probeAfterSha256 = "0".repeat(64); })],
+  ["changed command probe", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.probeAfterSha256 = "0".repeat(64); })],
+  ["missing known target", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.targets.pop(); })],
+  ["late preflight", f => f.mutate(f.m.runs[0].commandProbe!, x => { x.targets[0].existedAt = now; })],
+  ["assistant claim instead of tool", f => f.mutate(f.m.runs[0].rollout, x => { x[2].payload.type = "message"; }, true)],
+  ["unbound tool output", f => f.mutate(f.m.runs[0].rollout, x => { x[3].payload.call_id = "other"; }, true)],
+  ["native command failed", f => { const r = f.m.runs[0]; const rows = Buffer.from(f.read(r.stream.path)).toString().split("\n"); rows[2] = rows[2].replace('"exit_code":0', '"exit_code":1'); const b = bytes(rows.join("\n")); f.files.set(r.stream.path, b); r.stream.sha256 = digest(b); }],
+  ["time stop too early", f => f.mutate(f.m.runs[1].supervisor, x => { x.stopAt = x.startedAt + 24000; })],
+  ["wrong original time estimate", f => f.mutate(f.m.runs[1].supervisor, x => { x.timeBudget.estimateSeconds = 24; })],
+  ["missing time guard", f => f.mutate(f.m.runs[1].supervisor, x => { x.timeBudget = null; })],
+  ["wrong token budget", f => f.mutate(f.m.runs[2].supervisor, x => { x.tokenBudget.estimateTokens = 99; })],
+  ["missing descendant", f => f.mutate(f.m.runs[1].supervisor, x => { x.descendant = null; })],
+  ["TERM ignoring not observed", f => f.mutate(f.m.runs[1].supervisor, x => { x.afterTerm.rows = []; })],
+  ["descendant not killed", f => f.mutate(f.m.runs[1].supervisor, x => { x.signals.pop(); })],
+  ["cleanup unknown", f => f.mutate(f.m.runs[1].supervisor, x => { x.final.error = "ps unavailable"; })],
+  ["late descendant survives", f => f.mutate(f.m.runs[1].supervisor, x => { x.final.rows = [{ pid: 999, parent: x.descendant.pid, group: 999, identity: "late-child", state: "S" }]; })],
+  ["surviving descendant", f => f.mutate(f.m.runs[1].supervisor, x => { x.final.rows = x.afterTerm.rows; })],
+  ["unobserved group survivor", f => f.mutate(f.m.runs[1].supervisor, x => { x.final.rows = [{ ...x.before.rows[0], pid: 999, identity: "other" }]; })],
+  ["PID reused before stop", f => f.mutate(f.m.runs[1].supervisor, x => { x.before.rows[0].identity = "other"; })],
+  ["unbound signal identity", f => f.mutate(f.m.runs[1].supervisor, x => { x.signals[0].identity = "other"; })],
+  ["task_completed before token stop", f => f.mutate(f.m.runs[2].rollout, x => { x.push({ ...x.at(-1), payload: { type: "task_completed" } }); }, true)],
+  ["stop after natural completion", f => f.mutate(f.m.runs[2].rollout, x => { x.push({ ...x.at(-1), payload: { type: "task_complete" } }); }, true)],
+  ["successful token completion", f => {const r=f.m.runs[2];f.mutate(r.supervisor,x=>{x.exitCode=0;x.signal=null;});f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1900).toISOString(),type:"event_msg",payload:{type:"task_complete"}});},true);}],
+  ["unknown token exit", f => f.mutate(f.m.runs[2].supervisor, x => { x.exitCode = null; x.signal = null; })],
+  ["mocked SIGABRT is not a stop receipt", f => f.mutate(f.m.runs[2].supervisor, x => { x.signal = "SIGABRT"; })],
+  ["expired proof", f => { f.m.expiresAt = now; }],
+  ["excess proof lifetime", f => { f.m.expiresAt = startedAt + 86400001; }],
+  ["reused file path", f => { f.m.sources.push({ ...f.m.sources[0] }); }],
+];
+for (const [name, change] of rejectionCases) test(`fail closed: ${name}`, () => {
+  const f = fixture(); change(f); const r = f.collect();
+  expect(r.status).not.toBe("verified"); expect(r.reason).toBeDefined(); expect(r.sourceAcceptance).toBe("not-accepted"); expect(r.cleanup).toBe("unknown");
+});
+
+for (const check of securityChecks) for (const channel of ["command", "native", "stream"] as const) test(`requires ${check} in ${channel} security receipt`, () => {
+  const f = fixture(), r = f.m.runs[0];
+  if (channel === "command") f.mutate(r.commandProbe!, x => { const o = JSON.parse(x.stdout); o[check] = false; x.stdout = JSON.stringify(o); });
+  if (channel === "native") f.mutate(r.rollout, x => { const o = JSON.parse(x[3].payload.output.split("\n").find((l: string) => l.startsWith("{"))); o[check] = false; x[3].payload.output = JSON.stringify(o); }, true);
+  if (channel === "stream") { const raw = Buffer.from(f.read(r.stream.path)).toString().replace(`\\"${check}\\":true`, `\\"${check}\\":false`); const b = bytes(raw); f.files.set(r.stream.path, b); r.stream.sha256 = digest(b); }
+  expect(f.collect().status).toBe("refused");
+});
+
+test("100-token estimate must reach its frozen 200-token pause before stop", () => {
+  const f = fixture(), r = f.m.runs[2];
+  f.mutate(r.rollout, x => { x[2].payload.info.total_token_usage = { input_tokens: 80, output_tokens: 10, cached_input_tokens: 20, total_tokens: 90 }; }, true);
+  f.mutate(r.supervisor, x => { x.samples[0].usage = { input_tokens: 80, output_tokens: 10, cached_input_tokens: 20, total_tokens: 90 }; });
+  expect(f.collect().reason).toContain("100-token");
+});
+
+test("partial proof stays retained and does not cause retries or synthetic qualification", () => {
+  const f = fixture(); f.files.delete(f.m.runs[4].rollout.path);
+  const before = [...f.files.keys()], r = f.collect(); expect(r.verifiedRuns).toHaveLength(4); expect(r.status).toBe("refused");
+  expect([...f.files.keys()]).toEqual(before); expect(f.collect()).toEqual(r);
+});
+
+test("F1: final clock regression after rereads refuses", () => {
+  const f = fixture(); let calls = 0;
+  const r = f.collect({ clock: () => ++calls === 9 ? now - 1 : now });
+  expect(calls).toBe(9); expect(r.status).toBe("uncertain"); expect(r.reason).toContain("clock regression");
+});
+test("expiry during final reread is not acceptance", () => {
+  const f = fixture(); let calls = 0;
+  expect(f.collect({ clock: () => ++calls === 9 ? f.m.expiresAt : now }).status).toBe("uncertain");
+});
+for (const name of ["qualifications", "probe", "source", "rollout"] as const) test(`concurrent ${name} changes refuse after verification`, () => {
+  const f = fixture(), counts = new Map<string, number>();
+  const target = name === "qualifications" ? f.m.qualifications : name === "probe" ? f.m.probe : name === "source" ? f.m.sources[0] : f.m.runs[0].rollout;
+  const r = f.collect({ read: path => { const n = (counts.get(path) ?? 0) + 1; counts.set(path, n); return path === target.path && n === 2 ? bytes("concurrent change") : f.read(path); } });
+  expect(r.status).toBe("uncertain"); expect(r.sourceAcceptance).toBe("not-accepted"); expect(r.reason).toContain("changed");
+});
+for (const phase of ["initial", "final"] as const) test(`read-only F2/F3 boundary: ${phase} I/O failure returns structured result`, () => {
+  const fault = "EIO";
+  const f = fixture(); let reads = 0;
+  const r = f.collect({ read: path => { if (path === f.m.qualifications.path && ++reads === (phase === "initial" ? 1 : 2)) throw Error(fault); return f.read(path); } });
+  expect(r.status).toBe(phase === "initial" ? "refused" : "uncertain"); expect(r.reason).toContain(fault); expect(r.qualificationReplacement).toBe("not-performed");
+});
+
+test("CLI banners cannot supply events; torn native tails and malformed JSON fail", () => {
+  for (const raw of ["OpenAI Codex banner only\n", '{"type":broken}\n', '{"type":"thread.started"}', "{}\n"]) {
+    const f = fixture(), ref = f.m.runs[0].stream, b = bytes(raw); f.files.set(ref.path, b); ref.sha256 = digest(b);
+    expect(f.collect().status).toBe("refused");
+  }
+});
+
+test("default reader collects actual regular files and refuses symlinks/hardlinks/missing files", () => {
+  const scratch = resolve(".factory-tmp/renewal-evidence-tests"); mkdirSync(scratch, { recursive: true });
+  const dir = mkdtempSync(join(scratch, "retained-")), path = join(dir, "receipt"); writeFileSync(path, "fictional receipt\n");
+  expect(Buffer.from(readCodexRenewalReceipt(path)).toString()).toBe("fictional receipt\n");
+  const symbolic = join(dir, "symbolic"); symlinkSync(path, symbolic);
+  expect(() => readCodexRenewalReceipt(symbolic)).toThrow();
+  const hard = join(dir, "hard"); linkSync(path, hard);
+  expect(() => readCodexRenewalReceipt(path)).toThrow("single-link");
+  expect(() => readCodexRenewalReceipt(dir)).toThrow("regular"); expect(() => readCodexRenewalReceipt(join(dir, "missing"))).toThrow();
+  expect(readFileSync(path, "utf8")).toBe("fictional receipt\n"); // retain, never delete
+});
+
+
+test("native counters cannot regress even when final/live values agree", () => {
+  const f = fixture(), r = f.m.runs[0];
+  f.mutate(r.rollout, rows => {
+    const counter = structuredClone(rows[4]); counter.timestamp = new Date(r.startedAt + 110).toISOString();
+    counter.payload.info.total_token_usage = { input_tokens: 99, cached_input_tokens: 20, output_tokens: 10, total_tokens: 109 };
+    rows.splice(5, 0, counter);
+  }, true);
+  expect(f.collect().reason).toContain("accounting regression");
+});
+
+test("stream identity conflicts and forged completion cannot supply acceptance", () => {
+  for (const event of [{ type: "thread.started", thread_id: id(98) }, { type: "turn.started", model: "other" }, { type: "turn.failed" }]) {
+    const f = fixture(), ref = f.m.runs[0].stream, b = Buffer.concat([Buffer.from(f.read(ref.path)), bytes(jsonl([event]))]);
+    f.files.set(ref.path, b); ref.sha256 = digest(b);
+    expect(f.collect().status).toBe("refused");
+  }
+});
+
+test("all six fictional captures pass the production filesystem reader", () => {
+  const scratch = resolve(".factory-tmp/renewal-evidence-tests"); mkdirSync(scratch, { recursive: true });
+  const dir = mkdtempSync(join(scratch, "capture-")), f = fixture(dir);
+  for (const [path, data] of f.files) writeFileSync(path, data);
+  const original = readFileSync(f.m.qualifications.path);
+  const result = collectCodexRenewalEvidence(f.m, { clock: () => now });
+  expect(result.reason).toBeUndefined(); expect(result.status).toBe("verified"); expect(result.verifiedRuns).toHaveLength(6);
+  expect(readFileSync(f.m.qualifications.path)).toEqual(original);
+});
+
+
+test("consistent printf receipts cannot replace the hashed probe", () => {
+  const f=fixture(),r=f.m.runs[0],command="printf fake-security-success";r.command=command;
+  f.mutate(r.commandProbe!,x=>{x.command=command;});
+  f.mutate(r.rollout,x=>{x[2].payload.arguments=JSON.stringify({cmd:command});},true);
+  const stream=Buffer.from(f.read(r.stream.path)).toString().replace(`/usr/bin/python3 ${f.m.probe.path}`,command);
+  const b=bytes(stream);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);
+  expect(f.collect().reason).toContain("hashed workspace probe");
+});
+test("a late frozen time stop cannot qualify", () => {
+  const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+305000;
+  f.mutate(r.supervisor,x=>{x.endedAt=r.endedAt;x.stopAt=r.startedAt+300000;x.afterTerm.at=r.startedAt+302000;x.final.at=r.endedAt;for(const signal of x.signals)signal.at=r.startedAt+(signal.signal==="SIGKILL"?303000:300000);});
+  expect(f.collect().status).toBe("refused");
+});
+test("delaying token TERM after observed threshold cannot qualify", () => {
+  const f=fixture(),r=f.m.runs[2];r.endedAt=r.startedAt+305000;
+  f.mutate(r.supervisor,x=>{x.endedAt=r.endedAt;x.final.at=r.endedAt;x.signals[0].at=r.startedAt+300000;});
+  expect(f.collect().status).toBe("refused");
+});
+
+test("a native workdir override cannot substitute another relative probe",()=>{const f=fixture(),r=f.m.runs[0],command="/usr/bin/python3 probe.py";r.command=command;f.mutate(r.commandProbe!,x=>{x.command=command;});f.mutate(r.rollout,x=>{x[2].payload.arguments=JSON.stringify({cmd:command,workdir:"/unrelated-workspace"});},true);const raw=Buffer.from(f.read(r.stream.path)).toString().replace(`/usr/bin/python3 ${f.m.probe.path}`,command),b=bytes(raw);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe("refused");});
+test("a late-only descendant cleanup observation cannot qualify",()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.final.at=now-1;});expect(f.collect().status).toBe("refused");});
+
+test("installed CLI shell wrapper still binds the exact immutable probe",()=>{const f=fixture(),r=f.m.runs[0],raw=Buffer.from(f.read(r.stream.path)).toString().replace(`"command":"/usr/bin/python3 ${f.m.probe.path}"`,`"command":"/bin/zsh -c '/usr/bin/python3 ${f.m.probe.path}'"`),b=bytes(raw);f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe("verified");});
+
+test("turn context cwd cannot redirect a relative probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x[1].payload.cwd="/unrelated-workspace";},true);expect(f.collect().status).toBe("refused");});
+test("an aborted native turn before the budget stop cannot qualify",()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+200).toISOString(),type:"event_msg",payload:{type:"turn_aborted"}});},true);expect(f.collect().status).toBe("refused");});
+
+test("a failed earlier tool attempt cannot be hidden by a later passing probe",()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:"response_item",payload:{type:"function_call",name:"exec_command",call_id:"failed",arguments:JSON.stringify({cmd:"/usr/bin/python3 probe.py"})}},{timestamp:new Date(r.startedAt+6).toISOString(),type:"response_item",payload:{type:"function_call_output",call_id:"failed",output:"failed security probe"}});},true);expect(f.collect().status).toBe("refused");});
+test("missing turn cwd is unknown rather than workspace evidence",()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{delete x[1].payload.cwd;},true);expect(f.collect().status).toBe("refused");});
+
+for(const failure of ['error-item','failed-status','tool-exit'] as const)test('explicit '+failure+' refuses despite passing booleans',()=>{const f=fixture(),r=f.m.runs[0];if(failure==='tool-exit')f.mutate(r.rollout,x=>{x[3].payload.output='Process exited with code 1\n'+x[3].payload.output;},true);else{const lines=Buffer.from(f.read(r.stream.path)).toString().split('\n');if(failure==='error-item')lines.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'error',message:'failed'}}));else{const row=JSON.parse(lines[2]);row.item.status='failed';lines[2]=JSON.stringify(row);}const b=bytes(lines.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);}expect(f.collect().status).toBe('refused');});
+test('abort between stop intent and actual TERM cannot qualify',()=>{const f=fixture(),r=f.m.runs[2];f.mutate(r.supervisor,x=>{x.signals[0].at=r.startedAt+1200;});f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1100).toISOString(),type:'event_msg',payload:{type:'turn_aborted'}});},true);expect(f.collect().status).toBe('refused');});
+
+test('non-JSON error text is never a harmless CLI banner',()=>{const f=fixture(),r=f.m.runs[0],b=bytes('Error: probe failed\n'+Buffer.from(f.read(r.stream.path)).toString());f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+test('a successful security stream needs its native terminal receipt too',()=>{const f=fixture();f.mutate(f.m.runs[0].rollout,x=>{x.splice(-1,1);},true);expect(f.collect().status).toBe('refused');});
+
+test('unsupported custom tool attempts cannot hide an earlier failed probe',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'failed-custom',input:'probe'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'failed-custom',output:'Process exited with code 1'}});},true);expect(f.collect().status).toBe('refused');});
+test('uncontrolled positive native exit cannot qualify a budget stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.exitCode=1;x.signal=null;});expect(f.collect().status).toBe('refused');});
+test('an old root observation cannot establish liveness at the controlled stop',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{x.before.at=x.startedAt+500;});expect(f.collect().status).toBe('refused');});
+
+for(const index of [1,2])test('failed lifecycle command cannot be hidden by a later stop '+index,()=>{const f=fixture(),r=f.m.runs[index],raw=Buffer.from(f.read(r.stream.path)).toString().split('\n');raw.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'failed setup',status:'completed',exit_code:1,aggregated_output:'setup failed'}}));const b=bytes(raw.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+test('native security completion cannot precede the probe output',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{const terminal=x.pop();terminal.timestamp=new Date(r.startedAt+2).toISOString();x.splice(2,0,terminal);},true);expect(f.collect().status).toBe('refused');});
+
+for(const error of [{status:'error'},{error:{message:'failed'}},{is_error:true},{success:false}])test('structured failure metadata cannot be ignored '+JSON.stringify(error),()=>{const f=fixture(),r=f.m.runs[0],rows=Buffer.from(f.read(r.stream.path)).toString().split('\n');rows.splice(2,0,JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'failed',...error}}));const b=bytes(rows.join('\n'));f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+
+test('an observed worker-group member stays owned after orphaning and regrouping',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{const orphan={pid:999,parent:1,group:x.pid,identity:'observed-orphan',state:'S'};x.before.rows.push(orphan);x.afterTerm.rows.push({...orphan,group:999});x.final.rows.push({...orphan,group:999});});expect(f.collect().status).toBe('refused');});
+
+test('known target existence cannot attest different probe paths',()=>{const f=fixture();f.mutate(f.m.runs[0].commandProbe!,x=>{for(const t of x.targets)t.target='/unrelated/existing/file';});expect(f.collect().status).toBe('refused');});
+test('a root killed before natural security completion cannot qualify',()=>{const f=fixture();f.mutate(f.m.runs[0].supervisor,x=>{x.signals.push({pid:x.pid,identity:x.identity,at:x.startedAt+100,signal:'SIGKILL',result:'sent'});});expect(f.collect().status).toBe('refused');});
+
+for(const index of [1,2])test('an unmatched root KILL cannot count as controlled termination '+index,()=>{const f=fixture();f.mutate(f.m.runs[index].supervisor,x=>{x.signal='SIGKILL';});expect(f.collect().status).toBe('refused');});
+test('ordinary network/auth failures cannot supply policy-denial evidence',()=>{const f=fixture();f.mutate(f.m.runs[0].commandProbe!,x=>{const output=JSON.parse(x.stdout);output.policy_denials.external_dns=22;output.policy_denials.push_QA=128;x.stdout=JSON.stringify(output);});expect(f.collect().status).toBe('refused');});
+
+test('structured lifecycle tool failures cannot hide inside output strings',()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'failed',arguments:'{"cmd":"setup"}'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'function_call_output',call_id:'failed',output:JSON.stringify({error:'setup failed',is_error:true,exit_code:1})}});},true);expect(f.collect().status).toBe('refused');});
+test('structured native refusal cannot qualify a security turn',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'refusal',refusal:'Cannot complete rehearsal.'}]}});},true);expect(f.collect().status).toBe('refused');});
+
+for(const field of ['exit_code','exitCode'])test('structured nonzero tool exit alone refuses '+field,()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'failed',arguments:'{"cmd":"setup"}'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'function_call_output',call_id:'failed',output:JSON.stringify({[field]:1,stdout:'setup failed'})}});},true);expect(f.collect().status).toBe('refused');});
+
+test('owned stable identities carry their newly observed groups into final cleanup',()=>{const f=fixture();f.mutate(f.m.runs[1].supervisor,x=>{const orphan={pid:999,parent:1,group:x.pid,identity:'observed-orphan',state:'S'};x.before.rows.push(orphan);x.afterTerm.rows.push({...orphan,group:999});x.final.rows.push({pid:1001,parent:1,group:999,identity:'surviving-child',state:'S'});});expect(f.collect().status).toBe('refused');});
+
+for(const index of [1,2])test('framed structured lifecycle failure refuses '+index,()=>{const f=fixture(),r=f.m.runs[index];f.mutate(r.rollout,x=>{x.splice(2,0,{timestamp:new Date(r.startedAt+5).toISOString(),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'failed',arguments:'{"cmd":"setup"}'}},{timestamp:new Date(r.startedAt+6).toISOString(),type:'response_item',payload:{type:'function_call_output',call_id:'failed',output:'Wall time: 0.1 seconds\nOutput:\n'+JSON.stringify({exit_code:1,error:'failed setup',is_error:true})}});},true);expect(f.collect().status).toBe('refused');});
+
+test('a completed security turn cannot certify another unfinished turn',()=>{const f=fixture(),r=f.m.runs[0];f.mutate(r.rollout,x=>{x.push({timestamp:new Date(r.startedAt+1000).toISOString(),type:'turn_context',payload:{model:f.m.model,effort:r.effort,cwd:r.workspace}},{timestamp:new Date(r.startedAt+1001).toISOString(),type:'event_msg',payload:{type:'task_started'}});},true);const b=bytes(Buffer.from(f.read(r.stream.path)).toString()+JSON.stringify({type:'turn.started'})+'\n');f.files.set(r.stream.path,b);r.stream.sha256=digest(b);expect(f.collect().status).toBe('refused');});
+
+
+test('root may exit on TERM before bounded descendant KILL and final absence',()=>{
+ const f=fixture();for(const r of f.m.runs.filter(r=>r.kind==='time')){const end=r.startedAt+50010;r.endedAt=end;f.mutate(r.supervisor,s=>{s.endedAt=end;});}
+ expect(f.collect().status).toBe('verified');
+ const bad=f.m.runs.find(r=>r.kind==='time')!;f.mutate(bad.supervisor,s=>{s.signals.at(-1).at=s.final.at+1;});expect(f.collect().status).toBe('refused');
+});
+
+
+function codeSecurity(f:ReturnType<typeof fixture>){for(const r of f.m.runs.filter(r=>r.kind==='security')){f.mutate(r.rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='function_call').payload,output=rows.find((x:any)=>x.payload?.type==='function_call_output').payload;call.type='custom_tool_call';call.name='exec';call.input=qualificationCodeCommand(r.command!);delete call.arguments;output.type='custom_tool_call_output';output.output=[{type:'input_text',text:'Script completed\nWall time 0.1 seconds\nOutput:\n'},{type:'input_text',text:JSON.stringify({exit_code:0,output:output.output})}];},true);}}
+test('current native code-mode security wrapper binds one literal command and actual successful response',()=>{const f=fixture();codeSecurity(f);expect(f.collect().status).toBe('verified');});
+for(const bad of ['extra code','extra key','failed command','unbound response','running response'] as const)test('code-mode qualification refuses '+bad,()=>{const f=fixture();codeSecurity(f);f.mutate(f.m.runs[0].rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload,output=rows.find((x:any)=>x.payload?.type==='custom_tool_call_output').payload;if(bad==='extra code')call.input+='text("forged");';if(bad==='extra key')call.input=call.input.replace('"cmd":','"login":true,"cmd":');if(bad==='failed command'){const r=JSON.parse(output.output[1].text);r.exit_code=1;output.output[1].text=JSON.stringify(r);}if(bad==='unbound response')output.call_id='unrelated';if(bad==='running response'){const r=JSON.parse(output.output[1].text);r.session_id=99;delete r.exit_code;output.output[1].text=JSON.stringify(r);}},true);expect(f.collect().status).toBe('refused');});
+
+
+for(const bad of ['unsupported command','permission key','other workdir','second launch','unbound stdin'] as const)test('raw lifecycle receipt refuses '+bad,()=>{
+ const f=fixture(),r=f.m.runs.find(r=>r.kind==='time')!;f.mutate(r.rollout,rows=>{const call=rows.find((x:any)=>x.payload?.type==='function_call').payload,args=JSON.parse(call.arguments);if(bad==='unsupported command')args.cmd='/usr/bin/touch /outside/authorized/workspace';if(bad==='permission key')args.sandbox_permissions='require_escalated';if(bad==='other workdir')args.workdir='/outside';call.arguments=JSON.stringify(args);if(bad==='second launch')rows.splice(3,0,{...rows[2],payload:{...call,call_id:'duplicate-launch'}});if(bad==='unbound stdin'){call.name='write_stdin';call.arguments=JSON.stringify({session_id:999,chars:''});}},true);expect(f.collect().status).toBe('refused');
+});
+
+
+test('unrelated kernel rows with zero process/group IDs do not invalidate complete snapshots',()=>{
+ const f=fixture(),r=f.m.runs[0];f.mutate(r.supervisor,s=>{for(const snapshot of [s.before,s.final])snapshot.rows.push({pid:0,parent:0,group:0,state:'S',identity:'fictional kernel zero'},{pid:2,parent:0,group:0,state:'S',identity:'fictional kernel task'});});expect(f.collect().status).toBe('verified');
+});
+
+
+test('known-address probe binds real network policy denials without treating a resolver error as permission denial',()=>{
+ const f=fixture(),network={githubIPv4:'192.0.2.1',exampleIPv4:'192.0.2.2',dnsIPv4:'1.1.1.1' as const,observedAt:startedAt};f.m.network=network;const b=bytes(securityProbe(f.m.targets,network));f.files.set(f.m.probe.path,b);f.m.probe.sha256=digest(b);for(const r of f.m.runs){f.mutate(r.supervisor,s=>{s.probeBeforeSha256=f.m.probe.sha256;s.probeAfterSha256=f.m.probe.sha256;});if(r.commandProbe)f.mutate(r.commandProbe,c=>{c.probeSha256=f.m.probe.sha256;c.probeAfterSha256=f.m.probe.sha256;});}expect(f.collect().status).toBe('verified');f.m.network.githubIPv4='192.0.2.3';expect(f.collect().status).toBe('refused');
+});
+
+
+function gracefulFixture(){
+ const f=fixture();for(const r of f.m.runs.filter(r=>r.kind!=='security')){const s=JSON.parse(Buffer.from(f.read(r.supervisor.path)).toString()),end=s.stopAt+20;r.endedAt=end;f.mutate(r.supervisor,x=>{x.endedAt=end;x.exitCode=0;x.signal=null;});
+  if(r.kind==='time')f.mutate(r.rollout,rows=>{const counter=rows.findIndex((x:any)=>x.payload?.type==='token_count'),at=r.startedAt+60;rows.splice(counter,0,{timestamp:new Date(at).toISOString(),type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'wait',input:`text(await tools.write_stdin({session_id:${r===f.m.runs[1]?2:5},chars:"",yield_time_ms:1000}));`}},{timestamp:new Date(at+1).toISOString(),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'wait',output:[{type:'input_text',text:'Script completed\nWall time 0.1 seconds\nOutput:\n'},{type:'input_text',text:JSON.stringify({session_id:r===f.m.runs[1]?2:5,output:''})}]}});},true);
+ }return f;}
+test('literal lifecycle wait keys and prompt graceful zero exits retain positive OS stop proof',()=>{
+ const f=gracefulFixture();expect(f.collect().status).toBe('verified');const r=f.m.runs[2];f.mutate(r.supervisor,s=>{s.signals=[];});expect(f.collect().status).toBe('refused');
+});
+test('a zero exit without prompt verified root termination remains refused',()=>{const f=fixture(),r=f.m.runs[1];f.mutate(r.supervisor,s=>{s.exitCode=0;s.signal=null;});expect(f.collect().status).toBe('refused');});
+
+
+test('a live bound root after its claimed graceful exit cannot qualify',()=>{
+ const f=fixture(),r=f.m.runs[1];r.endedAt=r.startedAt+50020;f.mutate(r.supervisor,s=>{s.endedAt=r.endedAt;s.exitCode=0;s.signal=null;s.afterTerm.rows.push({...s.before.rows.find((row:any)=>row.pid===s.pid)});});expect(f.collect().status).toBe('refused');
+});
+
+
+for(const bad of ['split key','split number','missing await token'] as const)test('native code grammar rejects '+bad,()=>{const f=gracefulFixture(),r=f.m.runs[1];f.mutate(r.rollout,rows=>{const p=rows.find((x:any)=>x.payload?.type==='custom_tool_call').payload;if(bad==='split key')p.input=p.input.replace('session_id:','session_ id:');if(bad==='split number')p.input=p.input.replace('yield_time_ms:1000','yield_time_ms:1 000');if(bad==='missing await token')p.input=p.input.replace('await tools.','awaittools.');},true);expect(f.collect().status).toBe('refused');});
+
+function delayedCounterFixture(){
+ const f=fixture(),r=f.m.runs[0],rows=Buffer.from(f.read(r.rollout.path)).toString().trim().split('\n').map(line=>JSON.parse(line)),index=rows.findIndex(x=>x.payload?.type==='token_count'),prefix=bytes(jsonl(rows.slice(0,index+1))),u=rows[index].payload.info.total_token_usage;
+ f.mutate(r.supervisor,s=>{for(const sample of s.samples){sample.prefixBytes=prefix.length;sample.prefixSha256=digest(prefix);}});
+ f.mutate(r.rollout,x=>{x.splice(index+1,0,{timestamp:new Date(r.startedAt+400).toISOString(),type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{...u,input_tokens:u.input_tokens+5,total_tokens:u.total_tokens+5}}}});},true);
+ const stream=Buffer.from(f.read(r.stream.path)).toString().split('\n').filter(Boolean).map(line=>{if(!line.startsWith('{'))return line;const x=JSON.parse(line);if(x.type==='turn.completed'){x.usage.input_tokens+=5;x.usage.total_tokens+=5;}return JSON.stringify(x);}).join('\n')+'\n',raw=bytes(stream);f.files.set(r.stream.path,raw);r.stream.sha256=digest(raw);
+ return {f,r};
+}
+test('live usage binds the actual observed prefix before a delayed earlier-timestamp counter was flushed',()=>{const {f,r}=delayedCounterFixture();expect(f.collect().status).toBe('verified');f.mutate(r.supervisor,s=>{for(const x of s.samples){delete x.prefixBytes;delete x.prefixSha256;}});expect(f.collect().status).toBe('refused');});
+for(const bad of ['hash','length','partial line','different latest counter','unpaired witness'] as const)test('observed accounting prefix refuses '+bad,()=>{const {f,r}=delayedCounterFixture();f.mutate(r.supervisor,s=>{const x=s.samples[0];if(bad==='hash')x.prefixSha256='0'.repeat(64);if(bad==='length')x.prefixBytes=99999999;if(bad==='partial line')x.prefixBytes--;if(bad==='different latest counter'){const raw=f.read(r.rollout.path);x.prefixBytes=raw.length;x.prefixSha256=digest(raw);}if(bad==='unpaired witness')delete x.prefixSha256;});expect(f.collect().status).toBe('refused');});

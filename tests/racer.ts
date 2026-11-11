@@ -1,5 +1,5 @@
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission } from "./fixtures";
 const [path, n, mode, gate] = process.argv.slice(2),
   s = new Store(path),
