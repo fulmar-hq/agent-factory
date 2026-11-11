@@ -317,3 +317,19 @@ owner-token controls belong to Coordinator for escalation; their actual caller
 is explicitly unrecorded and is never represented as a verified human identity.
 A missing owner does not prevent the safety pause. Coordinator identifies and
 contacts the original pausing owner when legacy provenance is incomplete.
+
+### Release usage headroom
+
+The **14:00** rehearsal projects Release and the effective Quality acceptance
+profile's usage at **18:30 Eastern** using the last 15–60 minutes of comparable
+native observations. Every exposed window must project below **0.70**. A
+projection at/above the gate, stale or absent usage, missing burn history,
+changed window/reset identity or decreasing counters is a Coordinator gap.
+The ordinary tick retains at most 72 native metadata observations/provider over
+six hours, at five-minute spacing, without another model or paid API call.
+
+The report retains baseline, current usage, measured hourly burn and target for
+every window. A scheduled reset is labelled a forecast assumption; it never
+creates fresh native zero usage or supplies runtime admission. Coordinator can
+decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
+fresh-read checks remain unchanged. PR #190 is not required or installed.

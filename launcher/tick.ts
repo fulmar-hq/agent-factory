@@ -1,3 +1,4 @@
+import {observeReleaseUsage} from './release-usage-projection';
 import {githubContext,unavailable} from '../adapters/github-budget';
 import {githubHealth,recordLateGithubFailure} from './github-health';
 import {recordTickResult} from './controller-alerts';
@@ -115,6 +116,7 @@ async function tickOnce(dir:string) {
       if (meter && (!r[provider] || meter.observedAt > r[provider]!.observedAt)) r[provider] = meter;
     }
     s.set("readings", r);
+    observeReleaseUsage(s,r,now);
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     const evaluateRenewal=()=>{try {const renewal=scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
       mkdirSync(join(dir,"logs"),{recursive:true,mode:0o700});const fd=openSync(join(dir,"logs",`codex-renewal-${id}.log`),"ax",0o600);
