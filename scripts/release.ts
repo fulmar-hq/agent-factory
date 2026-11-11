@@ -1,3 +1,4 @@
+import {requestFreezeProof} from '../launcher/release-freeze-proof';
 import {watchReleasePause} from '../launcher/release-pause';
 import {recordRehearsal} from '../launcher/release-rehearsal';
 import {withReleaseAuth} from '../launcher/release-auth';
@@ -21,9 +22,15 @@ const rehearsal=stage==='rehearsal';
 const rehearsalSlot=process.argv[3]??'14:00';
 if(rehearsal&&!['14:00','17:40'].includes(rehearsalSlot))throw Error('rehearsal slot must be 14:00 or 17:40');
 const invokedAt=Date.now();
-if(!['preflight','qa','production','reconcile','dry-run','rehearsal'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
+if(!['preflight','qa','production','reconcile','dry-run','rehearsal','freeze-start'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
 const s=new Store(join(root,'controller.sqlite'));
 try {
+ const installedSource=()=>command(['git','rev-parse','HEAD'],import.meta.dir+'/..');
+ if(stage==='freeze-start'){
+  const proof=await requestFreezeProof(s,root,installedSource);watchReleasePause(s,root);
+  console.log(JSON.stringify({effects:false,proof}));
+ }else{
+ if(stage==='reconcile')await requestFreezeProof(s,root,installedSource);
  const c=await configAt(join(root,'config.yaml'));
  const policy=()=>Bun.YAML.parse(readFileSync(join(root,'config.yaml'),'utf8'));
  const funds=(now:number)=>releaseAvailable(s,c,admittedBilling,policy(),now);
@@ -90,6 +97,7 @@ try {
   }
   console.log(JSON.stringify(result));
  }
+}
 }catch(error){
  const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
  if(rehearsal){
