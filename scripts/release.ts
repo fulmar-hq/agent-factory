@@ -1,3 +1,4 @@
+import {collectUsageProjection} from '../launcher/release-usage-projection';
 import {requestFreezeProof} from '../launcher/release-freeze-proof';
 import {watchReleasePause} from '../launcher/release-pause';
 import {recordRehearsal} from '../launcher/release-rehearsal';
@@ -70,6 +71,7 @@ try {
   const [readings,quota]=await Promise.all([localReadings(),claudeStatus()]);
   if(quota&&(!readings.claude||quota.observedAt>readings.claude.observedAt))readings.claude=quota;
   readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:rehearsal?(s.get('aws-stop-latched')===true?'AWS stop latched':s.get('paused')!==false?'factory paused':null):await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
+  if(rehearsal&&rehearsalSlot==='14:00')await collectUsageProjection(s,c,root,readiness,readings);
   if(rehearsal){recordRehearsal(s,readiness,rehearsalSlot as '14:00'|'17:40');console.log(JSON.stringify({effects:false,slot:rehearsalSlot,readiness}));}
   if(stage==='preflight')readiness.at=invokedAt;
   if(stage==='preflight'){
