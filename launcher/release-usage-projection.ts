@@ -22,7 +22,7 @@ export function projectUsage(current:Meter|undefined,history:Meter[],provider:'c
  if(!parsed.success||parsed.data.nativeProvider!==provider||parsed.data.observedAt>now||now-parsed.data.observedAt>15*60000)throw Error('fresh native usage is unavailable; headroom projection unknown');
  const meter=parsed.data;
  if(target<=now)throw Error('18:30 projection target has passed; collect current readiness');
- const baseline=history.filter(m=>m.nativeProvider===provider&&meter.observedAt-m.observedAt>=15*60000&&meter.observedAt-m.observedAt<=60*60000).sort((a,b)=>a.observedAt-b.observedAt)[0];
+ const baseline=history.filter(m=>m.nativeProvider===provider&&meter.observedAt-m.observedAt>=15*60000&&meter.observedAt-m.observedAt<=60*60000&&meter.windows.every((w,i)=>{const matches=m.windows.filter((before,j)=>key(before,j)===key(w,i));return matches.length===1&&matches[0].resetsAt===w.resetsAt;})).sort((a,b)=>a.observedAt-b.observedAt)[0];
  if(!baseline)throw Error('at least 15 minutes of comparable current native burn history is required; projection unknown');
  const windows=meter.windows.map((window,index)=>{
   const candidates=baseline.windows.filter((w,i)=>key(w,i)===key(window,index));

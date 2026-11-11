@@ -30,3 +30,8 @@ test('14:00 projection reports both owner gaps to existing readiness, with bound
 test('sample capture uses collection completion time and refuses a genuinely future native timestamp',()=>{
  const s=new Store(':memory:');try{const reading=meter(now+500,.3);observeReleaseUsage(s,{codex:reading},now);expect(s.get('release-usage-history:codex')).toBeNull();observeReleaseUsage(s,{codex:reading},now+1000);expect(s.get<Meter[]>('release-usage-history:codex')?.[0].observedAt).toBe(now+500);}finally{s.close();}
 });
+
+test('a prior reset does not conceal an available comparable post-reset burn baseline',()=>{
+ const current=meter(now,.2),old=meter(now-50*60000,.8,now-30*60000),recent=meter(now-20*60000,.1),projection=projectUsage(current,[old,recent],'codex',now,target,.7);
+ expect(projection.windows[0].baselineAt).toBe(recent.observedAt);expect(projection.windows[0].ratePerHour).toBeCloseTo(.3);expect(projection.underGate).toBe(false);
+});
