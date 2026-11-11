@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { copyFile, mkdir, rename, readFile } from "node:fs/promises";
+import { openSync, closeSync, fstatSync, lstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ConfigSchema, root } from "../launcher/config";
@@ -39,26 +40,55 @@ export async function addProject(repo: string, options: {
     if (!source || source.error) throw Error(source?.error ?? "Backfill failed");
     if (source.truncated) throw Error("Backfill incomplete; enrollment refused");
     if (!options.dryRun) {
-      if (await readFile(path, "utf8") !== original) throw Error("Config changed; retry enrollment");
-      const id = randomUUID(), archive = join(dir, "archive", `add-project-${id}`);
-      await mkdir(archive, { recursive: true, mode: 0o700 });
-      await copyFile(path, join(archive, "config.yaml"));
-      if (!existing) {
-        const staged = join(archive, "config.next.yaml");
-        await Bun.write(staged, proposed, { mode: 0o600 });
-        await rename(staged, path);
+      // Cooperating enrollments only: unrelated policy editors must still be excluded.
+      // Never reclaim interrupted custody, even if its recorded PID is no longer live.
+      const claim = join(dir, ".add-project.claim");
+      let fd: number;
+      try { fd = openSync(claim, "wx", 0o600); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw Error(`Enrollment custody exists at ${claim}; retry after the writer finishes. If interrupted or unknown, reconcile the writer, config and archives, then manually archive the claim before retrying; no automatic reclaim.`);
+        }
+        throw error;
       }
-      const store = new Store(join(dir, "controller.sqlite"));
       try {
-        store.atomic(() => {
-          for (const row of preview.rows("tickets") as { id: string; snapshot: string; observed: number; decision: string }[]) {
-            store.db.query("INSERT INTO tickets VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot,observed=excluded.observed,decision=excluded.decision")
-              .run(row.id, row.snapshot, row.observed, row.decision);
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, repo, id: randomUUID() }) + "\n");
+        if (await readFile(path, "utf8") !== original) throw Error("Config changed; retry enrollment");
+        const id = randomUUID(), archive = join(dir, "archive", `add-project-${id}`);
+        await mkdir(archive, { recursive: true, mode: 0o700 });
+        await copyFile(path, join(archive, "config.yaml"));
+        if (!existing) {
+          const staged = join(archive, "config.next.yaml");
+          await Bun.write(staged, proposed, { mode: 0o600 });
+          await rename(staged, path);
+        }
+        const store = new Store(join(dir, "controller.sqlite"));
+        try {
+          store.atomic(() => {
+            for (const row of preview.rows("tickets") as { id: string; snapshot: string; observed: number; decision: string }[]) {
+              store.db.query("INSERT INTO tickets VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET snapshot=excluded.snapshot,observed=excluded.observed,decision=excluded.decision")
+                .run(row.id, row.snapshot, row.observed, row.decision);
+            }
+            store.set(`github:${entry.repo}`, source);
+            store.event(`add-project:${id}`, "project-enrolled", { repo: entry.repo, key, count: source.count, readOnly: true }, `Restore config from ${archive}/config.yaml; retain snapshots and this event`);
+          });
+        } finally { store.close(); }
+      } finally {
+        try {
+          // No await between identity verification and removal. Keep the descriptor
+          // open so the inode cannot be reused for another invocation's claim.
+          const held = fstatSync(fd);
+          let current;
+          try { current = lstatSync(claim); }
+          catch (cause) {
+            throw Error(`Enrollment custody cannot be verified at ${claim}; reconcile the writer, config and archives before retrying`, { cause });
           }
-          store.set(`github:${entry.repo}`, source);
-          store.event(`add-project:${id}`, "project-enrolled", { repo: entry.repo, key, count: source.count, readOnly: true }, `Restore config from ${archive}/config.yaml; retain snapshots and this event`);
-        });
-      } finally { store.close(); }
+          if (!current.isFile() || held.dev !== current.dev || held.ino !== current.ino) {
+            throw Error(`Enrollment custody changed at ${claim}; reconcile and manually archive unknown custody before retrying`);
+          }
+          unlinkSync(claim);
+        } finally { closeSync(fd); }
+      }
     }
     return { repo: entry.repo, key, issues: source.count, readOnly: true, dryRun: !!options.dryRun, alreadyEnrolled: !!existing };
   } finally { preview.close(); }
