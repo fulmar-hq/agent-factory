@@ -4,7 +4,7 @@ import type {Store} from '../tracking/store';
 import type {ReleaseReadiness} from './release-readiness';
 import {releaseAction,type ReleaseOwner} from './release-actions';
 export function gapOwner(input:string,reason:string):ReleaseOwner {
- if(/AWS sign-in|usage|pause/i.test(input+' '+reason))return 'Coordinator';
+ if(/AWS sign-in|AWS stop|stop latched|owner decision|password|MFA|passkey|usage|pause/i.test(input+' '+reason))return 'Coordinator';
  if(/quality|hosted acceptance|owner qualification/i.test(input))return 'Quality';
  if(/billing|disk|configuration|environment/i.test(input))return 'Platform';
  return 'Release';
