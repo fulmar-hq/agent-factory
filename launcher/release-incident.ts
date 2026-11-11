@@ -62,5 +62,5 @@ export function reconcileReleaseIncidents(s:Store,now=Date.now(),send=releaseAct
  // Recover a watcher that was itself asleep over a window. Only existing
  // release/rehearsal evidence establishes an expected historical night.
  for(let i=0;i<2;i++){if(knownNight(s,prior))days.unshift(prior);prior=previousDay(prior);}
- return days.map(day=>releaseIncident(s,day,now,send));
+ return days.map(day=>{try{return releaseIncident(s,day,now,send);}catch(error){s.event(`release-incident-mail-failure:${day}:${String(error)}`,'release-incident-mail-failure',{day,error:String(error)},'Retain all nightly summaries; retry each original mail ID independently',now);return {queued:false,day,error:String(error)};}});
 }

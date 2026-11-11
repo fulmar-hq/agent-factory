@@ -39,3 +39,7 @@ test('a resolved rehearsal gap is not blamed for a later QA failure, whose real 
  const s=new Store(':memory:'),day='2026-11-11',send=(id:string)=>({id,queued:true});
  try{report(s,day,'14:00',[{input:'fresh billing',reason:'temporarily stale'}]);report(s,day,'17:40',[]);report(s,day,'19:00',[],'release-readiness');s.set('executor:'+day+':preflight',{state:'success'});s.set('executor:'+day+':qa',{state:'failure',context:{day,revision:'a'.repeat(40),tree:'b'.repeat(40),deadline:at(day,'21:20')},evidence:{reason:'QA workflow failed'}});s.event('executor:'+day+':qa:failure','release-executor',{day,kind:'qa:failure'},'fixture',at(day,'20:20'));releaseIncident(s,day,at(day,'20:21'),send);const incident=s.get<any>('release-incident:'+day);expect(incident.gaps).toEqual([{input:'QA window',reason:'QA workflow failed',knownBy:at(day,'20:20'),basis:'recorded observation'}]);expect(incident.body).not.toContain('billing');}finally{s.close();}
 });
+
+test('an outbox failure on an older night cannot suppress recording the other missed nights',()=>{
+ const s=new Store(':memory:');try{for(const day of ['2026-11-09','2026-11-10','2026-11-11'])report(s,day,'19:00',[{input:'fresh billing',reason:'missing'}],'release-readiness');const results=reconcileReleaseIncidents(s,at('2026-11-11','22:30'),()=>{throw Error('outbox unavailable');});expect(results).toHaveLength(3);for(const day of ['2026-11-09','2026-11-10','2026-11-11'])expect(s.get('release-incident:'+day)).not.toBeNull();}finally{s.close();}
+});
