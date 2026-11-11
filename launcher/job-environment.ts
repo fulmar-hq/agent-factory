@@ -6,9 +6,10 @@ export type ScheduledJob=typeof scheduledJobs[number];
 // Union of the scheduled entry points' transitive executable dependencies. An
 // executable is a dependency even when reached only on a failure/recovery path.
 export const scheduledExecutables=['aws','gh','git','python3','codex','claude','node','session-manager-plugin','bun','script','ps','df','ssh','curl','tar','cp','open','lsof','security','osascript','sh','bash','env','readlink','launchctl','plutil','chmod','find','du','sysctl'] as const;
+export const fixedExecutables=['/bin/bash','/bin/df','/bin/ps','/bin/sh','/usr/bin/env','/usr/bin/git','/usr/bin/python3','/usr/sbin/lsof','/usr/sbin/sysctl'] as const;
 export const executableLocations:Record<typeof scheduledExecutables[number],string>={aws:'HOME/bin/aws',gh:'HOME/bin/gh',git:'/usr/bin/git',python3:'/usr/bin/python3',codex:'BUN/codex',claude:'HOME/bin/claude',node:'HOME/bin/node','session-manager-plugin':'HOME/bin/session-manager-plugin',bun:'BUN/bun',script:'/usr/bin/script',ps:'/bin/ps',df:'/bin/df',ssh:'/usr/bin/ssh',curl:'/usr/bin/curl',tar:'/usr/bin/tar',cp:'/bin/cp',open:'/usr/bin/open',lsof:'/usr/sbin/lsof',security:'/usr/bin/security',osascript:'/usr/bin/osascript',sh:'/bin/sh',bash:'/bin/bash',env:'/usr/bin/env',readlink:'/usr/bin/readlink',launchctl:'/bin/launchctl',plutil:'/usr/bin/plutil',chmod:'/bin/chmod',find:'/usr/bin/find',du:'/usr/bin/du',sysctl:'/usr/sbin/sysctl'};
 export function jobEnvironment(home:string,bun:string,dir:string){return {FACTORY_PRIVATE_DIR:dir,PATH:releasePath(home,bun),TZ:'America/Toronto'};}
-export function missingExecutables(path:string,executables:readonly string[]=scheduledExecutables,which=(name:string,p:string)=>Bun.which(name,{PATH:p})):string[]{
+export function missingExecutables(path:string,executables:readonly string[]=[...scheduledExecutables,...fixedExecutables],which=(name:string,p:string)=>Bun.which(name,{PATH:p})):string[]{
  if(!path||path.split(':').some(p=>!p.startsWith('/')))throw Error('scheduled PATH must contain only absolute directories');
  return executables.filter(name=>!which(name,path));
 }
@@ -26,8 +27,8 @@ export function checkInstalledEnvironments(agents:string,dir:string,which=(name:
   const file=locate(job);if(!existsSync(file))throw Error('scheduled plist missing: '+job);
   const env=plistEnvironment(readFileSync(file,'utf8'));
   if(env.FACTORY_PRIVATE_DIR!==dir||(env.TZ!==undefined&&env.TZ!=='America/Toronto'||job.startsWith('release.')&&env.TZ!=='America/Toronto'))throw Error('installed job private directory/timezone differs: '+job);
-  const missing=missingExecutables(env.PATH,scheduledExecutables,which);if(missing.length)throw Error(`${job}: executables missing under installed PATH: ${missing.join(', ')}`);
-  return {job,path:env.PATH,executables:scheduledExecutables.length};
+  const missing=missingExecutables(env.PATH,[...scheduledExecutables,...fixedExecutables],which);if(missing.length)throw Error(`${job}: executables missing under installed PATH: ${missing.join(', ')}`);
+  return {job,path:env.PATH,executables:scheduledExecutables.length+fixedExecutables.length};
  });
 }
 

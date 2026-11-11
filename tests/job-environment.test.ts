@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {config} from './fixtures';
 import {createHash} from 'node:crypto';
-import {scheduledJobs,scheduledExecutables,executableLocations,jobEnvironment,plistEnvironment,missingExecutables,checkInstalledEnvironments,validateLoadedEnvironment} from '../launcher/job-environment';
+import {scheduledJobs,scheduledExecutables,fixedExecutables,executableLocations,jobEnvironment,plistEnvironment,missingExecutables,checkInstalledEnvironments,validateLoadedEnvironment} from '../launcher/job-environment';
 const home='/Users/fictional',bun=home+'/.bun/bin/bun',dir=home+'/.factory';
 const locations=new Set(Object.values(executableLocations).map(p=>p.replace('HOME',home).replace('BUN',dirname(bun))));
 const which=(name:string,path:string)=>{if(name.startsWith('/'))return locations.has(name)?name:null;return path.split(':').map(d=>d+'/'+name).find(p=>locations.has(p))??null;};
@@ -39,9 +39,9 @@ test('executable inventory covers literal calls and every dynamic execution boun
  for(const file of files){const source=readFileSync(join(repo,file),'utf8');
   for(const match of source.matchAll(/\b(?:command|execute|spawn|spawnSync|execFileSync|read|os\.exec)\(\s*(?:\[\s*)?(['"])([^'"\n]+)\1/g)){
    const tool=match[2];if(tool.startsWith('PRAGMA ')||tool.includes(' '))continue;
-   expect(known.has(tool.split('/').at(-1)!),`${file}: ${tool}`).toBe(true);
+   expect(tool.startsWith('/')?(fixedExecutables as readonly string[]).includes(tool):known.has(tool),`${file}: ${tool}`).toBe(true);
   }
-  if(/\b(?:spawn|spawnSync|execFileSync|Popen|subprocess\.run)\(/.test(source))dynamic[file]=createHash('sha256').update(source).digest('hex');
+  if(/\b(?:command|execute|spawn|spawnSync|execFileSync|Popen|subprocess\.run)\(/.test(source))dynamic[file]=createHash('sha256').update(source).digest('hex');
  }
  expect(dynamic).toEqual(audit);
 });
@@ -79,4 +79,17 @@ test('correct plist files cannot conceal stale, missing or ambiguous loaded priv
  expect(validateLoadedEnvironment(xml,loaded(good),dir,'release.preflight')).toEqual(good);
  for(const bad of [{...good,FACTORY_PRIVATE_DIR:'/stale-controller'},{...good,TZ:'UTC'},Object.fromEntries(Object.entries(good).filter(([k])=>k!=='FACTORY_PRIVATE_DIR')),Object.fromEntries(Object.entries(good).filter(([k])=>k!=='TZ'))])expect(()=>validateLoadedEnvironment(xml,loaded(bad),dir,'release.preflight')).toThrow();
  expect(()=>validateLoadedEnvironment(xml,loaded(good).replace('\t}',`\t\tTZ => UTC\n\t}`),dir,'release.preflight')).toThrow('ambiguous');
+});
+
+test('fixed interpreter paths cannot be replaced by a different PATH-resolved basename',()=>{
+ const agents=mkdtempSync(join(tmpdir(),'fixed-tools-'));
+ for(const job of scheduledJobs)writeFileSync(join(agents,`com.agent-factory.${job}.plist`),plist(jobEnvironment(home,bun,dir)));
+ const resolver=(name:string,path:string)=>name==='/usr/bin/python3'?null:which(name,path);
+ expect(resolver('python3',jobEnvironment(home,bun,dir).PATH)).not.toBeNull();
+ expect(()=>checkInstalledEnvironments(agents,dir,resolver,job=>join(agents,`com.agent-factory.${job}.plist`))).toThrow('/usr/bin/python3');
+});
+test('a new executable hidden behind dynamic command argv invalidates the reviewed source audit',()=>{
+ const file='scripts/release.ts',source=readFileSync(join(repo,file),'utf8'),mutated=source+"\nconst addedTool='new-scheduled-tool'; await command([addedTool]);\n";
+ const digest=(s:string)=>/\b(?:command|execute|spawn|spawnSync|execFileSync|Popen|subprocess\.run)\(/.test(s)?createHash('sha256').update(s).digest('hex'):undefined;
+ expect(audit[file]).toBeDefined();expect(digest(source)).toBe(audit[file]);expect(digest(mutated)).not.toBe(audit[file]);
 });
