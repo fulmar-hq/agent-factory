@@ -14,7 +14,7 @@ test('dry rehearsal routes all gaps, retains clean logs, and deduplicates immuta
  const s=new Store(':memory:'),sent=new Map<string,string>();
  const send=(id:string,to:string,summary:string,body:string)=>{const content=JSON.stringify([to,summary,body]);expect(sent.get(id)??content).toBe(content);sent.set(id,content);return {id,queued:true};};
  try{recordRehearsal(s,report,'14:00',send);expect(sent.size).toBe(4);expect([...sent.values()].join()).toContain('18:30');
- recordRehearsal(s,{...report,at:at+1,missing:report.missing.map(m=>({...m,reason:'changed failure'}))},'17:40',send);expect(sent.size).toBe(4);
+ recordRehearsal(s,{...report,at:at+1,missing:report.missing.map(m=>({...m,reason:'expired AWS sign-in'}))},'17:40',send);expect(sent.size).toBe(4);
  recordRehearsal(s,{...report,at:at+2,ready:true,missing:[]},'17:40',send);expect(sent.size).toBe(4);
  expect(s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-rehearsal'").get()).toEqual({n:3});
  expect(gapOwner('fresh billing','expired AWS sign-in')).toBe('Coordinator');

@@ -15,7 +15,7 @@ export function recordRehearsal(s:Store,r:ReleaseReadiness,slot:'14:00'|'17:40',
  s.event(`${key}:${r.at}`,'release-rehearsal',{slot,...r},'Retain dry readiness and action receipts; never replay release effects',r.at);
  s.set(key,r);
  for(const gap of r.missing){
-  const owner=gapOwner(gap.input,gap.reason),id=`release-rehearsal-gap:${r.day}:${createHash('sha256').update(owner+'\n'+gap.input).digest('hex')}`;
+  const owner=gapOwner(gap.input,gap.reason),id=`release-rehearsal-gap:${r.day}:${createHash('sha256').update(gap.input).digest('hex')}`;
   const retained=s.get<{summary:string;body:string;owner:ReleaseOwner}>(id)??{owner,summary:`Release gap: ${gap.input}. Due ${r.day} 18:30 Eastern.`,body:`${gap.reason}\nResolve before 18:30 America/Toronto; fixed preflight is 19:00. No pause, gate, spending or release-time exception is granted.`.slice(0,800)};
   // Persist the immutable payload before the cross-store effect, so a changed
   // reason on retry cannot conflict with mail already queued before a crash.
