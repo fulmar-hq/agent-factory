@@ -36,11 +36,19 @@ A newly installed ledger starts at the present. Earlier history is a separate ba
 
 **Bounds.** A run stops itself after 60 seconds and carries on from the same place next time; whatever it had read is recorded first. One run takes at most 5,000 rows per table and 8 MB of log. These are the ledger's own bounds. None is a factory limit and none can be set from outside the source file.
 
+**The hard stop.** The 60-second limit needs the run's cooperation. As its first act the job also asks the operating system to end the process at 120 seconds, whatever it is doing then (an alarm signal). That is for a rule file that blocks without yielding: launchd never starts a second copy of a job that is still running, so without it one such file would stop the ledger until someone killed the process by hand. A run ended this way writes nothing: its transaction is rolled back, its lock is taken over by the next run, and the heartbeat goes stale.
+
+**A source that begins again.** If `tick.log` is rotated or cut short, or a source database is replaced, the cursor is beyond the end. The job then reads that source from its start and records when that happened.
+
 **Disk.** When disk admission is refused the job writes counts only: each occurrence is still counted against its class, and no evidence is stored. That is the disk limit doing its job, so it is not an alarm.
 
 ## Classes
 
 A class is one problem. It has a stable id, given the first time its signature is seen, for example `sqliteerror-database-is-locked-13a2d7`. The id is lower-case and safe as a folder name. Issue links, fix links, regression folders and lesson rows hang on the class id only.
+
+**Named classes.** A release input, a declared proof and a rule's own error name their class outright. Such a finding is filed under that id whatever its text says, so `cl-20-first-night` and `cl-21-first-night`, or two rule ids that differ by a number, are two classes although the normaliser would fold their text together. A name is not a text signature and a retune never touches it. A name that already belongs to a class of another kind is refused.
+
+**Findings are checked first.** Before anything is stored a finding must have a known kind, a text, a source, a reference and a time that is a positive whole number of milliseconds. An unusable one is refused by itself; it is never stored, so it cannot spoil the export.
 
 **Signatures.** `fingerprint.ts` strips what changes between sightings (home folders, session and commit ids, times, numbers) and keeps the rest. Signatures map to class ids through a table, and each row stores the normaliser version and the first 500 characters of the raw text. When the normaliser is retuned its version is raised; on the next run the job re-maps every stored sample to its new signature and points it at the class it already had. No class id is created, changed or removed. If two classes now share a signature, the older class keeps it and the newer gets a note; joining them stays an operator's merge. If a text cannot be fingerprinted at all, a hash of the raw text is used and counted.
 
@@ -79,8 +87,8 @@ A limit doing its job (a usage stop, an unqualified worker, a disk refusal, a pa
 
 | Command | What it does |
 | --- | --- |
-| `merge <class> <other>` | Joins two classes of the same kind. The older class keeps its id; the newer stays on file, pointing at it. |
-| `split <class> --signature … --summary …` | Makes the named signatures their own class. The part with more occurrences keeps the id and its links. |
+| `merge <class> <other>` | Joins two classes of the same kind. The older class keeps its id; the newer stays on file, pointing at it. If the older had ended and the newer had not, the class that stands is live again ("recurred", or "open" for a kind that ends without proof), and it keeps the earlier "needs operator since" of the two. A merge never makes a live problem read as ended. |
+| `split <class> --signature … --summary …` | Makes the named signatures their own class. The part with more occurrences keeps the id and its links; each occurrence counts once, also when a retune has left the same signature text on file under two normaliser versions. After a retune, name both the old and the new text of a cause to move its whole history. |
 | `defer <class> --until <date>` | Parks the class until the date. |
 | `accept-risk <class> --until <date>` | Parks the class as an accepted risk until the date. |
 | `dismiss <class>` | Ends the class without a fix. |
@@ -104,6 +112,8 @@ Any job may drop one JSON file per record in `health/ledger-inbox/` (see the con
 | proof-attached | evidence on that proof, which then ends |
 | human-step-request | the class waits on a person for a step on the coded list |
 
+Records are applied in the order things happened: by each record's own `at`, then the records that open a class (declare, release-input, proof-owed) before the ones that point at one, then by file name. So a proof and its evidence, or a release input and its issue, dropped between two runs both apply. With more than 200 files waiting, the files whose names begin with a type that opens a class are taken first. A record that points at a class nobody has opened is refused.
+
 A record of a reducing type, or anything else the contract's parser rejects, is refused, logged to `ledger.error.log`, kept in the ledger's `received` table and moved to `ledger-inbox/refused/`. Applied files move to `ledger-inbox/applied/`. Nothing is deleted. The same record dropped twice changes nothing.
 
 ## Rule files and step files
@@ -114,13 +124,18 @@ A rule file default-exports `{ id, switch?, eventKinds?, run(input) }`. `run` ge
 
 A step file default-exports `{ id, run(context) }`. A step may read the ledger and use the adding transitions. The reducing ones are not available to it.
 
-Each rule and step runs alone. One that throws, fails to load, returns something unusable or runs past the 60-second limit becomes a `rule-error-<id>` class, counted once per run, and the rest continue. A rule that blocks without yielding cannot be interrupted from inside the process; the stale heartbeat is what shows it.
+Each rule and step runs alone. One that throws, fails to load, returns something unusable or runs past the 60-second limit becomes a `rule-error-<id>` class, counted once per run, and the rest continue. An unusable finding is refused by itself; the rule's other findings are stored.
+
+- **Out of time is not a failure.** A rule or step the run has no time left for is not run and not blamed. It is listed in the heartbeat's `notRun`.
+- **The same batch again.** After a run in which a rule did not load, threw, ran past the limit or was not reached, the next run hands every rule the same events, tick lines and incidents again, together with what is new. This happens for two runs at most; a rule that stays broken then loses the batch and the job moves on. What the job itself records is never counted twice, and the cursors the reconciliation uses do not move back. So a finding's `ref` must be the same every time the rule sees the same thing: that is what keeps a replayed finding from being counted again.
+- **An import that never returns** (a top-level `await` on something that never happens) is given 10 seconds, or what is left of the run, then reported as a file that did not load.
+- **A rule that blocks without yielding** cannot be interrupted from inside the process. The hard stop ends that run at 120 seconds, and every later run the same way, so the ledger records nothing until the file is fixed or removed; the stale heartbeat is what shows it. Once the file is gone the next scheduled run works again by itself.
 
 Both folders are imported into an unsandboxed job, so they are protected paths (below). A rule or step is added only by a reviewed operator change. Keep statements small and indexed: a slow statement against a health database makes its writer wait.
 
 ## Heartbeat, export and reconciliation
 
-`health/ledger-heartbeat.json` is written at the end of every run in the contract's shape: `at`, `behindMs`, an optional `alarm`, plus the run's counts and `newestIngestedAt`, the time of the newest source event ingested. `behindMs` is how long ago the ledger was last caught up with every source; it is 0 when this run read everything. A fresh file alone proves nothing: read `behindMs` and `alarm`.
+`health/ledger-heartbeat.json` is written at the end of every run in the contract's shape: `at`, `behindMs`, an optional `alarm`, plus the run's counts, `notRun` (rules and steps it had no time for) and `newestIngestedAt`, the time of the newest source event ingested. `behindMs` is how long ago the ledger was last caught up with every source; it is 0 when this run read everything. A fresh file alone proves nothing: read `behindMs` and `alarm`.
 
 `alarm` is set when:
 
@@ -134,7 +149,7 @@ It clears by itself on the first run where none of these holds.
 
 `health/ledger-export.json` is written by the job, and only the job, at the end of every run: one line per class and the nights-missed number, which stays null until a rule or step has supplied it.
 
-`bun scripts/ledger.ts reconcile` compares the sources with the ledger for everything read since the ledger started. Every `worker-failure` event and every failed tick must be exactly one occurrence, so `difference` must be 0.
+`bun scripts/ledger.ts reconcile` compares the sources with the ledger for everything read since the ledger started. Every `worker-failure` event and every failed tick must be exactly one occurrence, so `difference` must be 0. If a source began again, what it held before is gone; that side shows `restartedAt` and is compared from its new beginning with what the ledger recorded from then on.
 
 ## Install and undo
 
@@ -156,4 +171,7 @@ Undo: `launchctl bootout gui/<uid>/com.agent-factory.ledger`, archive the plist,
 
 - The job is not on the scheduled-job list that `scripts/check-job-environment.ts` checks; that list lives in a file this change does not touch.
 - Fingerprints can join unrelated failures or split one cause. The backfill measures this, and merge and split are recorded commands.
+- A log is known to have begun again only when it is shorter than the place the job had reached. A `tick.log` that was cut and has already grown back past that place looks unchanged, and the lines before that place are not read. Nothing rotates `tick.log` today.
+- If `controller.sqlite` is replaced by a copy that repeats event ids the ledger already holds, those events are not counted again and `reconcile` shows a difference for them.
+- A rule that blocks without yielding stops the ledger until that file is fixed or removed (see "Rule files and step files").
 - The ledger sees only what reaches the controller events, `tick.log` and the two incident tables. A failure that leaves no trace there is not recorded.

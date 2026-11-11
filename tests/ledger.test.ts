@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { policyRefusal } from "../launcher/autonomy";
 import { ConfigSchema } from "../launcher/config";
-import type { Normaliser } from "../launcher/fingerprint";
+import { NORMALISER, type Normaliser } from "../launcher/fingerprint";
 import { EXCERPTS_PER_CLASS, EXCERPT_BYTES, LEDGER_COMMANDS_DIR, LEDGER_PROTECTED_PATHS, Ledger, MAX_PARK_MS, RULES_DIR, STEPS_DIR, loadFolder, signCommand, verifyCommand, type Finding, type OperatorCommand } from "../launcher/ledger";
 import { CLASS_ID, LOOP_FILES, LoopHeartbeatSchema, PROOFS, REDUCING_TRANSITIONS, inboxFileName, ownerRole, regressionFolder, releaseInputClassId, usableLedgerExport, type InboxRecord } from "../launcher/loop-contract";
 import { Store } from "../tracking/store";
-import { BATCH_ROWS, RUN_LIMIT_MS, ingestOnce, type IngestOptions } from "../scripts/ledger-ingest";
+import { BATCH_ROWS, HARD_STOP_SECONDS, REPLAY_RUNS, RUN_LIMIT_MS, ingestOnce, type IngestOptions } from "../scripts/ledger-ingest";
 import { queueOperatorCommand, reconcile } from "../scripts/ledger";
 import { TestEngine, config, ticket } from "./fixtures";
 import { MINUTE, OWNER_TOKEN, T0, addEvents, addIncident, appendTick, bundleError, factoryDir, fullDisk, roomyDisk, session, workerFailure } from "./helpers/ledger-fixture";
@@ -63,6 +63,46 @@ describe("classes", () => {
     // No caller can pass an owner: a finding has no such field, and the stored one ignores anything extra.
     const sneaky = ledger.record({ ...failure(9, "something else broke"), ownerRole: "Coordinator" } as Finding, T0).classId;
     expect(ledger.classOf(sneaky)!.ownerRole).toBe("Platform");
+  });
+
+  test("a finding that names its class is filed under that name, whatever its text folds to", () => {
+    const ledger = memory();
+    const base = { version: 1 as const, at: T0, source: "fixture" };
+    // Each pair differs only by a number or a date, which the normaliser folds away.
+    for (const [first, second] of [["cl-20-first-night", "cl-21-first-night"], ["nightly-proof-2026-11-12", "nightly-proof-2026-11-13"]] as const) {
+      ledger.applyInbox({ ...base, id: `owed:${first}`, type: "proof-owed", proofId: first, what: `first: ${first}`, dueAt: T0 + 60 * MINUTE, role: "Release" }, T0);
+      ledger.applyInbox({ ...base, id: `owed:${second}`, type: "proof-owed", proofId: second, what: `second: ${second}`, dueAt: T0 + 120 * MINUTE, role: "Quality" }, T0);
+      expect(ledger.classOf(first)).toMatchObject({ occurrences: 1, summary: `first: ${first}`, dueAt: T0 + 60 * MINUTE, ownerRole: "Release" });
+      expect(ledger.classOf(second)).toMatchObject({ occurrences: 1, summary: `second: ${second}`, dueAt: T0 + 120 * MINUTE, ownerRole: "Quality" });
+      // The second proof closes under its own id and leaves the first one owed.
+      ledger.applyInbox({ ...base, id: `attached:${second}`, type: "proof-attached", proofId: second, evidence: "seen on the night", actor: "Quality" }, T0);
+      expect([ledger.classOf(first)!.state, ledger.classOf(second)!.state]).toEqual(["open", "resolved-no-fix"]);
+    }
+    const ruleError = (rule: string, ref: string): Finding => ({ kind: "instrumentation", text: `ledger rule or step failed: ${rule}`, classId: `rule-error-${rule}`, at: T0, source: "rule-error", ref });
+    expect(ledger.record(ruleError("check-1", "a"), T0)).toMatchObject({ classId: "rule-error-check-1", created: true });
+    expect(ledger.record(ruleError("check-2", "b"), T0)).toMatchObject({ classId: "rule-error-check-2", created: true });
+    expect(ledger.record(ruleError("check-2", "c"), T0)).toMatchObject({ classId: "rule-error-check-2", created: false });
+    expect(ledger.classes()).toHaveLength(6);
+    // A name is not a text signature: a retune has nothing to re-map, and the name still leads to its class.
+    expect(ledger.remapSignatures({ version: 2, normalise: (text) => `v2 ${text}` }, T0 + 1)).toEqual({ remapped: 0, conflicts: 0 });
+    ledger.applyInbox({ ...base, id: "owed-again:cl-20-first-night", type: "proof-owed", proofId: "cl-20-first-night", what: "still owed", dueAt: T0 + 60 * MINUTE, role: "Release" }, T0 + 2);
+    expect(ledger.classOf("cl-20-first-night")).toMatchObject({ occurrences: 2, summary: "first: cl-20-first-night" });
+    expect(() => ledger.remapSignatures({ version: -1, normalise: (text) => text }, T0 + 3)).toThrow("never negative");
+    expect(ledger.classes()).toHaveLength(6);
+    // A name that already belongs to a class of another kind is refused, and nothing is counted.
+    expect(() => ledger.record({ kind: "failure", text: "something else", classId: "cl-20-first-night", at: T0, source: "rule:fixture", ref: "x" }, T0)).toThrow("already names a proof-owed class");
+    expect(ledger.classOf("cl-20-first-night")!.occurrences).toBe(2);
+  });
+
+  test("an unusable finding is refused by itself and never reaches the export", () => {
+    const ledger = memory();
+    const good = ledger.record(failure(1), T0).classId;
+    for (const at of [0, -5, 1.5, "abc", null, Number.NaN]) expect(() => ledger.record({ ...failure(2, "some failure words"), at } as unknown as Finding, T0)).toThrow("not a usable finding (at)");
+    expect(() => ledger.record({ ...failure(3), kind: "not-a-kind" } as unknown as Finding, T0)).toThrow("not a usable finding (kind)");
+    expect(() => ledger.record({ ...failure(4), dueAt: "tomorrow" } as unknown as Finding, T0)).toThrow("not a usable finding (dueAt)");
+    for (const since of [0, 1.5, "abc"]) expect(() => ledger.needsOperator(good, since as number)).toThrow("needs the time it began");
+    expect(ledger.classes().map((c) => c.id)).toEqual([good]);
+    expect(usableLedgerExport(JSON.parse(JSON.stringify(ledger.export(T0 + 10, null))), T0 + 11)?.classes).toHaveLength(1);
   });
 
   test("changing the normaliser version re-maps 100 stored signatures and no class id, issue link or regression folder changes", () => {
@@ -217,11 +257,12 @@ describe("reducing transitions", () => {
   test("a split keeps the id, and its links, on the larger part", () => {
     for (const namedIsLarger of [false, true]) {
       const ledger = memory();
-      const id = ledger.record({ ...failure(1, "publish failed: bundle missing"), classId: "delivery-bundle-missing" }, T0).classId;
       const big = "publish failed: bundle missing",
         small = "publish failed: review label missing";
-      ledger.record({ ...failure(2, small), classId: id }, T0);
+      // One class holding two signatures, the way an operator's merge leaves it.
+      const id = ledger.record(failure(1, big), T0).classId;
       for (let n = 3; n <= 8; n++) ledger.record(failure(n, big), T0);
+      operator(ledger, { action: "merge", classId: id, other: ledger.record(failure(2, small, { at: T0 + 50 }), T0).classId });
       ledger.link(id, "issue", "example/demo#1", T0);
       expect(ledger.classOf(id)!.occurrences).toBe(8);
       const message = operator(ledger, { action: "split", classId: id, signatures: [namedIsLarger ? big : small], summary: "named part" });
@@ -237,6 +278,56 @@ describe("reducing transitions", () => {
       expect(() => operator(ledger, { action: "split", classId: id, signatures: [big], summary: "all of it" }, T0 + 1)).toThrow("leave at least one signature");
       expect(() => operator(ledger, { action: "split", classId: id, signatures: ["no such signature"], summary: "x" }, T0 + 2)).toThrow("does not have");
     }
+  });
+
+  test("after a retune a split still counts each occurrence once, so the larger part keeps the id", () => {
+    const ledger = memory();
+    const big = "big failure words",
+      small = "small failure words";
+    const id = ledger.record(failure(1, big), T0).classId;
+    for (const n of [2, 3]) ledger.record(failure(n, big), T0);
+    const other = ledger.record(failure(4, small, { at: T0 + 50 }), T0).classId;
+    ledger.record(failure(5, small, { at: T0 + 51 }), T0);
+    operator(ledger, { action: "merge", classId: id, other });
+    ledger.link(id, "issue", "example/demo#1", T0);
+    // The retune changes only the big signature, so the small one is now on file under both versions with the same text.
+    expect(ledger.remapSignatures({ version: 2, normalise: (text) => (text.startsWith("big") ? "BIG FAILURE WORDS" : NORMALISER.normalise(text)) }, T0 + 1)).toEqual({ remapped: 2, conflicts: 0 });
+    expect(ledger.signaturesOf(id).filter((s) => s.signature === small)).toHaveLength(2);
+    const created = operator(ledger, { action: "split", classId: id, signatures: [small], summary: "small part" }, T0 + 2).split(" ")[0]!;
+    expect(ledger.classOf(id)).toMatchObject({ occurrences: 3, summary: big });
+    expect(ledger.linksOf(id).map((l) => l.ref)).toEqual(["example/demo#1"]);
+    expect(ledger.classOf(created)).toMatchObject({ occurrences: 2, summary: "small part" });
+    expect(ledger.linksOf(created)).toEqual([]);
+    expect(ledger.record(failure(9, small), T0 + 3).classId).toBe(created);
+    expect(ledger.record(failure(10, big), T0 + 3).classId).toBe(id);
+  });
+
+  test("a merge never leaves a live problem reading as ended", () => {
+    const ledger = memory();
+    const closed = ledger.record(failure(1, "SQLiteError: database is locked"), T0).classId;
+    ledger.advance(closed, "fix-installed", { now: T0, reason: "fix merged and installed" });
+    ledger.advance(closed, "verify", { now: T0, reason: "watching the real job" });
+    ledger.advance(closed, "close-with-proof", { now: T0, reason: "done", proof: { subject: "publication", successes: PROOFS.publication.successes, evidence: "launcher-publish events" } });
+    const live = ledger.record(failure(2, "controller lock timeout while claiming", { at: T0 + 50 }), T0).classId;
+    for (let n = 3; n <= 7; n++) ledger.record(failure(n, "controller lock timeout while claiming", { at: T0 + 50 + n }), T0);
+    ledger.needsOperator(live, T0 + 60);
+    operator(ledger, { action: "merge", classId: live, other: closed });
+    // The older id stands, holding the open class's occurrences, and it is live again with the flag the open class carried.
+    expect(ledger.classOf(closed)).toMatchObject({ state: "recurred", occurrences: 7, needsOperatorSince: T0 + 60 });
+    expect(ledger.export(T0 + 100, null).classes).toMatchObject([{ id: closed, state: "recurred", needsOperatorSince: T0 + 60 }]);
+    expect(ledger.transitions().filter((t) => t.classId === closed).map((t) => t.action).slice(-2)).toEqual(["merge", "recur"]);
+
+    // A kind that ends without proof comes back as open; two ended classes stay ended.
+    const ended = ledger.record({ kind: "limit", text: "usage stop", at: T0, source: "rule:limits", ref: "1" }, T0).classId;
+    ledger.advance(ended, "resolve-no-fix", { now: T0, reason: "usage reset" });
+    const hit = ledger.record({ kind: "limit", text: "disk admission refused", at: T0 + 5, source: "rule:limits", ref: "2" }, T0).classId;
+    operator(ledger, { action: "merge", classId: ended, other: hit });
+    expect(ledger.classOf(ended)).toMatchObject({ state: "open", occurrences: 2 });
+    const one = ledger.record(failure(20, "first ended failure"), T0).classId,
+      two = ledger.record(failure(21, "second ended failure", { at: T0 + 90 }), T0).classId;
+    for (const id of [one, two]) operator(ledger, { action: "dismiss", classId: id });
+    operator(ledger, { action: "merge", classId: one, other: two }, T0 + 1);
+    expect(ledger.classOf(one)!.state).toBe("resolved-no-fix");
   });
 
   test("parking always has an expiry, and the class comes back when it passes", () => {
@@ -478,6 +569,143 @@ describe("the ledger job", () => {
     expect(JSON.parse(readFileSync(join(dir, LOOP_FILES.ledgerExport), "utf8")).nightsMissed).toBe(4);
   });
 
+  test("a rule that returns findings with unusable times is recorded against itself, and the export is still written", async () => {
+    const dir = factoryDir(),
+      rules = mkdtempSync(join(tmpdir(), "ledger-rules-"));
+    writeFileSync(join(rules, "bad-times.ts"), `export default { id: "bad-times", run: (input) => [0, 1.5, -5, "abc"].map((at, n) => ({ kind: "failure", text: "some failure words", at, ref: "bad-" + n })).concat([{ kind: "failure", text: "a real failure", at: input.now, ref: "good" }]) };`);
+    const usable = (now: number) => usableLedgerExport(JSON.parse(readFileSync(join(dir, LOOP_FILES.ledgerExport), "utf8")), now);
+    const first = await ingest(dir, { rulesDir: rules, now: () => T0 + MINUTE });
+    expect(first.report).toMatchObject({ ruleErrors: ["bad-times"], occurrences: 2, classesOpened: 2 });
+    expect(first.heartbeat.alarm).toBe("a ledger rule or step failed: bad-times");
+    expect(usable(T0 + MINUTE)?.classes.map((c) => c.id).sort()).toEqual([expect.stringContaining("a-real-failure"), "rule-error-bad-times"]);
+    // With the rule gone the next run is clean: nothing unusable was left behind to break it.
+    const second = await ingest(dir, { now: () => T0 + 6 * MINUTE });
+    expect(second.report.alarm).toBeUndefined();
+    expect(usable(T0 + 6 * MINUTE)?.classes).toHaveLength(2);
+  });
+
+  test("a rule the run had no time left for is not blamed, and is shown the same batch on the next run", async () => {
+    const dir = factoryDir(),
+      rules = mkdtempSync(join(tmpdir(), "ledger-rules-")),
+      steps = mkdtempSync(join(tmpdir(), "ledger-steps-"));
+    writeFileSync(join(steps, "c-step.ts"), `export default { id: "c-step", run: (context) => { context.ledger.setMeta("c-step-ran-at", context.now); } };`);
+    writeFileSync(join(rules, "a-hangs.ts"), `export default { id: "a-hangs", run: () => new Promise(() => {}) };`);
+    writeFileSync(join(rules, "b-good.ts"), `export default { id: "b-good", eventKinds: ["worker-exit"], run: (input) => input.events.map((e) => ({ kind: "failure", text: "worker exited without publishing", at: e.at, ref: e.id })) };`);
+    addEvents(dir, [workerFailure(1, T0), { id: "exit:1", kind: "worker-exit", at: T0 + 1, data: { ok: false } }]);
+    // 20 ms are left when the rules begin; the hanging rule uses them up, and the clock is past the limit once it has been cut off.
+    const start = T0 + MINUTE;
+    let late = false,
+      past = false;
+    const first = await ingest(dir, { startAt: "beginning", rulesDir: rules, stepsDir: steps, now: () => (past ? start + RUN_LIMIT_MS + 1 : late ? start + RUN_LIMIT_MS - 20 : start), betweenBatches: () => void (late = true), log: (line) => void (past ||= line.includes("a-hangs")) });
+    expect(first.report).toMatchObject({ ruleErrors: ["a-hangs"], notRun: ["b-good", "c-step"], stoppedAtLimit: true, occurrences: 2 });
+    expect(first.heartbeat.alarm).toBe("a ledger rule or step failed: a-hangs");
+    expect(reconcile(dir)).toMatchObject({ workerFailures: { source: 1, ledger: 1 }, difference: 0 });
+    // The healthy rule lost nothing: with the hanging one removed it gets the batch it was not reached for.
+    rmSync(join(rules, "a-hangs.ts"));
+    const second = await ingest(dir, { rulesDir: rules, stepsDir: steps, now: () => T0 + 6 * MINUTE });
+    expect(second.report).toMatchObject({ ruleErrors: [], notRun: [], occurrences: 1, classesOpened: 1 });
+    expect(second.heartbeat.alarm).toBeUndefined();
+    const ledger = open(dir);
+    try {
+      expect(ledger.meta<number>("c-step-ran-at")).toBe(T0 + 6 * MINUTE);
+      expect(ledger.classes().map((c) => [c.summary.slice(0, 32), c.occurrences]).sort()).toEqual([["Error: exact tested tree require", 1], ['Ledger rule or step "a-hangs" fa', 1], ["worker exited without publishing", 1]]);
+      expect(ledger.classOf("rule-error-b-good")).toBeNull();
+    } finally {
+      ledger.close();
+    }
+    expect(reconcile(dir).difference).toBe(0);
+  });
+
+  test("a rule that failed sees its batch again, for two more runs at most, and nothing is counted twice", async () => {
+    const dir = factoryDir(),
+      rules = mkdtempSync(join(tmpdir(), "ledger-rules-")),
+      broken = join(rules, "broken-for-now");
+    writeFileSync(join(rules, "flaky.ts"), `import { existsSync } from "node:fs";\nexport default { id: "flaky", eventKinds: ["worker-exit"], run: (input) => { if (existsSync(${JSON.stringify(broken)})) throw Error("not today"); return input.events.map((e) => ({ kind: "failure", text: "worker exited without publishing", at: e.at, ref: e.id })); } };`);
+    const exit = (n: number) => ({ id: `exit:${n}`, kind: "worker-exit", at: T0 + n, data: { ok: false } });
+    const seenByRule = () => {
+      const ledger = open(dir);
+      try {
+        return (ledger.db.query("SELECT source_ref FROM occurrences WHERE source='rule:flaky' ORDER BY source_ref").all() as { source_ref: string }[]).map((row) => row.source_ref);
+      } finally {
+        ledger.close();
+      }
+    };
+    // It throws once. The next run hands it the same events, and the failure the job itself recorded is not counted again.
+    writeFileSync(broken, "");
+    addEvents(dir, [workerFailure(1, T0), exit(1)]);
+    expect((await ingest(dir, { startAt: "beginning", rulesDir: rules, now: () => T0 + MINUTE })).report).toMatchObject({ ruleErrors: ["flaky"], occurrences: 2 });
+    rmSync(broken);
+    expect((await ingest(dir, { rulesDir: rules, now: () => T0 + 6 * MINUTE })).report).toMatchObject({ ruleErrors: [], occurrences: 1 });
+    expect(seenByRule()).toEqual(["exit:1"]);
+    expect(reconcile(dir)).toMatchObject({ workerFailures: { source: 1, ledger: 1 }, difference: 0 });
+
+    // It stays broken. Its batch is kept for two more runs, then the job moves on rather than fall behind for good.
+    writeFileSync(broken, "");
+    for (let run = 0; run <= REPLAY_RUNS; run++) {
+      addEvents(dir, [exit(10 + run)]);
+      expect((await ingest(dir, { rulesDir: rules, now: () => T0 + (11 + 5 * run) * MINUTE })).report.ruleErrors).toEqual(["flaky"]);
+    }
+    rmSync(broken);
+    addEvents(dir, [exit(20)]);
+    await ingest(dir, { rulesDir: rules, now: () => T0 + 30 * MINUTE });
+    expect(seenByRule()).toEqual(["exit:1", "exit:20"]);
+    expect(reconcile(dir).difference).toBe(0);
+  });
+
+  test("a rule file whose import never returns is reported and left out; the others load", async () => {
+    const dir = factoryDir(),
+      rules = mkdtempSync(join(tmpdir(), "ledger-rules-"));
+    writeFileSync(join(rules, "a-never-loads.ts"), `await new Promise(() => {});\nexport default { id: "a-never-loads", run: () => [] };`);
+    writeFileSync(join(rules, "b-loads.ts"), `export default { id: "b-loads", run: (input) => [{ kind: "evidence-gap", text: "the second rule ran", at: input.now, ref: "ran" }] };`);
+    expect(await loadFolder(rules, 50)).toMatchObject({ loaded: [{ id: "b-loads" }], errors: [{ id: "a-never-loads", error: expect.stringContaining("its import had not returned after 50 ms") }] });
+    // In the job the import limit is whatever is left of the run, here 50 ms.
+    let calls = 0;
+    const { report, heartbeat } = await ingest(dir, { rulesDir: rules, now: () => T0 + (calls++ ? RUN_LIMIT_MS - 50 : 0) });
+    expect(report).toMatchObject({ ruleErrors: ["a-never-loads"], notRun: [], occurrences: 2 });
+    expect(heartbeat.alarm).toBe("a ledger rule or step failed: a-never-loads");
+  });
+
+  test("the operating system ends a run that cannot stop itself", async () => {
+    // A stand-in for a rule that blocks without yielding: nothing inside the process can interrupt this loop.
+    const script = join(mkdtempSync(join(tmpdir(), "ledger-blocked-")), "blocked.ts");
+    writeFileSync(script, `import { armHardStop } from ${JSON.stringify(join(repo, "scripts/ledger-ingest.ts"))};\nif (!armHardStop(1)) process.exit(3);\nfor (;;) {}\n`);
+    const began = Date.now();
+    const child = Bun.spawn([process.execPath, script], { env: { PATH: process.env.PATH ?? "", FACTORY_PRIVATE_DIR: factoryDir() }, stdout: "ignore", stderr: "ignore" });
+    await child.exited;
+    expect({ code: child.exitCode, signal: child.signalCode }).toEqual({ code: null, signal: "SIGALRM" });
+    expect(Date.now() - began).toBeLessThan(15_000);
+    // The job arms the same stop at two run limits, which is also when a later run may take over the lock. Run as
+    // its own process on a fixture directory it says nothing on stderr, where it would report a stop it could not arm.
+    expect(HARD_STOP_SECONDS * 1000).toBe(2 * RUN_LIMIT_MS);
+    const dir = factoryDir();
+    appendTick(dir, { at: Date.now(), status: "error", error: "SQLiteError: database is locked" });
+    const job = Bun.spawn([process.execPath, join(repo, "scripts/ledger-ingest.ts")], { env: { PATH: process.env.PATH ?? "", FACTORY_PRIVATE_DIR: dir }, stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(job.stdout).text(), new Response(job.stderr).text(), job.exited]);
+    expect({ code, err }).toEqual({ code: 0, err: "" });
+    expect(JSON.parse(out)).toMatchObject({ occurrences: 0, behindMs: 0, ruleErrors: [], notRun: [], stoppedAtLimit: false });
+    expect(LoopHeartbeatSchema.parse(JSON.parse(readFileSync(join(dir, LOOP_FILES.ledgerHeartbeat), "utf8"))).alarm).toBeUndefined();
+  }, 30_000);
+
+  test("when tick.log is cut short the job starts it again and the reconciliation still balances", async () => {
+    const dir = factoryDir();
+    appendTick(dir, { at: T0, status: "ok", ready: 0 }, { at: T0 + 1, status: "error", error: "SQLiteError: database is locked" });
+    expect((await ingest(dir, { startAt: "beginning", now: () => T0 + MINUTE })).report).toMatchObject({ occurrences: 1 });
+    writeFileSync(join(dir, "tick.log"), "");
+    appendTick(dir, { at: T0 + 2 * MINUTE, status: "error", error: "SQLiteError: database is locked" });
+    expect((await ingest(dir, { now: () => T0 + 6 * MINUTE })).report).toMatchObject({ occurrences: 1, sourceErrors: [] });
+    // Both failed ticks were recorded once each. What the old log held is gone, so the comparison covers the new one.
+    expect(reconcile(dir)).toMatchObject({ tickErrors: { source: 1, ledger: 1, missing: [], restartedAt: T0 + 6 * MINUTE }, difference: 0 });
+    appendTick(dir, { at: T0 + 7 * MINUTE, status: "error", error: "SQLiteError: database is locked" });
+    await ingest(dir, { now: () => T0 + 11 * MINUTE });
+    expect(reconcile(dir)).toMatchObject({ tickErrors: { source: 2, ledger: 2, missing: [] }, difference: 0 });
+    const ledger = open(dir);
+    try {
+      expect((ledger.db.query("SELECT count(*) AS n FROM occurrences WHERE source='tick-error'").get() as { n: number }).n).toBe(3);
+    } finally {
+      ledger.close();
+    }
+  });
+
   test("the repository ships no rule or step file yet, and a missing folder is simply empty", async () => {
     for (const folder of [RULES_DIR, STEPS_DIR]) {
       expect(folder.startsWith(join(repo, "launcher"))).toBe(true);
@@ -557,6 +785,35 @@ describe("the inbox and the operator command", () => {
       expect(ledger.classOf(victim)).toMatchObject({ state: "open", mergedInto: null, parkedUntil: null });
       expect(ledger.transitions(true)).toEqual([]);
       expect((ledger.db.query("SELECT count(*) AS n FROM received WHERE channel='inbox' AND outcome='refused'").get() as { n: number }).n).toBe(8);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  test("records dropped between two runs are applied in the order things happened", async () => {
+    const dir = factoryDir();
+    const base = { version: 1, source: "fixture" },
+      input = "AWS sign-in",
+      release = releaseInputClassId(input);
+    // By file name the evidence sorts before the proof it belongs to, and the issue before the input it is about.
+    drop(dir, { ...base, id: "owed-1", at: T0, type: "proof-owed", proofId: "first-night-ships", what: "A scheduled night ships", dueAt: T0 + 24 * 60 * MINUTE, role: "Release" });
+    drop(dir, { ...base, id: "attached-1", at: T0 + 1, type: "proof-attached", proofId: "first-night-ships", evidence: "release-window-result 2026-11-12", actor: "Release" });
+    drop(dir, { ...base, id: "input-1", at: T0, type: "release-input", classId: release, input, reason: "expired at 23:24", day: "2026-11-10" });
+    drop(dir, { ...base, id: "issue-1", at: T0, type: "issue-link", classId: release, repo: "example/demo", issue: 7 });
+    // Owed again after its evidence arrived: time order decides, so this proof ends up open.
+    drop(dir, { ...base, id: "owed-2", at: T0, type: "proof-owed", proofId: "second-night-ships", what: "The next night ships too", dueAt: T0 + 48 * 60 * MINUTE, role: "Release" });
+    drop(dir, { ...base, id: "attached-2", at: T0 + 1, type: "proof-attached", proofId: "second-night-ships", evidence: "release-window-result 2026-11-13", actor: "Release" });
+    drop(dir, { ...base, id: "owed-3", at: T0 + 2, type: "proof-owed", proofId: "second-night-ships", what: "The next night ships too", dueAt: T0 + 48 * 60 * MINUTE, role: "Release" });
+    const { report, logged } = await ingest(dir, { now: () => T0 + 5 * MINUTE });
+    expect(logged).toEqual([]);
+    expect(report).toMatchObject({ inboxApplied: 7, inboxRefused: 0 });
+    const ledger = open(dir);
+    try {
+      expect(ledger.classOf("first-night-ships")).toMatchObject({ state: "resolved-no-fix", occurrences: 1 });
+      expect(ledger.evidenceOf("first-night-ships").map((e) => e.excerpt)).toEqual(["release-window-result 2026-11-12"]);
+      expect(ledger.classOf(release)).toMatchObject({ state: "ticketed", occurrences: 1 });
+      expect(ledger.linksOf(release).map((l) => l.ref)).toEqual(["example/demo#7"]);
+      expect(ledger.classOf("second-night-ships")).toMatchObject({ state: "open", occurrences: 2 });
     } finally {
       ledger.close();
     }

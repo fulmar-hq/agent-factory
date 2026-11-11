@@ -33,20 +33,26 @@ export function queueOperatorCommand(dir: string, token: string, request: Reduct
   return path;
 }
 
-type Side = { source: number; ledger: number; missing: string[] };
+/** `restartedAt` is set when that source began again (replaced, rotated or cut short): the comparison then covers what came after. */
+type Side = { source: number; ledger: number; missing: string[]; restartedAt: number | null };
 export type Reconciliation = { since: number | null; through: { events: number; tickLogBytes: number }; workerFailures: Side; tickErrors: Side; difference: number };
 /**
  * Compares what the sources hold with what the ledger recorded, for everything
  * the ledger has read since it started. Each worker-failure event and each
- * failed tick must be exactly one occurrence, so `difference` must be 0.
+ * failed tick must be exactly one occurrence, so `difference` must be 0. If a
+ * source began again, what it held before is gone, so that side is compared
+ * from its new beginning with what the ledger recorded from then on.
  * Everything is opened read-only, in bounded batches.
  */
 export function reconcile(dir: string): Reconciliation {
   const ledger = new Ledger(join(dir, LOOP_FILES.ledger), { readonly: true });
   try {
     const held = (source: string, refs: string[]) => new Set((ledger.db.query(`SELECT source_ref FROM occurrences WHERE source=? AND source_ref IN (${refs.map(() => "?").join(",") || "NULL"})`).all(source, ...refs) as { source_ref: string }[]).map((row) => row.source_ref));
-    const count = (source: string) => (ledger.db.query("SELECT count(*) AS n FROM occurrences WHERE source=?").get(source) as { n: number }).n;
-    const side = (source: string): Side => ({ source: 0, ledger: count(source), missing: [] });
+    const count = (source: string, since: number) => (ledger.db.query("SELECT count(*) AS n FROM occurrences WHERE source=? AND ingested_at>=?").get(source, since) as { n: number }).n;
+    const side = (source: string, readAs: string): Side => {
+      const restartedAt = ledger.meta<number>(`restarted-at:${readAs}`);
+      return { source: 0, ledger: count(source, restartedAt ?? 0), missing: [], restartedAt };
+    };
     const check = (into: Side, source: string, refs: string[]) => {
       const found = held(source, refs);
       into.source += refs.length;
@@ -55,7 +61,7 @@ export function reconcile(dir: string): Reconciliation {
     const first = (name: string) => ledger.meta<number>(`first-cursor:${name}`) ?? 0,
       last = (name: string) => ledger.meta<number>(`cursor:${name}`) ?? 0;
 
-    const workerFailures = side("worker-failure");
+    const workerFailures = side("worker-failure", "events");
     for (let at = first("events"); at < last("events"); ) {
       const batch = sourceRows<{ seq: number; id: string }>(join(dir, SOURCE_FILES.controller), "SELECT rowid AS seq,id FROM events WHERE rowid>? AND rowid<=? AND kind='worker-failure' ORDER BY rowid LIMIT 200", [at, last("events")]);
       check(workerFailures, "worker-failure", batch.map((row) => row.id));
@@ -63,7 +69,7 @@ export function reconcile(dir: string): Reconciliation {
       at = batch[batch.length - 1]!.seq;
     }
 
-    const tickErrors = side("tick-error"),
+    const tickErrors = side("tick-error", "tick-log"),
       log = join(dir, "tick.log"),
       end = last("tick-log");
     if (existsSync(log) && end > first("tick-log")) {

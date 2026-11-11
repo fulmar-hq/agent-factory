@@ -14,8 +14,11 @@ import { z } from "zod";
 import { NORMALISER, classIdFor, sampleOf, signatureOf, type Normaliser } from "./fingerprint";
 import {
   CLASS_ID,
+  CLASS_KINDS,
   COUNTED_ONLY_KINDS,
+  FIX_HOMES,
   LedgerExportSchema,
+  OWNER_ROLES,
   PROOF_SUBJECTS,
   REDUCING_TRANSITIONS,
   isHumanOnlyStep,
@@ -29,7 +32,7 @@ import {
   type OwnerRole,
   type ProofSubject,
 } from "./loop-contract";
-import { loopActing, type LoopFlags, type LoopSwitch } from "./loop-flags";
+import { LOOP_SWITCH_NAMES, loopActing, type LoopFlags, type LoopSwitch } from "./loop-flags";
 
 const DAY_MS = 86_400_000;
 export const EXCERPT_BYTES = 4096;
@@ -38,6 +41,8 @@ export const EXCERPTS_PER_CLASS = 20;
 export const MAX_PARK_MS = 30 * DAY_MS;
 /** Where the operator command drops its signed requests. Only the ledger job reads them. */
 export const LEDGER_COMMANDS_DIR = "health/ledger-commands";
+/** A rule or step file whose import has not returned after this long is reported and left out of the run. */
+export const LOAD_LIMIT_MS = 10_000;
 /**
  * Repository paths that go on protected_paths before the ledger job is ever
  * loaded. The two folders are imported into an unsandboxed job, so no
@@ -85,7 +90,10 @@ export type Finding = {
   at: number;
   source: string;
   ref: string;
-  /** A class id to use if this signature has never been seen (a release input, a declared proof). */
+  /**
+   * Names the class outright (a release input, a declared proof, a rule's own error). The finding is filed
+   * under this id whatever its text says, so two names that differ only by a number or a date stay two classes.
+   */
   classId?: string;
   fixLivesIn?: FixHome;
   /** For a release input: lets the contract decide the owner. */
@@ -96,6 +104,26 @@ export type Finding = {
   dueAt?: number;
   evidence?: { ref: string; excerpt?: string };
 };
+const when = z.number().int().positive();
+/** Checked before anything is stored: one unusable finding is refused by itself and can never spoil the export. */
+const FindingSchema = z.object({
+  kind: z.enum(CLASS_KINDS),
+  text: z.string(),
+  summary: z.string().optional(),
+  at: when,
+  source: z.string().min(1),
+  ref: z.string().min(1),
+  classId: z.string().regex(CLASS_ID).optional(),
+  fixLivesIn: z.enum(FIX_HOMES).optional(),
+  releaseInput: z.object({ input: z.string(), reason: z.string() }).optional(),
+  proofRole: z.enum(OWNER_ROLES).optional(),
+  switch: z.enum(LOOP_SWITCH_NAMES).nullish(),
+  dueAt: when.optional(),
+  evidence: z.object({ ref: z.string(), excerpt: z.string().optional() }).optional(),
+});
+/** Signatures given by class id are made by no normaliser: they sit under this version and are never re-mapped. */
+const NAMED = -1;
+const ended = (state: ClassState) => state === "closed-with-proof" || state === "resolved-no-fix";
 export type Recorded = { classId: string; created: boolean; duplicate: boolean; reopened: boolean; fallback: boolean };
 
 // The transitions that add. Any rule, step or inbox record may cause these.
@@ -200,7 +228,7 @@ export const RULES_DIR = join(import.meta.dir, "rules");
 export const STEPS_DIR = join(import.meta.dir, "ledger-steps");
 const MODULE_ID = /^[a-z0-9][a-z0-9-]{0,40}$/;
 /** Loads every .ts file in a folder, in name order. A file that fails to load is reported, never fatal. */
-export async function loadFolder<T extends { id: string; run: unknown }>(dir: string): Promise<{ loaded: T[]; errors: { id: string; error: string }[] }> {
+export async function loadFolder<T extends { id: string; run: unknown }>(dir: string, limitMs = LOAD_LIMIT_MS): Promise<{ loaded: T[]; errors: { id: string; error: string }[] }> {
   let files: string[];
   try {
     files = readdirSync(dir).filter((name) => /^[a-z0-9][a-z0-9-]*\.ts$/.test(name)).sort();
@@ -210,13 +238,18 @@ export async function loadFolder<T extends { id: string; run: unknown }>(dir: st
   const loaded: T[] = [], errors: { id: string; error: string }[] = [];
   for (const file of files) {
     const id = file.slice(0, -3).slice(0, 41);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const found = (await import(join(dir, file))).default as T | undefined;
+      // An import that never returns (a top-level await on something that never happens) must not hold the run.
+      const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(Error(`its import had not returned after ${limitMs} ms`)), limitMs)));
+      const found = (await Promise.race([import(join(dir, file)), late])).default as T | undefined;
       if (!found || typeof found.id !== "string" || !MODULE_ID.test(found.id) || typeof found.run !== "function") throw Error("default export must be { id, run }");
       if (loaded.some((other) => other.id === found.id)) throw Error(`duplicate id "${found.id}"`);
       loaded.push(found);
     } catch (error) {
       errors.push({ id, error: `${file} did not load: ${String(error)}` });
+    } finally {
+      clearTimeout(timer);
     }
   }
   return { loaded, errors };
@@ -266,6 +299,7 @@ export class Ledger {
 
   constructor(path: string, options: { readonly?: boolean; normaliser?: Normaliser } = {}) {
     this.normaliser = options.normaliser ?? NORMALISER;
+    if (!(this.normaliser.version >= 0)) throw Error("a normaliser version is never negative");
     if (options.readonly) {
       this.db = new Database(path, { readonly: true, strict: true });
       this.db.exec("PRAGMA busy_timeout=1000");
@@ -330,17 +364,20 @@ export class Ledger {
   /** Records one occurrence. A new signature opens a class with a stable id; a known one counts against its class. */
   record(f: Finding, now: number): Recorded {
     return this.atomic(() => {
+      const usable = FindingSchema.safeParse(f);
+      if (!usable.success) throw Error(`refused: not a usable finding (${usable.error.issues[0]?.path.join(".") || "shape"})`);
       const seen = this.db.query("SELECT class_id FROM occurrences WHERE source=? AND source_ref=?").get(f.source, f.ref) as { class_id: string } | null;
       if (seen) return { classId: seen.class_id, created: false, duplicate: true, reopened: false, fallback: false };
-      const sig = signatureOf(f.text, this.normaliser);
+      const named = f.classId ? this.classOf(f.classId) : null;
+      if (named && named.kind !== f.kind) throw Error(`refused: ${f.classId} already names a ${named.kind} class`);
+      const sig = f.classId ? { signature: `id:${f.classId}`, version: NAMED, fallback: false } : signatureOf(f.text, this.normaliser);
       if (sig.fallback) this.fallbacks++;
       const mapped = this.db.query("SELECT class_id FROM signatures WHERE normaliser_version=? AND signature=?").get(sig.version, sig.signature) as { class_id: string } | null;
       let id = mapped?.class_id,
         created = false;
       if (!id) {
         id = f.classId ?? this.unusedId(classIdFor(sig.signature));
-        if (!CLASS_ID.test(id)) throw Error(`not a class id: ${id}`);
-        if (!this.classOf(id)) {
+        if (!named) {
           const governed = f.switch ?? null;
           this.db
             .query("INSERT INTO classes(id,kind,state,summary,owner_role,fix_lives_in,switch,shadow,first_seen_at,last_seen_at,due_at) VALUES(?,?,'open',?,?,?,?,?,?,?,?)")
@@ -356,7 +393,7 @@ export class Ledger {
       this.db.query("UPDATE classes SET occurrences=occurrences+1,first_seen_at=min(first_seen_at,?),last_seen_at=max(last_seen_at,?) WHERE id=?").run(f.at, f.at, row.id);
       // A class that had ended and is seen again is open again. Nobody has to notice.
       let reopened = false;
-      if (!created && (row.state === "closed-with-proof" || row.state === "resolved-no-fix")) {
+      if (!created && ended(row.state)) {
         const again = PROOF_SUBJECTS[row.kind].length ? "recur" : "reopen";
         this.advance(row.id, again, { now, reason: `seen again from ${f.source}` });
         reopened = true;
@@ -382,6 +419,7 @@ export class Ledger {
     return this.db.query("INSERT OR IGNORE INTO links VALUES(?,?,?,?,?)").run(this.standing(id).id, type, ref, at, actor ?? null).changes === 1;
   }
   needsOperator(id: string, since: number) {
+    if (!Number.isSafeInteger(since) || since <= 0) throw Error("refused: needs-operator needs the time it began");
     this.db.query("UPDATE classes SET needs_operator_since=coalesce(needs_operator_since,?) WHERE id=?").run(since, this.standing(id).id);
   }
   /** One adding transition. It refuses a move the state does not allow, and anything that treats a limit as a defect. */
@@ -408,10 +446,9 @@ export class Ledger {
         humanStep = detail.human.step;
         dueAt = detail.human.dueAt ?? dueAt;
       }
-      const ended = move.to === "closed-with-proof" || move.to === "resolved-no-fix";
       this.db
         .query("UPDATE classes SET state=?,parked_until=?,parked_reason=?,human_step=?,due_at=?,needs_operator_since=CASE WHEN ? THEN NULL ELSE needs_operator_since END WHERE id=?")
-        .run(move.to, parkedUntil, parkedUntil ? detail.reason : null, humanStep, dueAt, ended ? 1 : 0, row.id);
+        .run(move.to, parkedUntil, parkedUntil ? detail.reason : null, humanStep, dueAt, ended(move.to) ? 1 : 0, row.id);
       this.note(row.id, detail.now, action, row.state, move.to, detail.proof ? `${detail.reason} (${detail.proof.successes} successes: ${detail.proof.evidence})` : detail.reason);
       return this.classOf(row.id)!;
     });
@@ -437,6 +474,7 @@ export class Ledger {
    */
   remapSignatures(next: Normaliser, now: number): { remapped: number; conflicts: number } {
     return this.atomic(() => {
+      if (!(next.version >= 0)) throw Error("a normaliser version is never negative");
       const from = this.meta<number>("normaliser-version") ?? this.normaliser.version;
       let remapped = 0,
         conflicts = 0;
@@ -476,11 +514,8 @@ export class Ledger {
       else if (r.type === "drill-result") {
         if (r.classId) this.addEvidence(r.classId, r.at, evidenceRef, `drill ${r.drill} ${r.ok ? "passed" : "failed"}: ${r.evidence}`);
         if (!r.ok) this.record({ ...base, kind: "safeguard-not-proven", text: `drill ${r.drill} failed`, summary: `Drill "${r.drill}" did not pass`, evidence: { ref: evidenceRef, excerpt: r.evidence } }, now);
-      } else if (r.type === "proof-owed") {
-        const held = this.classOf(r.proofId);
-        if (held && held.kind !== "proof-owed") throw Error(`refused: ${r.proofId} already names a ${held.kind} class`);
-        this.record({ ...base, kind: "proof-owed", text: `proof owed ${r.proofId}`, summary: r.what, classId: r.proofId, proofRole: r.role, dueAt: r.dueAt }, now);
-      } else if (r.type === "proof-attached") {
+      } else if (r.type === "proof-owed") this.record({ ...base, kind: "proof-owed", text: `proof owed ${r.proofId}`, summary: r.what, classId: r.proofId, proofRole: r.role, dueAt: r.dueAt }, now);
+      else if (r.type === "proof-attached") {
         const row = this.standing(r.proofId);
         if (row.kind !== "proof-owed") throw Error(`refused: ${r.proofId} is not a proof still owed`);
         this.addEvidence(row.id, r.at, evidenceRef, r.evidence);
@@ -505,20 +540,23 @@ export class Ledger {
       if (c.action === "merge") return this.merge(row, c, now);
       if (c.action === "split") return this.split(row, c, now);
       if (c.action === "dismiss") {
-        if (row.state === "resolved-no-fix" || row.state === "closed-with-proof") throw Error(`${row.id} has already ended`);
+        if (ended(row.state)) throw Error(`${row.id} has already ended`);
         this.db.query("UPDATE classes SET state='resolved-no-fix',parked_until=NULL,parked_reason=NULL,human_step=NULL,needs_operator_since=NULL WHERE id=?").run(row.id);
         this.note(row.id, now, "dismiss", row.state, "resolved-no-fix", c.reason, c.actor);
         return `${row.id} dismissed`;
       }
       // defer and accept-risk both park the class, with an expiry.
       if (!c.until || c.until <= now || c.until - now > MAX_PARK_MS) throw Error("parking needs an expiry within 30 days");
-      if (row.state === "resolved-no-fix" || row.state === "closed-with-proof") throw Error(`${row.id} has already ended`);
+      if (ended(row.state)) throw Error(`${row.id} has already ended`);
       this.db.query("UPDATE classes SET state='deferred',parked_until=?,parked_reason=?,human_step=NULL WHERE id=?").run(c.until, `${c.action}: ${c.reason}`, row.id);
       this.note(row.id, now, c.action, row.state, "deferred", c.reason, c.actor);
       return `${row.id} parked until ${new Date(c.until).toISOString()}`;
     });
   }
-  /** The older class keeps its id. The newer one stays on file, pointing at it. */
+  /**
+   * The older class keeps its id. The newer one stays on file, pointing at it. If the older had ended and the
+   * newer had not, the class that stands is live again: a merge never makes a live problem read as ended.
+   */
   private merge(a: RawClass, c: OperatorCommand, now: number): string {
     if (!c.other) throw Error("merge needs the other class");
     const b = this.standing(c.other);
@@ -527,19 +565,23 @@ export class Ledger {
     const [keep, gone] = a.first_seen_at < b.first_seen_at || (a.first_seen_at === b.first_seen_at && a.id < b.id) ? [a, b] : [b, a];
     for (const table of ["signatures", "occurrences", "evidence"]) this.db.query(`UPDATE ${table} SET class_id=? WHERE class_id=?`).run(keep.id, gone.id);
     this.db.query("INSERT OR IGNORE INTO links SELECT ?,type,ref,at,actor FROM links WHERE class_id=?").run(keep.id, gone.id);
-    this.db.query("UPDATE classes SET occurrences=occurrences+?,last_seen_at=max(last_seen_at,?) WHERE id=?").run(gone.occurrences, gone.last_seen_at, keep.id);
+    this.db
+      .query("UPDATE classes SET occurrences=occurrences+?1,last_seen_at=max(last_seen_at,?2),needs_operator_since=coalesce(min(needs_operator_since,?3),needs_operator_since,?3) WHERE id=?4")
+      .run(gone.occurrences, gone.last_seen_at, gone.needs_operator_since, keep.id);
     this.db.query("UPDATE classes SET merged_into=?,state='resolved-no-fix',occurrences=0,parked_until=NULL,parked_reason=NULL,needs_operator_since=NULL WHERE id=?").run(keep.id, gone.id);
     this.note(gone.id, now, "merge", gone.state, "resolved-no-fix", `merged into ${keep.id}: ${c.reason}`, c.actor);
     this.note(keep.id, now, "merge", keep.state, keep.state, `took in ${gone.id}: ${c.reason}`, c.actor);
+    if (ended(keep.state) && !ended(gone.state)) this.advance(keep.id, PROOF_SUBJECTS[keep.kind].length ? "recur" : "reopen", { now, reason: `took in ${gone.id}, which had not ended` });
     return `${gone.id} merged into ${keep.id}`;
   }
   /** The part with more occurrences keeps the id, with its links. The other part becomes a new class. */
   private split(row: RawClass, c: OperatorCommand, now: number): string {
     if (!c.signatures?.length || !c.summary) throw Error("split needs the signatures to move and a summary for them");
-    const all = this.db.query("SELECT normaliser_version AS version,signature,(SELECT count(*) FROM occurrences o WHERE o.class_id=s.class_id AND o.signature=s.signature) AS n FROM signatures s WHERE class_id=?").all(row.id) as { version: number; signature: string; n: number }[];
+    // One row per signature text: after a retune the same text is on file under two normaliser versions, and its occurrences count once.
+    const all = this.db.query("SELECT signature,(SELECT count(*) FROM occurrences o WHERE o.class_id=?1 AND o.signature=s.signature) AS n FROM signatures s WHERE class_id=?1 GROUP BY signature").all(row.id) as { signature: string; n: number }[];
     const named = all.filter((s) => c.signatures!.includes(s.signature)),
       rest = all.filter((s) => !c.signatures!.includes(s.signature));
-    if (named.length === 0 || [...new Set(named.map((s) => s.signature))].length !== c.signatures.length) throw Error("split names a signature this class does not have");
+    if (named.length !== new Set(c.signatures).size) throw Error("split names a signature this class does not have");
     if (!rest.length) throw Error("split must leave at least one signature behind");
     const count = (part: typeof all) => part.reduce((sum, s) => sum + s.n, 0);
     const namedKeepsId = count(named) > count(rest),
