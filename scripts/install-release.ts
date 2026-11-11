@@ -1,8 +1,9 @@
+import {jobEnvironment,missingExecutables} from '../launcher/job-environment';
 import {mkdirSync,existsSync,copyFileSync,writeFileSync,renameSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {realpathSync} from 'node:fs';
 import {assertReleaseInstallQuiescent} from '../launcher/release-install-quiescence';
-import {releasePath,releaseTools,rebindReleaseJob} from '../launcher/release-install';
+import {rebindReleaseJob} from '../launcher/release-install';
 import {homedir} from 'node:os';
 import {root} from '../launcher/config';
 import {processIdentity} from '../launcher/process';
@@ -14,12 +15,16 @@ const install=process.argv.includes('--install');
 const repositories=await Bun.file(join(root,'repositories.json')).json();
 const repo=realpathSync(repositories['fulmar-hq/agent-factory']);
 if((await command(['git','branch','--show-current'],repo)).trim()!=='main'||(await command(['git','status','--porcelain'],repo)).trim()||!(await command(['git','remote','get-url','origin'],repo)).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('clean registered factory main required');
-const pathEnv=releasePath(homedir(),process.execPath);
-const missing=releaseTools.filter(tool=>!Bun.which(tool,{PATH:pathEnv}));if(missing.length)throw Error(`release tools missing from scheduled PATH: ${missing.join(', ')}`);
+const environment=jobEnvironment(homedir(),process.execPath,root),pathEnv=environment.PATH;
+// Definition preparation is portable and starts no jobs. Actual installation
+// must prove both PATH names and fixed Mac interpreter paths on the target.
+if(install){const missing=missingExecutables(pathEnv);if(missing.length)throw Error(`release tools missing from scheduled PATH: ${missing.join(', ')}`);}
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null],['rehearsal-early',14,0],['rehearsal-late',17,40]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
-const identity=processIdentity(process.pid);if(!identity)throw Error('installer process identity unavailable');
+// Preparation starts no job/process and keeps an exclusive filesystem claim.
+// Only effect-bearing installation requires native process-identity proof.
+const identity=install?processIdentity(process.pid):undefined;if(install&&!identity)throw Error('installer process identity unavailable');
 const lock=join(root,'release-install-active');mkdirSync(lock,{mode:0o700});writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,identity,at:Date.now(),repo,install}),{mode:0o600});
 try{
 for(const [stage,hour,minute] of jobs){
