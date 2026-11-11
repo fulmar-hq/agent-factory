@@ -341,7 +341,7 @@ fresh-read checks remain unchanged. PR #190 is not required or installed.
 The 30-second release reconciler retains one plain incident summary per night
 after a refused window, failed release effect, or a scheduled job absent after
 its fixed minute. It names the input and the earliest recorded time it was
-knowable, using retained 14:00/17:40/19:00 observations. With no earlier evidence,
+knowable, using retained 14:00/17:40/19:00 observations and admitted pause events. With no earlier evidence,
 it explicitly uses the first recorded refusal or the missed-minute boundary;
 it never invents an earlier observation. Full reasons remain in the incident.
 

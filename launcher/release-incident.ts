@@ -36,7 +36,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
  const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
- const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else first=undefined;}return first;};
+ const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else if(!r.missing.some(g=>['release configuration','preflight checks'].includes(g.input)))first=undefined;}return first;};
  const knownPause=(until:number)=>{const row=s.db.query("SELECT at FROM events WHERE kind='pause' AND at<=? AND rowid>COALESCE((SELECT MAX(rowid) FROM events WHERE kind='resume' AND at<=?),0) ORDER BY rowid LIMIT 1").get(until,until) as {at:number}|null;return row?.at;};
  const knownInput=(input:string,reason:string,until:number)=>{const report=firstCurrentGap(input,until),pause=input==='factory state'&&/paused/i.test(reason)?knownPause(until):undefined;return Math.min(report??until,pause??until);};
  for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}

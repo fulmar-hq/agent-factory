@@ -47,3 +47,7 @@ test('an outbox failure on an older night cannot suppress recording the other mi
 test('the Monday pause is first knowable when set at 20:45, not when Production refuses at 21:30',()=>{
  const s=new Store(':memory:'),day='2026-11-09';try{report(s,day,'14:00',[{input:'fresh billing',reason:'wallet billing unknown'}]);report(s,day,'19:00',[{input:'fresh billing',reason:'wallet billing unknown'}],'release-readiness');s.event('evening-pause','pause',{owner:'Platform'},'fixture',at(day,'20:45'));s.event('production-refused','release-executor',{day,kind:'refused:factory paused',data:{reason:'factory paused'}},'fixture',at(day,'21:30'));releaseIncident(s,day,at(day,'21:31'),id=>({id,queued:true}));const incident=s.get<any>('release-incident:'+day);expect(incident.gaps.find((g:any)=>g.input==='factory state').knownBy).toBe(at(day,'20:45'));expect(incident.body).toContain('20:45');}finally{s.close();}
 });
+
+test('an incomplete configuration report cannot erase earlier knowledge of an unresolved input',()=>{
+ const s=new Store(':memory:'),day='2026-11-11';try{report(s,day,'14:00',[{input:'fresh billing',reason:'stale'}]);report(s,day,'17:40',[{input:'release configuration',reason:'config could not be read'}]);report(s,day,'19:00',[{input:'fresh billing',reason:'still stale'}],'release-readiness');releaseIncident(s,day,at(day,'19:01'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps[0].knownBy).toBe(at(day,'14:00'));}finally{s.close();}
+});
