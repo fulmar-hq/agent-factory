@@ -1,3 +1,4 @@
+import {watchReleasePause} from '../launcher/release-pause';
 import {recordRehearsal} from '../launcher/release-rehearsal';
 import {withReleaseAuth} from '../launcher/release-auth';
 import {readFileSync} from 'node:fs';
@@ -104,6 +105,7 @@ try {
  console.error(String(error));process.exitCode=1;
 }finally{
  if(stage==='reconcile')try{
+  watchReleasePause(s,root);
   await releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))});
  }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
  s.close();

@@ -1,3 +1,4 @@
+import {pauseOwner} from '../launcher/release-pause';
 import { prepareDelivery } from "../adapters/delivery";
 import { calibrateTokens } from "../launcher/budgets";
 import { spawnSupervisor } from "../launcher/tick";
@@ -24,7 +25,7 @@ const s = new Store(join(root, "controller.sqlite")),
 try {
   const [action, ...args] = process.argv.slice(2);
   if (action === "pause" || action === "resume")
-    e.pause(action === "pause", "owner");
+    e.pause(action === "pause", "owner",pauseOwner(args[0]));
   else if(action==="register-owner") {
     const [owner,path,nativeArg,pidArg,receipt]=args;
     const role=e.c.owners[owner],native=nativeArg==="new" ? undefined : nativeArg;

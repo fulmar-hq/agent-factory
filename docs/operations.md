@@ -298,3 +298,20 @@ Rehearsals grant no exception to gates, holds, spending or release times.
 Install both rehearsal jobs after review, archive prior plists and read back
 loaded arguments/environment. Undo with reviewed source and archived plists;
 retain reports, billing imports and outbox receipts.
+
+### Pauses during the release window
+
+On a day with a valid accepted current-day batch, any pause active or set during
+**17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
+and the accountable pausing role. The authenticated pause control sends directly;
+the 30-second release reconciler catches an earlier pause at freeze start and
+retries retained episode IDs after mail failures. Each new pause episode can
+alert again. Rehearsals also report an active pause as a readiness gap. Nothing
+lifts a pause automatically or permits a late release.
+
+`control.ts pause Platform|Release|Quality|Coordinator` and the authenticated
+board's optional `owner` field record the accountable role. Generic and legacy
+owner-token controls belong to Coordinator for escalation; their actual caller
+is explicitly unrecorded and is never represented as a verified human identity.
+A missing owner does not prevent the safety pause. Coordinator identifies and
+contacts the original pausing owner when legacy provenance is incomplete.

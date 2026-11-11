@@ -1,3 +1,4 @@
+import {pauseOwner} from '../launcher/release-pause';
 import { refreshPulls } from "./pulls";
 import { claudeReading } from "../adapters/usage";
 import { boardEvidence } from "./runtime";
@@ -66,7 +67,7 @@ export async function board(dir = root, port = 4318) {
             url.pathname === "/api/pause" &&
             typeof body.paused === "boolean"
           ) {
-            e.pause(body.paused, "owner");
+            e.pause(body.paused, "owner",pauseOwner(body.owner));
             return json({ paused: body.paused });
           }
           if (
