@@ -1,4 +1,5 @@
-import { githubPages } from './github-pages';
+import {githubBudget,GitHubUnavailable,retryAtFor,recordGithubHttp,githubDiagnostic,githubTransportFailure,githubRateLimited} from './github-budget';
+import { githubPages,openIssuePages,restIssue } from './github-pages';
 import { createHash, randomUUID } from "node:crypto";
 import { TicketSchema, type Config, type Ticket } from "../launcher/config";
 import { Store } from "../tracking/store";
@@ -12,10 +13,10 @@ export type Issue = {
   state: string;
   labels: { name: string }[];
 };
-export async function command(args: string[], cwd?: string, timeoutMs=30000) {
+async function rawCommand(args: string[], cwd?: string, timeoutMs=30000) {
   const p = Bun.spawn(args, {
     cwd,
-    env: process.env,
+    env: args[0]==='gh' ? {...process.env,GH_DEBUG:"api"} : process.env,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
@@ -28,10 +29,33 @@ export async function command(args: string[], cwd?: string, timeoutMs=30000) {
       new Response(p.stderr).text(),
       p.exited,
     ]);
-    if (code !== 0) throw Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${err.slice(0, 500)}`);
+    if(args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??''))recordGithubHttp(err,out);
+    const diagnostic=args[0]==='gh' ? githubDiagnostic(err) : err;
+    if (code !== 0) {
+      const error=Error(`${args[0]} ${timedOut ? `timed out after ${timeoutMs}ms` : `failed (exit ${code})`}: ${diagnostic.slice(-500)}`);
+      // Classify the raw diagnostic in memory before removing debug bodies.
+      // gh's ordinary offline error has no "error:" prefix.
+      if(args[0]==='gh')Object.assign(error,{githubUnavailable:timedOut || githubTransportFailure(err),rateLimited:githubRateLimited(err)});
+      throw error;
+    }
     return out;
   } finally {
     clearTimeout(timer);
+  }
+}
+export async function command(args:string[],cwd?:string,timeoutMs=30000) {
+  const api=args[0]==='gh' && ['api','issue','pr','label','search'].includes(args[1]??'') && !args.includes('rate_limit');
+  if(api)githubBudget('before',args);
+  try{return await rawCommand(args,cwd,timeoutMs);}
+  catch(error){
+    const failure=error as Error & {githubUnavailable?:boolean;rateLimited?:boolean};
+    if(api && (failure.githubUnavailable || githubTransportFailure(error))){
+      let resets:Parameters<typeof retryAtFor>[2];
+      if(failure.rateLimited || githubRateLimited(error))try{resets=JSON.parse(await rawCommand(['gh','api','rate_limit'],undefined,10000));}catch{}
+      const retryAt=retryAtFor(failure.rateLimited?'rate limit':error,Date.now(),resets);githubBudget('failure',args,error,retryAt);
+      throw new GitHubUnavailable(String(error),retryAt);
+    }
+    throw error;
   }
 }
 export function intakeLabel(repo: string, i: Issue): string {
@@ -76,11 +100,27 @@ export async function reconcile(
   c: Config,
   now = Date.now(),
   execute = command,
+  scope:'all'|'open'='all',
 ) {
   const ready: Ticket[] = [];
   for (const project of Object.values(c.projects)) {
     try {
-      const issues = await githubPages(project.repo,'issues',execute) as Issue[];
+      const deadline=Date.now()+120000;
+      const issues = await (scope==='open'?openIssuePages(project.repo,execute):githubPages(project.repo,'issues',execute)) as Issue[];
+      const count=issues.length;
+      if(scope==='open') {
+        const open=new Set(issues.map(i=>i.number));
+        for(const row of s.db.query('SELECT id,snapshot FROM tickets WHERE substr(id,1,?)=?').all(project.repo.length+1,project.repo+'#') as {id:string;snapshot:string}[]) {
+          const old=JSON.parse(row.snapshot) as Issue;
+          if(old.state!=='OPEN'||open.has(old.number))continue;
+          // REST offset pages can shift while a different issue closes. Absence
+          // is not closure evidence. Stage fresh exact-identity closure proof.
+          if(Date.now()>=deadline)throw Error('GitHub inventory closure deadline exceeded');
+          const closed=restIssue(project.repo,JSON.parse(await execute(['gh','api',`repos/${project.repo}/issues/${old.number}`],undefined,Math.max(1,deadline-Date.now()))));
+          if(closed.number!==old.number || closed.state!=='CLOSED')throw Error('GitHub open inventory changed; retain snapshots and retry');
+          issues.push(closed);
+        }
+      }
       const repositoryReady:Ticket[]=[];
       s.atomic(() => {
         for (const i of issues) {
@@ -107,14 +147,14 @@ export async function reconcile(
         }
         s.set(`github:${project.repo}`, {
           observedAt: now,
-          count: issues.length,
+          count,
           truncated: false,
           error: null,
         });
       });
       ready.push(...repositoryReady);
     } catch (e) {
-      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now });}
+      try{s.set(`github:${project.repo}`, { error: String(e), observedAt: now, retryAt:e instanceof GitHubUnavailable?e.retryAt:now+60000 });}
       catch{console.error(`GitHub failure receipt unavailable for ${project.repo}; candidates remain refused.`);}
     }
   }

@@ -107,11 +107,13 @@ test("calibration freezes effective estimate; continuation preserves all origina
 
 test("publisher fails closed without native isolation and checks claim before importing",async()=>{
  const {publish}=await import("../adapters/delivery");
+ const {mkdtempSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const fixture=mkdtempSync(join(tmpdir(),"publisher-admission-")),source=join(fixture,"source"),runs=join(fixture,"runs"),seeds=join(runs,"source-seeds");
  let calls=0;
  const exec=async()=>{calls++;return "";};
  const t={...ticket(),repo:"fulmar-hq/alido"};
- await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:false,verifyClaim:()=>{},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("isolation unproven");
- await expect(publish(t,"a".repeat(64),"/unused","/unused","b".repeat(40),{isolationVerified:true,verifyClaim:()=>{throw Error("claim refused");},testTree:async()=>({passed:true,tree:""})},exec)).rejects.toThrow("claim refused");
+ await expect(publish(t,"a".repeat(64),source,join(runs,"isolation"),"b".repeat(40),{isolationVerified:false,verifyClaim:()=>{},testTree:async()=>({passed:true,tree:""})},exec,source,seeds)).rejects.toThrow("isolation unproven");
+ await expect(publish(t,"a".repeat(64),source,join(runs,"claim"),"b".repeat(40),{isolationVerified:true,verifyClaim:()=>{throw Error("claim refused");},testTree:async()=>({passed:true,tree:""})},exec,source,seeds)).rejects.toThrow("claim refused");
  expect(calls).toBe(0);
 });
 
@@ -126,7 +128,9 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  await git("worktree","add","-b",branchFor(id),work,"HEAD");
  writeFileSync(join(work,"fixture"),"preserved edit");writeFileSync(join(work,"untracked"),"preserved new file");
  const before=await command(["git","-C",work,"diff","--binary"]),head=(await git("rev-parse","HEAD")).trim();
- await prepareDelivery(work,source,join(dir,"archive"),id);
+ let baseline:unknown;
+ const pinnedFingerprint=await prepareDelivery(work,source,join(dir,"archive"),id,undefined,undefined,manifest=>{baseline=manifest;});
+ expect(baseline).toMatchObject({version:1,fingerprint:pinnedFingerprint,entries:{fixture:{kind:"file",executable:false}}});
  expect(await command(["git","-C",work,"diff","--binary"])).toBe(before);
  expect(readFileSync(join(work,"untracked"),"utf8")).toBe("preserved new file");
  expect((await command(["git","-C",work,"rev-parse","HEAD"])).trim()).toBe(head);
@@ -135,6 +139,38 @@ test("delivery setup preserves edits and isolates Git metadata and dependencies"
  expect(readFileSync(join(source,"node_modules/fixture"),"utf8")).toBe("original dependency");
  expect(realpathSync(join(work,"node_modules/node_modules"))).toBe(realpathSync(join(work,"node_modules")));
  expect(readFileSync(join(dir,"archive/original-gitfile"),"utf8")).toContain("gitdir:");
+ const {existsSync,readdirSync}=await import('node:fs');
+ expect(existsSync(join(dir,'archive/local-clone/fixture'))).toBe(false);
+ mkdirSync(join(work,'.factory-tmp'),{recursive:true});
+ writeFileSync(join(work,'node_modules/fixture'),'original dependency');
+ const fingerprint=pinnedFingerprint;
+ writeFileSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'),JSON.stringify({dependencyFingerprint:fingerprint}));
+ writeFileSync(join(work,'node_modules/result.log'),'retained evidence');
+ writeFileSync(join(source,'node_modules/fixture'),'different canonical installation');
+ await expect(prepareDelivery(work,source,join(dir,'archive'),id,undefined,pinnedFingerprint)).rejects.toThrow('pinned dependency installation changed');
+ expect(existsSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'))).toBe(true);
+ writeFileSync(join(source,'node_modules/fixture'),'original dependency');
+ await prepareDelivery(work,source,join(dir,'archive'),id,undefined,pinnedFingerprint);
+ expect(readFileSync(join(work,'node_modules/fixture'),'utf8')).toBe('original dependency');
+ const preserved=readdirSync(join(dir,'archive')).find(p=>p.startsWith('dependency-evidence-'))!;
+ expect(readFileSync(join(dir,'archive',preserved,'result.log'),'utf8')).toBe('retained evidence');
+ expect(readFileSync(join(work,'fixture'),'utf8')).toBe('preserved edit');
+ expect(existsSync(join(work,'.factory-tmp/dependencies-evicted.jsonl'))).toBe(false);
+ // Upgrade a dormant parent that already committed before a browser handoff:
+ // the incremental bundle must retain those commits after its original base.
+ await command(['git','-C',work,'add','fixture']);
+ await command(['git','-C',work,'-c','commit.gpgsign=false','commit','-m','retained parent commit']);
+ await command(['git','-C',work,'update-ref','-d','refs/factory/base']);
+ const {chmodSync}=await import('node:fs');
+ const hooks=join(work,'.git/hooks');mkdirSync(hooks,{recursive:true});
+ writeFileSync(join(hooks,'reference-transaction'),'#!/bin/sh\nexit 91\n');chmodSync(join(hooks,'reference-transaction'),0o755);
+ await command(['git','-C',work,'config','core.hooksPath',hooks]);
+
+ await prepareDelivery(work,source,join(dir,'archive'),id,head,pinnedFingerprint);
+ expect((await command(['git','-C',work,'rev-parse','refs/factory/base'])).trim()).toBe(head);
+ await command(['git','-C',work,'bundle','create',join(dir,'incremental.bundle'),'HEAD','^refs/factory/base']);
+
+
 });
 
 test("trusted Git receives an immutable private bundle snapshot and refuses symlinks",async()=>{
@@ -148,15 +184,15 @@ test("trusted Git receives an immutable private bundle snapshot and refuses syml
 });
 
 test("launcher signs only the tested snapshot and refuses dirty or mismatched receipts",async()=>{
- const {mkdtempSync,mkdirSync,writeFileSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
+ const {mkdtempSync,mkdirSync,writeFileSync,realpathSync}=await import("node:fs"),{tmpdir}=await import("node:os"),{join}=await import("node:path");
  const {publish}=await import("../adapters/delivery"),{command}=await import("../adapters/github");
- const dir=mkdtempSync(join(tmpdir(),"factory-publish-")),source=join(dir,"source");mkdirSync(source);
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),"factory-publish-"))),source=join(dir,"source");mkdirSync(source);
  const git=(...a:string[])=>command(["git","-C",source,...a]);
  await git("init");await git("config","user.name","Fictional");await git("config","user.email","fixture@example.invalid");
  writeFileSync(join(source,"fixture"),"base");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","base");
  const base=(await git("rev-parse","HEAD")).trim();
  writeFileSync(join(source,"fixture"),"tested");await git("add","fixture");await git("-c","commit.gpgsign=false","commit","-m","worker");
- await git("bundle","create",".factory-delivery.bundle","HEAD");
+ await git("bundle","create",".factory-delivery.bundle","HEAD",`^${base}`);
  const t={...ticket(),repo:"fulmar-hq/alido",paths:["fixture"]},calls:string[][]=[];
  let signed="",testedTree="";
  const execute=async(a:string[])=>{
@@ -173,21 +209,22 @@ test("launcher signs only the tested snapshot and refuses dirty or mismatched re
   return command(a);
  };
  let claims=0;
- const result=await publish(t,"a".repeat(64),source,join(dir,"pass"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
+ const result=await publish(t,"a".repeat(64),source,join(dir,"runs/browser-drain/session/initial"),base,{isolationVerified:true,verifyClaim:()=>{claims++;},testTree:async(checkout,tree)=>{
   expect(await Bun.file(join(checkout,"fixture")).text()).toBe("tested");return {tree,passed:true};
  }},execute,source);
+ expect((await Bun.file(join(dir,"runs/source-seeds",base,"source/fixture")).text())).toBe("base");
  expect(claims).toBe(3);expect(calls.find(a=>a.includes("commit-tree"))).toContain("-S");
  expect(calls.find(a=>a.includes("push"))?.at(-1)).toBe(`refs/heads/${result.branch}:refs/heads/${result.branch}`);
  expect((await command(["git","-C",source,"rev-parse","HEAD^{tree}"])).trim()).toBe(result.tree);
  calls.length=0;
  for(const mode of ["failed","mismatch","dirty"]){
-  await expect(publish(t,"a".repeat(64),source,join(dir,mode),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(checkout,tree)=>{
+  await expect(publish(t,"a".repeat(64),source,join(dir,"runs",mode),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(checkout,tree)=>{
    if(mode==="dirty")writeFileSync(join(checkout,"fixture"),"unreviewed");
    return {tree:mode==="mismatch" ? "0".repeat(40) : tree,passed:mode!=="failed"};
   }},execute,source)).rejects.toThrow("exact tested tree");
  }
  expect(calls.some(a=>a.includes("push"))).toBe(false);expect(calls.some(a=>a.includes("commit-tree"))).toBe(false);
- await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
+ await expect(publish({...t,paths:["elsewhere"]},"a".repeat(64),source,join(dir,"runs","paths"),base,{isolationVerified:true,verifyClaim:()=>{},testTree:async(_,tree)=>({tree,passed:true})},execute,source)).rejects.toThrow("outside approved scope");
 });
 
 
@@ -237,4 +274,27 @@ test('standalone copy-on-write clone has no live alternates and mutations never 
  // A source that itself depends on external objects is never copied as standalone.
  writeFileSync(join(source,'.git/objects/info/alternates'),'/fictional/other/objects');
  if(process.platform==='darwin')await expect(cloneStandalone(source,join(dir,'refused'))).rejects.toThrow('standalone source');
+});
+
+test('source seeds preserve immutable baselines and give each consumer independent files',async()=>{
+ const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,lstatSync,realpathSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {materializeTree}=await import('../adapters/delivery'),{command}=await import('../adapters/github');
+ const dir=realpathSync(mkdtempSync(join(tmpdir(),'factory-source-seed-'))),source=join(dir,'original'),seeds=join(dir,'seeds');mkdirSync(source);
+ const git=(where:string,...args:string[])=>command(['git','-C',where,...args]);
+ await git(source,'init');writeFileSync(join(source,'fixture'),'committed baseline');await git(source,'add','fixture');
+ await git(source,'-c','user.name=Fixture','-c','user.email=fixture@example.test','-c','commit.gpgsign=false','commit','-m','fixture');
+ const base=(await git(source,'rev-parse','HEAD')).trim();writeFileSync(join(source,'fixture'),'private dirty original');
+ for(const name of ['one','two']) {
+  const target=join(dir,name);await git(source,'worktree','add','--detach','--no-checkout',target,base);
+  await materializeTree(source,target,base,seeds);
+  expect(readFileSync(join(target,'fixture'),'utf8')).toBe('committed baseline');
+  expect((await git(target,'status','--porcelain')).trim()).toBe('');
+  expect(lstatSync(join(target,'fixture')).nlink).toBe(1);
+  writeFileSync(join(target,'fixture'),'independent consumer edit');
+ }
+ expect(readFileSync(join(source,'fixture'),'utf8')).toBe('private dirty original');
+ expect(readFileSync(join(seeds,base,'source/fixture'),'utf8')).toBe('committed baseline');
+ writeFileSync(join(seeds,base,'source/fixture'),'changed seed');
+ const refused=join(dir,'refused');await git(source,'worktree','add','--detach','--no-checkout',refused,base);
+ await expect(materializeTree(source,refused,base,seeds)).rejects.toThrow('source seed custody incomplete');
 });

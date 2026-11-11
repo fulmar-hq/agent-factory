@@ -1,6 +1,7 @@
+import {publisherDependencyRecorder} from "./cache-provenance";
 import type {PublisherBoundary} from './publisher-evidence';
 import {reviewPublished} from './queue';
-import { prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
+import { materializeTree,prepareDelivery, publish, testSnapshot, executableTest, deliveryBase, isDeliveryRepo } from "../adapters/delivery";
 import { planDeliveryRetention } from "./delivery-retention";
 import { NativeReceipt } from "../adapters/native";
 import { spawnWorker, type WorkerObservation } from "./child";
@@ -59,17 +60,20 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
     const delivery = t.provider === "codex" && isDeliveryRepo(t.repo);
     if (delivery) executableTest(t.test);
     const base = !continuation && delivery ? await deliveryBase(source,t.repo) : "HEAD";
-    if (!continuation) await command([
+    if (!continuation) {await command([
       "git",
       "-C",
       source,
       "worktree",
       "add",
+      ...(delivery ? ["--no-checkout"] : []),
       "-b",
       `feat/factory-${id.slice(0, 16)}`,
       workspace,
       base,
     ]);
+    if(delivery)await materializeTree(source,workspace,base,join(root,"runs/source-seeds"));
+    }
     s.event(
       `workspace:${id}`,
       "workspace",
@@ -78,13 +82,15 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
     );
     const attempt = continuation?.attempt ?? "initial";
     const archive = join(root,"runs","delivery",id,attempt);
+    const baselineKey=`publish-base:${id}`;
     if (delivery) {
       const qualified=s.get<{expiresAt:number;version:number}>("delivery-qualified");
       if(!qualified || qualified.version!==2 || qualified.expiresAt<=Date.now())throw Error("publisher blocked: isolation unproven");
-      await prepareDelivery(workspace,source,archive,id);
+      const dependencyKey=`dependency-installation:${id}`;
+      const installed=await prepareDelivery(workspace,source,archive,id,s.get<string>(baselineKey)??undefined,s.get<string>(dependencyKey),(manifest,fingerprint)=>{if(!s.get(`dependency-cache-manifest:${fingerprint}`))s.set(`dependency-cache-manifest:${fingerprint}`,manifest);});
+      if(!s.get(dependencyKey))s.set(dependencyKey,installed);
     }
     mkdirSync(join(workspace,".factory-tmp"),{recursive:true});
-    const baselineKey=`publish-base:${id}`;
     if(!s.get(baselineKey))s.set(baselineKey,(await command(["git","-C",workspace,"rev-parse","HEAD"])).trim());
     await superviseSession(e,id,t,workspace,join(root,`worker-${id}${continuation ? `-${attempt}` : ""}.jsonl`),delivery || continuation ? {native:continuation?.native} : undefined);
     if(e.sessions().find(x=>x.id===id)?.status==="finished")collectBrowserRequest(e,id,workspace);
@@ -97,7 +103,7 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
         const claims=s.db.query("SELECT path FROM claims WHERE session=?").all(id) as {path:string}[];
         if(!current || current.status!=="finished" || s.get("paused")!==false || s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true || !q || q.version!==2 || q.expiresAt<=Date.now() || claims.length!==t.paths.length || t.paths.some(p=>!claims.some(c=>c.path===p.toLowerCase())))throw Error("publisher claim/cleanup/qualification refused");
       };
-      const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source)},command,source);
+      const result=await publish(t,id,workspace,join(archive,"publisher"),s.get<string>(baselineKey)!,{verifyClaim,isolationVerified:true,testTree:(checkout,tree)=>testSnapshot(t,checkout,tree,source,publisherDependencyRecorder(s,root,id))},command,source,join(root,"runs/source-seeds"));
       verifyClaim();const executionReceipt=publisher?join(archive,'publisher/implementation.json'):undefined;
       if(executionReceipt)writeFileSync(executionReceipt,JSON.stringify({version:1,boundary:publisher!.boundary,startedAt:publishingAt,completedAt:Date.now(),authorityExpiresAt:s.get<{expiresAt:number}>('delivery-qualified')!.expiresAt,head:result.head,tree:result.tree}),{flag:'wx',mode:0o600});
       s.event(`publish:${id}`,"launcher-publish",{id,...result,executionReceipt,testedTreeReceipt:join(archive,'publisher/tested-tree.json')},"Retain PR and signed tree; undo accepted changes with signed revert");
@@ -107,12 +113,19 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
       await planDeliveryRetention(s,root,id,process.env.FACTORY_DELIVERY_ARCHIVE);
     }
   } catch (error) {
-    e.finish(id, false);
-    s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
+    recordWorkerFailure(e,id,error);
   } finally {
     s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
     s.close();
   }
+}
+export function recordWorkerFailure(e:Engine,id:string,error:unknown) {
+  const s=e.s;
+  // A failed publication/readback is not a failed native run. Retain the
+  // finished tree and claim for exact-source publication recovery.
+  if(e.sessions().find(x=>x.id===id)?.status!=='finished')e.finish(id, false);
+  else s.set(`publisher-pending:${id}`,{at:Date.now(),error:String(error)});
+  s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.
