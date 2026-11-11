@@ -22,7 +22,7 @@ test('14:00 projection reports both owner gaps to existing readiness, with bound
  for(let i=0;i<90;i++)observeReleaseUsage(s,{codex:meter(now-(90-i)*5*60000,.4)},now-(90-i)*5*60000);
  expect((s.get<Meter[]>('release-usage-history:codex')??[]).length).toBeLessThanOrEqual(72);
  const r={day:'2026-11-11',at:now,validThrough:target+4*3600000,ready:true,missing:[] as {input:string;reason:string}[],evidence:{}};
- await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now,.6)},async()=>null);expect(r.ready).toBe(false);expect(r.missing.map(x=>x.input)).toEqual(['release usage projection','quality usage projection']);expect(c.usage_gates.admit_below).toBe(.7);expect(c.usage_gates.stop_at).toBe(.9);
+ await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now,.6)},async()=>null,()=>now);expect(r.ready).toBe(false);expect(r.missing.map(x=>x.input)).toEqual(['release usage projection','quality usage projection']);expect(c.usage_gates.admit_below).toBe(.7);expect(c.usage_gates.stop_at).toBe(.9);
  expect(s.db.query('SELECT count(*) AS n FROM debits').get()).toEqual({n:0});
  }finally{s.close();}
 });
@@ -52,5 +52,10 @@ test('a newer trusted native history observation cannot be hidden by an older lo
 
 test('role collection includes the newest unsampled native observation during overlapping collections',async()=>{
  const s=new Store(':memory:'),c=config();c.owners={release:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'},quality:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'}};
- try{for(const m of [meter(now-30*60000,.4),meter(now-4*60000,.4),meter(now-60000,.65)])observeReleaseUsage(s,{codex:m},m.observedAt);const r={day:'2026-11-11',at:now,validThrough:target+4*3600000,ready:true,missing:[] as {input:string;reason:string}[],evidence:{}};await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now-2*60000,.4)},async()=>null);expect(r.ready).toBe(false);expect(r.missing.map(m=>m.input)).toEqual(['release usage projection','quality usage projection']);expect((r.evidence as any)['18:30 usage projection'].release.windows[0].used).toBe(.65);}finally{s.close();}
+ try{for(const m of [meter(now-30*60000,.4),meter(now-4*60000,.4),meter(now-60000,.65)])observeReleaseUsage(s,{codex:m},m.observedAt);const r={day:'2026-11-11',at:now,validThrough:target+4*3600000,ready:true,missing:[] as {input:string;reason:string}[],evidence:{}};await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now-2*60000,.4)},async()=>null,()=>now);expect(r.ready).toBe(false);expect(r.missing.map(m=>m.input)).toEqual(['release usage projection','quality usage projection']);expect((r.evidence as any)['18:30 usage projection'].release.windows[0].used).toBe(.65);}finally{s.close();}
+});
+
+test('a legitimate tick arriving during readiness collection is evaluated against the completion clock',async()=>{
+ const s=new Store(':memory:'),c=config();c.owners={release:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'},quality:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'}};
+ try{for(const m of [meter(now-30*60000,.4),meter(now-60000,.4),meter(now+5000,.65)])observeReleaseUsage(s,{codex:m},m.observedAt);const r={day:'2026-11-11',at:now,validThrough:target+4*3600000,ready:true,missing:[] as {input:string;reason:string}[],evidence:{}};await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now,.4)},async()=>null,()=>now+10000);const projection=(r.evidence as any)['18:30 usage projection'].release;expect(projection.windows[0].observedAt).toBe(now+5000);expect(projection.underGate).toBe(false);expect(r.missing.some(g=>g.reason.includes('future'))).toBe(false);}finally{s.close();}
 });
