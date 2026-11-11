@@ -737,6 +737,9 @@ test("the real entry point keeps no billing file, releases nothing, leaves the w
   const now = Date.now();
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto" }).format(now);
   mkdirSync(bin);
+  // HOME is its own folder, so the runtime's cache does not land in the private directory under test.
+  const home = join(dir, "home");
+  mkdirSync(home);
   writeFileSync(join(dir, "config.yaml"), JSON.stringify(config()));
   writeFileSync(join(dir, "release-auth-session.json"), JSON.stringify({ version: 1, kind: "original-password-mfa-session", signedInAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 23 * 3600000).toISOString(), receipt: "synthetic original session" }));
   writeFileSync(join(dir, "release-billing-source.json"), JSON.stringify({ profile: "fixture", accountId: "123456789012", budgetName: "fixture" }));
@@ -752,7 +755,7 @@ test("the real entry point keeps no billing file, releases nothing, leaves the w
   prepared.set("paused", false);
   prepared.close();
   const before = readdirSync(dir);
-  const run = Bun.spawn([process.execPath, join(repo, "scripts/release-morning.ts")], { env: { HOME: dir, PATH: `${bin}:/usr/bin:/bin`, FACTORY_PRIVATE_DIR: dir, FACTORY_MAIL_DB: mail }, stdout: "pipe", stderr: "pipe" });
+  const run = Bun.spawn([process.execPath, join(repo, "scripts/release-morning.ts")], { env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, FACTORY_PRIVATE_DIR: dir, FACTORY_MAIL_DB: mail }, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]);
   expect({ code, err }).toEqual({ code: 0, err: "" });
   const report = JSON.parse(out);
@@ -767,9 +770,9 @@ test("the real entry point keeps no billing file, releases nothing, leaves the w
   const calls = readFileSync(log, "utf8").trim().split("\n");
   expect(calls.filter((c) => c.startsWith("budgets describe-budget"))).toEqual(["budgets describe-budget --profile fixture --region us-east-1 --account-id 123456789012 --budget-name fixture --output json --no-cli-pager"]);
   // The file the health job reads as its billing reading is not written. All the run adds to the private
-  // directory is the ledger inbox ("commands" is this test's own call log; "Library" is Bun's cache under the fixture HOME).
+  // directory is the ledger inbox ("commands" is this test's own call log).
   expect(existsSync(join(dir, "release-billing.json"))).toBe(false);
-  expect(readdirSync(dir).filter((name) => !before.includes(name) && !name.startsWith("controller.sqlite") && name !== "Library").sort()).toEqual(["commands", "health"]);
+  expect(readdirSync(dir).filter((name) => !before.includes(name) && !name.startsWith("controller.sqlite")).sort()).toEqual(["commands", "health"]);
   expect(readdirSync(join(dir, "health"))).toEqual(["ledger-inbox"]);
   expect(calls.every((c) => c.startsWith("budgets describe-budget") || c.startsWith("api --method GET"))).toBe(true);
   const check = new Store(join(dir, "controller.sqlite"));
