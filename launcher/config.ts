@@ -84,6 +84,15 @@ export const ConfigSchema = z.object({
       tests: z.string(),
     }),
   ),
+  // Operator-only switches. They live here, in the private factory config that
+  // only the operator edits, so no agent result, loop switch or owner wake can
+  // set them. Each default is the behaviour before the switch existed, and a
+  // misspelt name is refused rather than silently ignored.
+  operator_switches: z.strictObject({
+    failure_class_admission: z.enum(["off", "on"]).default("off"),
+    fix_ups_per_pull_request: z.number().int().min(0).max(2).default(0),
+    release_headroom: z.enum(["off", "on"]).default("off"),
+  }).prefault({}),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 export const MeterSchema = z.object({
