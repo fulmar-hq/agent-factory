@@ -9,6 +9,7 @@ const home='/Users/fictional',bun=home+'/.bun/bin/bun',dir=home+'/.factory';
 const locations=new Set(Object.values(executableLocations).map(p=>p.replace('HOME',home).replace('BUN',dirname(bun))));
 const which=(name:string,path:string)=>{if(name.startsWith('/'))return locations.has(name)?name:null;return path.split(':').map(d=>d+'/'+name).find(p=>locations.has(p))??null;};
 const plist=(env:Record<string,string>)=>`<plist><dict><key>EnvironmentVariables</key><dict>${Object.entries(env).map(([k,v])=>`<key>${k}</key><string>${v}</string>`).join('')}</dict></dict></plist>`;
+// lesson: job-path-missing-tool (docs/lessons.md)
 test('every installed job resolves the full transitive executable set in its own plist PATH',()=>{
  const agents=mkdtempSync(join(tmpdir(),'job-parity-'));
  for(const job of scheduledJobs)writeFileSync(join(agents,`com.agent-factory.${job}.plist`),plist(jobEnvironment(home,bun,dir)));

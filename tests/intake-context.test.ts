@@ -21,6 +21,7 @@ function fixture(){
  c.autonomy={intake_mode:'build',intake_owner:'builder',idle_wake_minutes:10,ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['AGENTS.md']},restart:{max_retries:1,causes_per_hour:3}};
  const e=new Engine(new Store(':memory:'),c);e.s.set('paused',false);return e;
 }
+// lesson: ready-label-not-runnable (docs/lessons.md)
 test('supply passes a refused draft decision and source to Product without treating its label as runnable',()=>{
  const e=fixture();try{
   const issue={number:7,title:'Show request summary',body:'Existing coding outcome.',state:'OPEN',labels:[{name:'state:ready'},{name:'kind:fix'},{name:'area:runtime'}]};
