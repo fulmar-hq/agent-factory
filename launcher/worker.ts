@@ -107,12 +107,19 @@ export async function runWorker(id: string,publisher?:{boundary:PublisherBoundar
       await planDeliveryRetention(s,root,id,process.env.FACTORY_DELIVERY_ARCHIVE);
     }
   } catch (error) {
-    e.finish(id, false);
-    s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
+    recordWorkerFailure(e,id,error);
   } finally {
     s.db.query("UPDATE sessions SET pid=NULL WHERE id=?").run(id);
     s.close();
   }
+}
+export function recordWorkerFailure(e:Engine,id:string,error:unknown) {
+  const s=e.s;
+  // A failed publication/readback is not a failed native run. Retain the
+  // finished tree and claim for exact-source publication recovery.
+  if(e.sessions().find(x=>x.id===id)?.status!=='finished')e.finish(id, false);
+  else s.set(`publisher-pending:${id}`,{at:Date.now(),error:String(error)});
+  s.event(`failure:${id}`, "worker-failure", {id, error: String(error)}, "Reconcile preserved work and native session; never blindly retry");
 }
 // Shared execution path for admitted workers and owner-run disposable rehearsals.
 // This function does not admit work or create qualification evidence.

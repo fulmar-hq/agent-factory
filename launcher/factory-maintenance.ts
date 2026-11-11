@@ -11,7 +11,7 @@ export type Challenge={pr:number;head:string;baseRef?:string;baseHead?:string;ok
 export interface MaintenancePort {
  integrationHold?():string|null;
  pulls():Promise<FactoryPull[]>;
- pull(number:number):Promise<FactoryPull>;
+ pull(number:number,fresh?:boolean):Promise<FactoryPull>;
  update?(pull:FactoryPull):Promise<void>;
  challenge(pull:FactoryPull):Promise<Challenge|undefined>;
  verifyChallenge(challenge:Challenge):boolean;
@@ -57,7 +57,7 @@ export async function maintainFactory(s:Store,port:MaintenancePort) {
   try {
    if(interrupted())return result;
    if(initial.draft){record(initial.number,'draft');continue;}
-   const p=await port.pull(initial.number);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
+   const p=await port.pull(initial.number,false);if(p.state!=='OPEN'||p.head!==initial.head){record(p.number,'changed');continue;}
    if(p.mergeState==='BEHIND'&&p.verify&&port.update){
     const key=`factory-branch-update:${p.number}:${p.head}`;
     if(s.get(key)){record(p.number,'branch-update-pending',undefined,p.head);continue;}

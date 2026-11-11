@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {recordGithubHttp,githubDiagnostic} from '../adapters/github-budget';
 import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
@@ -15,13 +16,19 @@ import {maintainFactory,FactoryMergeRejected,nativeChallenge,factoryRepository,t
 const repo=resolve(import.meta.dir,'..');
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
 const git=(...args:string[])=>command(['git','-C',repo,...args]);
-async function pull(number:number):Promise<FactoryPull>{
+async function pull(number:number,s?:Store,fresh=true):Promise<FactoryPull>{
+ const key=`factory-pr-poll:${number}`,prior=s?.get<{at:number;pull:FactoryPull}>(key);
+ if(!fresh&&prior&&Date.now()-prior.at<600000&&(prior.pull.mergeState!=='CLEAN'||!prior.pull.verify))return prior.pull;
  const p=await api(`pulls/${number}`);
  if(p.base?.ref!=='main'||p.base.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('factory main PR required');
- const [commit,checks]=await Promise.all([api(`git/commits/${p.head.sha}`),api(`commits/${p.head.sha}/check-runs?per_page=100&filter=latest`)]);
+ const immutableKey=`factory-commit-tree:${p.head.sha}`;
+ let tree=s?.get<string>(immutableKey);
+ if(!tree){tree=(await api(`git/commits/${p.head.sha}`)).tree.sha as string;s?.set(immutableKey,tree);}
+ const checks=await api(`commits/${p.head.sha}/check-runs?per_page=100&filter=latest`);
  if(!Array.isArray(checks.check_runs)||checks.total_count!==checks.check_runs.length||checks.check_runs.length>=100)throw Error('required check inventory truncated');
  const verify=checks.check_runs.filter((r:{name:string;app?:{id:number}})=>r.name==='Verify'&&r.app?.id===15368).sort((a:{id:number},b:{id:number})=>b.id-a.id)[0];
- return {number:p.number,head:p.head.sha,tree:commit.tree.sha,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
+ const result={number:p.number,head:p.head.sha,tree:tree!,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
+ s?.set(key,{at:Date.now(),pull:result});return result;
 }
 export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:ReviewPass={claims:0},installPorts:{git?:typeof git;api?:typeof api;hold?:()=>string|null}={}):MaintenancePort{
  const installGit=installPorts.git??git,installApi=installPorts.api??api,hold=installPorts.hold??(()=>integrationFreeze(root));
@@ -29,17 +36,18 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:Re
  return {
  integrationHold:hold,
  pulls:async()=>{const list=await api('pulls?state=open&sort=created&direction=asc&per_page=100');if(!Array.isArray(list)||list.length>=100)throw Error('factory PR inventory truncated');return list.filter(p=>p.base?.ref==='main'&&p.base?.repo?.full_name===factoryRepository&&p.head?.repo?.full_name===factoryRepository).map(p=>({number:p.number,head:p.head.sha,createdAt:p.created_at,draft:p.draft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
- pull,
+ pull:(number,fresh=true)=>pull(number,s,fresh),
  update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
  challenge:async p=>{const retained=s.db.query("SELECT id FROM events WHERE kind='codex-challenge' AND json_extract(data,'$.pr')=? AND json_extract(data,'$.head')=? AND (json_extract(data,'$.repo') IS NULL OR json_extract(data,'$.repo')=?) LIMIT 1").get(p.number,p.head,factoryRepository);const prior=s.get<{state:string}>(`factory-challenge:${p.number}:${p.head}`);if(retained||pass.claims===0&&(!prior||prior.state==='preparation-pending'))return runChallenge(s,p,root,repo,()=>{pass.claims++;});},
  verifyChallenge:c=>nativeChallenge(c,homedir()),
  signed:async(head,tree)=>{const c=await api(`commits/${head}`);return c.sha===head&&c.commit.tree.sha===tree&&c.commit.verification.verified===true&&c.commit.verification.reason==='valid';},
  merged:async number=>{const p=await api(`pulls/${number}`);if(p.base?.ref!=='main'||p.base?.repo?.full_name!==factoryRepository||p.head?.repo?.full_name!==factoryRepository)throw Error('merge reconciliation repository/base differs');if(!p.merged)return {state:p.state==='open'?'OPEN':'CLOSED',head:p.head.sha};const c=await api(`git/commits/${p.merge_commit_sha}`);return {state:'MERGED',head:p.head.sha,revision:p.merge_commit_sha,tree:c.tree.sha};},
- merge:async(number,head)=>{const child=Bun.spawn(['gh','api','--include','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash'],{stdin:'ignore',stdout:'pipe',stderr:'pipe'});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill('SIGTERM');},30000);
+ merge:async(number,head)=>{const child=Bun.spawn(['gh','api','--include','--method','PUT',`repos/${factoryRepository}/pulls/${number}/merge`,'--raw-field',`sha=${head}`,'--raw-field','merge_method=squash'],{env:{...process.env,GH_DEBUG:'api'},stdin:'ignore',stdout:'pipe',stderr:'pipe'});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill('SIGTERM');},30000);
   let raw:string,stderr:string,code:number;try{[raw,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);}finally{clearTimeout(timer);}
+  recordGithubHttp(stderr,raw);
   const framed=raw.match(/^HTTP\/[^\s]+\s+(\d{3})[^\r\n]*\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/);const status=framed?Number(framed[1]):undefined;
   if(!timedOut&&status!==undefined&&[405,409,422].includes(status)){let body:unknown;try{body=JSON.parse(framed![2]);}catch{}if(body&&typeof body==='object'&&typeof (body as {message?:unknown}).message==='string')throw new FactoryMergeRejected(status,(body as {message:string}).message.slice(0,500));}
-  if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':stderr.slice(0,300)})`);
+  if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':githubDiagnostic(stderr)})`);
   const merged=JSON.parse(framed[2]);if(merged.merged!==true)throw Error('protected squash was not accepted');const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
  install:async target=>{
   ensureUnfrozen();
