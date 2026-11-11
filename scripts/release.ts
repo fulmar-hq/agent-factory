@@ -1,3 +1,4 @@
+import {reconcileReleaseIncidents} from '../launcher/release-incident';
 import {collectUsageProjection} from '../launcher/release-usage-projection';
 import {requestFreezeProof} from '../launcher/release-freeze-proof';
 import {watchReleasePause} from '../launcher/release-pause';
@@ -73,9 +74,13 @@ try {
   readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:rehearsal?(s.get('aws-stop-latched')===true?'AWS stop latched':s.get('paused')!==false?'factory paused':null):await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
   if(rehearsal&&rehearsalSlot==='14:00')await collectUsageProjection(s,c,root,readiness,readings);
   if(rehearsal){recordRehearsal(s,readiness,rehearsalSlot as '14:00'|'17:40');console.log(JSON.stringify({effects:false,slot:rehearsalSlot,readiness}));}
-  if(stage==='preflight')readiness.at=invokedAt;
+  if(stage==='preflight'||stage==='qa')readiness.at=invokedAt;
+  if(stage==='qa'){
+   s.event(`release-readiness:${readiness.day}:qa`,'release-readiness',{...readiness,stage:'qa'},'Retain the scheduled QA readiness observation and its actual refusal inputs');
+   s.set(`release-qa-report:${readiness.day}`,readiness);
+  }
   if(stage==='preflight'){
-   s.event(`release-readiness:${readiness.day}`,'release-readiness',readiness,'Retain the preflight report; correct missing inputs before the next fixed window');
+   s.event(`release-readiness:${readiness.day}`,'release-readiness',{...readiness,stage:'preflight'},'Retain the preflight report; correct missing inputs before the next fixed window');
    s.set(`release-preflight-report:${readiness.day}`,readiness);
    releasePreflightAlert(s,readiness);
   }
@@ -102,7 +107,7 @@ try {
  }
 }
 }catch(error){
- const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
+ const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,invokedAt,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
  if(rehearsal){
   const failed={day:toronto(invokedAt).day,at:invokedAt,validThrough:invokedAt,ready:false,missing:[{input:'release configuration',reason:String(error)}],evidence:{error:String(error)}};
   try{recordRehearsal(s,failed,rehearsalSlot as '14:00'|'17:40');}catch(mailError){s.event(`rehearsal-mail-failed:${invokedAt}`,'release-rehearsal-alert-failure',{error:String(mailError)},'Restore mail and retry the same rehearsal gap IDs');}
@@ -115,9 +120,14 @@ try {
  }
  console.error(String(error));process.exitCode=1;
 }finally{
- if(stage==='reconcile')try{
-  watchReleasePause(s,root);
-  await releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))});
- }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
+ if(stage==='reconcile'){
+  const observers:[string,()=>unknown|Promise<unknown>][]=[
+   ['release-pause',()=>watchReleasePause(s,root)],
+   ['release-incident',()=>reconcileReleaseIncidents(s)],
+   ['release-window-result',()=>releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))})],
+  ];
+  for(const [kind,observe] of observers)try{await observe();}
+  catch(error){s.event(`${kind}-failure:${Date.now()}`,`${kind}-failure`,{error:String(error)},'Restore existing outbox or source evidence; retry stable IDs without release effects');}
+ }
  s.close();
 }
