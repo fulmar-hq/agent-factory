@@ -26,3 +26,7 @@ test('14:00 projection reports both owner gaps to existing readiness, with bound
  expect(s.db.query('SELECT count(*) AS n FROM debits').get()).toEqual({n:0});
  }finally{s.close();}
 });
+
+test('sample capture uses collection completion time and refuses a genuinely future native timestamp',()=>{
+ const s=new Store(':memory:');try{const reading=meter(now+500,.3);observeReleaseUsage(s,{codex:reading},now);expect(s.get('release-usage-history:codex')).toBeNull();observeReleaseUsage(s,{codex:reading},now+1000);expect(s.get<Meter[]>('release-usage-history:codex')?.[0].observedAt).toBe(now+500);}finally{s.close();}
+});

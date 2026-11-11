@@ -7,7 +7,7 @@
   "launcher/release-readiness.ts": "7cb117ba883f631e1ae8e50cded97a286e5b6cf4f48bdd89b0b2c31b5d23e653",
   "launcher/child.ts": "34e6c01cbf723a62b30d6b4f1c0fc39bf493af4ba1d991c946d1e19d2aaa247a",
   "launcher/process.ts": "10770b2767549f0c435ce60a40b12f9248f8994192e87d17ff29cfeda2b54531",
-  "launcher/tick.ts": "3f31db0add180283eec63f296c87bbd228e1c04d31393134e6f1ab5fd256b855",
+  "launcher/tick.ts": "0606faca9d2afe223a8eebe828a7937d60a889a216f7c94bf151ca62a88bec2a",
   "launcher/codex-renewal.ts": "8ad35fb4c9a75961e15f11f82c52bec6cc56951eb632e7289352be5b97477204",
   "launcher/intake-policy.ts": "607946b68b46d6b6043c4c6b8086c8b8986770624e03fb7b51c325dfe081d0f8",
   "launcher/engine.ts": "9c3cd84f0a502cff5a593d61a99e44b9eb0ae586e4903251f277b055fccf7ffd",
