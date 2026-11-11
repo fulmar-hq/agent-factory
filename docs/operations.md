@@ -311,7 +311,7 @@ retain the same episode. Pending per-recipient actions retry independently even
 after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
 lifts a pause automatically or permits a late release.
 
-`control.ts pause Platform|Release|Quality|Coordinator` and the authenticated
+`control.ts pause Platform|Release|Quality|Product|Coordinator` and the authenticated
 board's optional `owner` field record the accountable role. Generic and legacy
 owner-token controls belong to Coordinator for escalation; their actual caller
 is explicitly unrecorded and is never represented as a verified human identity.

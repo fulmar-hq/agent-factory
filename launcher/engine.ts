@@ -145,7 +145,7 @@ export class Engine {
       this.s.event(
         randomUUID(),
         paused ? "pause" : "resume",
-        {owner,actor:"owner-control"},
+        {owner,ownerSupplied:accountableOwner!==undefined,actor:"owner-control"},
         `Set pause to ${!paused}`,
       );
     });

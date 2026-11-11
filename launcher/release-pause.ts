@@ -5,8 +5,8 @@ import {releaseAction,type ReleaseOwner} from './release-actions';
 import type {Store} from '../tracking/store';
 export function pauseOwner(value:unknown):ReleaseOwner {
  if(value===undefined)return 'Coordinator';
- if(['Coordinator','Release','Quality','Platform'].includes(String(value)))return value as ReleaseOwner;
- throw Error('pause owner must be Coordinator, Release, Quality or Platform');
+ if(typeof value==='string'&&['Coordinator','Release','Quality','Platform','Product'].includes(value))return value as ReleaseOwner;
+ throw Error('pause owner must be Coordinator, Release, Quality, Platform or Product');
 }
 type Episode={id:string;at:number|null;owner:ReleaseOwner;attributed:boolean};
 // First pause after the last real resume, including legacy repeated true calls.
@@ -18,7 +18,7 @@ export function activePauseEpisode(s:Store,now=Date.now()):Episode {
  if(prior?.id===id)return prior;
  const raw=row?JSON.parse(row.data):null;
  let owner:ReleaseOwner='Coordinator';try{owner=pauseOwner(raw?.owner);}catch{/* Legacy unknown caller remains Coordinator's escalation. */}
- const episode={id,at:row?.at??null,owner,attributed:!!raw?.owner};s.set('release-pause-episode',episode);return episode;
+ const episode={id,at:row?.at??null,owner,attributed:raw?.ownerSupplied!==false&&typeof raw?.owner==='string'&&['Coordinator','Release','Quality','Platform','Product'].includes(raw.owner)};s.set('release-pause-episode',episode);return episode;
 }
 type PauseAction={id:string;to:ReleaseOwner;summary:string;body:string;at:number;day:string;episode:string;queuedAt?:number};
 function drainPauseActions(s:Store,now:number,send:typeof releaseAction){

@@ -67,7 +67,7 @@ export async function board(dir = root, port = 4318) {
             url.pathname === "/api/pause" &&
             typeof body.paused === "boolean"
           ) {
-            e.pause(body.paused, "owner",pauseOwner(body.owner));
+            e.pause(body.paused, "owner",body.owner===undefined?undefined:pauseOwner(body.owner));
             return json({ paused: body.paused });
           }
           if (

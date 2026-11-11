@@ -44,3 +44,12 @@ test('pending recipients retry after resume and after a later pause without repl
   }finally{s.close();}
  }
 });
+
+test('JSON arrays and non-string owners are rejected before persisting a pause; Product is a valid pausing role',()=>{
+ const s=new Store(':memory:'),e=new Engine(s,config());s.set('paused',false);
+ try{for(const value of [['Platform'],['Coordinator'],{},null,0,true])expect(()=>e.pause(true,'owner',pauseOwner(value))).toThrow('pause owner');expect(s.get('paused')).toBe(false);expect(pauseOwner('Product')).toBe('Product');}finally{s.close();}
+});
+test('generic authenticated controls disclose their unknown caller while retaining Coordinator escalation',()=>{
+ const {dir,s}=setup(),clock=spyOn(Date,'now').mockReturnValue(at('20:45')),e=new Engine(s,config());let body='';
+ try{e.pause(false,'owner');e.pause(true,'owner');watchReleasePause(s,dir,at('20:45'),(id,to,summary,text)=>{expect(to).toBe('Coordinator');body=text;return {id,queued:true};});expect(body).toContain('actual caller not recorded');expect(body).toContain('Coordinator');}finally{clock.mockRestore();s.close();}
+});
