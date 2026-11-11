@@ -3,7 +3,25 @@ import {mkdtempSync,mkdirSync,writeFileSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Store} from '../tracking/store';
-import {publisherTestedReceipt,executeCodexRenewal,codexRenewalBrief} from '../adapters/codex-renewal';
+import {publisherTestedReceipt,executeCodexRenewal,codexRenewalBrief,verifyKnownNetworkTargets} from '../adapters/codex-renewal';
+
+test('network readback probes the original literal endpoints despite a rotated DNS answer',async()=>{
+ const network={githubIPv4:'192.0.2.1',exampleIPv4:'192.0.2.2'},connected:string[]=[];
+ // The later answer is intentionally different. It cannot substitute a new
+ // target for the IPs already bound into both hashed security probes.
+ const laterAnswer='192.0.2.99';
+ const proof=await verifyKnownNetworkTargets(network,async address=>{connected.push(address);if(address===laterAnswer)throw Error('unprobed replacement');},()=>123);
+ expect(connected).toEqual(['192.0.2.1','192.0.2.2']);
+ expect(proof).toEqual({observedAt:123,targets:[{host:'github.com',address:network.githubIPv4,port:443,reachable:true},{host:'example.com',address:network.exampleIPv4,port:443,reachable:true}]});
+});
+
+for(const unavailable of ['192.0.2.1','192.0.2.2'])test(`unreachable pinned endpoint ${unavailable} refuses readback`,async()=>{
+ await expect(verifyKnownNetworkTargets({githubIPv4:'192.0.2.1',exampleIPv4:'192.0.2.2'},async address=>{if(address===unavailable)throw Error('ETIMEDOUT');})).rejects.toThrow(`known network target unreachable: ${unavailable.endsWith('.1')?'github.com':'example.com'} ${unavailable}:443: Error: ETIMEDOUT`);
+});
+
+test('network readback refuses a hostname in place of a literal pinned address',async()=>{
+ let connected=false;await expect(verifyKnownNetworkTargets({githubIPv4:'github.com',exampleIPv4:'192.0.2.2'},async()=>{connected=true;})).rejects.toThrow();expect(connected).toBe(false);
+});
 test('legacy continuation publication resolves the matching trusted tested tree',()=>{
  const dir=mkdtempSync(join(tmpdir(),'renewal-publish-')),id='fictional',tree='a'.repeat(40),attempt='00000000-0000-4000-8000-000000000001',path=join(dir,'runs/delivery',id,attempt,'publisher/tested-tree.json');mkdirSync(join(path,'..'),{recursive:true});writeFileSync(path,JSON.stringify({tree,code:0}));
  expect(publisherTestedReceipt(dir,{id,tree})).toBe(realpathSync(path));expect(()=>publisherTestedReceipt(dir,{id,tree:'b'.repeat(40)})).toThrow('unavailable');
