@@ -5,7 +5,7 @@
   /* ---------- Words ---------- */
   var STR = {
     en: {
-      updated: 'Updated {t}', fOver: '{n} over', fQuiet: '{n} quiet', fFix: '{n} need a fix', noAct: 'No activity for {d}', high: 'High', atLimit: 'At limit', legend: 'What the colours mean', lgOk: 'Moving', lgInfo: 'Waiting', lgWarn: 'Attention', lgBad: 'Stopped', lgRest: 'Inactive', idleShort: 'Nothing is running. 12 tasks are ready.', flowLabel: 'Flow', fRunning: 'Running', f48: '48 h',
+      updated: 'Updated {t}', fOver: '{n} over', fQuiet: '{n} quiet', fFix: '{n} need a fix', noAct: 'No activity for {d}', high: 'High', atLimit: 'At limit', legend: 'What the colours mean', lgOk: 'Moving', lgInfo: 'Waiting', lgWarn: 'Attention', lgBad: 'Stopped', lgRest: 'Inactive', idleShort: 'Nothing is running. 12 tasks are ready.', flowLabel: 'Flow', fRunning: 'Running', f48: 'last 48 h',
       usedOf: '{u} of about {d}', overLine: '{u}, past its {d} estimate', lastAct: 'Last activity {d} ago', ownerRun: 'Owner run',
       doneTitle: 'Recently completed', doneSum: '{n} done in 48 h · typical task {d} · {o} ran over', tookLine: 'took {u} · expected {d}',
       todayAt: 'Today, {t}', started: 'Started', finished: 'Finished', took: 'Took', expected: 'Expected',
@@ -164,7 +164,7 @@
     }).join('');
     return '<section class="band"><div class="status" aria-live="polite"><h1><span class="dot ' + dot + '" aria-hidden="true"></span>' + esc(data.hero.title) +
       ' <span class="soft">' + esc(data.hero.soft) + '</span></h1><div class="status-line"><p class="lede">' + esc(data.questions.length ? data.hero.lede : t('nothingNeeds')) + '</p></div></div><div class="meters">' + meters +
-      meter('aws', (data.aws.dollars === null ? '—' : money(data.aws.dollars.toFixed(2))) + ' <span class="unit">' + esc(t('of')) + ' ' + money(data.aws.ceiling) + '</span>', data.aws.dollars === null ? 0 : data.aws.dollars / data.aws.ceiling * 100,
+      meter('aws', (data.aws.dollars === null ? '—' : money(data.aws.dollars.toFixed(2))) + ' <span class="unit">' + esc(t('of')) + ' ' + money(data.aws.ceiling) + '</span>', data.aws.dollars === null ? 0 : Math.round(data.aws.dollars / data.aws.ceiling * 100),
         data.aws.stopped ? '<span class="pill bad">' + esc(t('awsStopped')) + '</span>' : esc(data.aws.dollars === null ? t('notAvailable') : t('today')), data.aws.tone) +
       meter('nextRelease', localTime(data.nextRelease.at) + ' <span class="unit">' + esc(t(data.nextRelease.name === 'QA' ? 'test' : 'live')) + '</span>', null,
         localTime(data.nextLiveAt) + ' ' + esc(t('live'))) + '</div></section>';
@@ -213,9 +213,9 @@
         return '<li><button type="button" class="row run" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
           '<span class="row-top"><span class="row-title">' + title(x) + '</span><span class="chips">' +
             (x.run ? '<span class="chip line">' + esc(t('ownerRun')) + '</span>' : '') + '<span class="chip">' + esc(t(x.o)) + '</span></span></span>' +
-          bar(pct, x.barTone) +
+          (x.est === null ? '' : bar(pct, x.barTone)) +
           '<span class="row-foot"><span class="est num' + (over ? ' over' : '') + '">' +
-            esc(t(over ? 'overLine' : 'usedOf', { u: dur(x.used), d: x.est === null ? '—' : dur(x.est) })) + '</span>' +
+            esc(timeUsed(x)) + '</span>' +
             '<span class="act num' + (x.quiet ? ' quiet' : '') + '">' + esc(x.act === null ? t('notAvailable') : t(x.quiet ? 'noAct' : 'lastAct', { d: dur(x.act) })) + '</span></span>' +
           '</button></li>';
       }).join('') + '</ul>';
@@ -225,11 +225,11 @@
 
   function upNext() {
     var body = '<ol class="rows' + (S.moreNext ? '' : ' clip') + '">' + NEXT.map(function (x, i) {
-        return '<li' + (i >= 5 ? ' class="extra"' : '') + '><button type="button" class="row next" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
+        return '<li' + (i >= 3 ? ' class="extra"' : '') + '><button type="button" class="row next" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
           '<span class="pos num" aria-hidden="true">' + x.pos + '</span><span class="row-title">' + title(x) + '</span></button></li>';
       }).join('') + '</ol>' +
-      (data.counts.upNext > 5 ? '<button type="button" class="more small-only" data-act="moreNext" data-k="moreNext" aria-expanded="' + S.moreNext + '">' +
-        esc(S.moreNext ? t('showLess') : t('moreN', { n: data.counts.upNext - 5 })) + '</button>' : '');
+      (data.counts.upNext > 3 ? '<button type="button" class="more small-only" data-act="moreNext" data-k="moreNext" aria-expanded="' + S.moreNext + '">' +
+        esc(S.moreNext ? t('showLess') : t('moreN', { n: data.counts.upNext - 3 })) + '</button>' : '');
     return col('next', 'upNext', '<span class="count num">' + data.counts.upNext + '</span>', body);
   }
 
@@ -259,8 +259,8 @@
         return '<li' + (i >= 5 ? ' class="extra"' : '') + '><button type="button" class="row flat" data-act="open" data-v="' + x.id + '" data-k="' + x.id + '">' +
           '<span class="row-title">' + title(x) + '</span>' +
           '<span class="trail"><span class="pill ' + o[1] + '">' + esc(t(o[0])) + '</span><span class="when num">' + when(x.w) + '</span></span>' +
-          '<span class="took">' + bar(pct, x.barTone) + '' +
-          '<span class="est num' + (over ? ' over' : '') + '">' + esc(t('tookLine', { u: x.seconds === null ? '—' : dur(x.used), d: x.est === null ? '—' : dur(x.est) })) + '</span></span>' +
+          '<span class="took">' + (x.est === null ? '' : bar(pct, x.barTone)) + '' +
+          '<span class="est num' + (over ? ' over' : '') + '">' + esc(t('tookLine', { u: x.seconds === null ? '—' : dur(x.used), d: x.est === null ? t('noEstimate') : dur(x.est) })) + '</span></span>' +
           '</button></li>';
       }).join('') + '</ul>' +
       (S.allDone || DONE_TOTAL <= 5 ? '' : '<button type="button" class="more small-only" data-act="allDone" data-k="allDone">' + esc(t('showAll', { n: DONE_TOTAL })) + '</button>');
@@ -270,7 +270,7 @@
   function doneFacts(x) {
     function f(k, v, cls) { return '<div><dt>' + esc(t(k)) + '</dt><dd class="num' + (cls || '') + '">' + esc(v) + '</dd></div>'; }
     return f('started', localTime(x.started, true)) + f('finished', localTime(x.at, true)) +
-      f('took', x.seconds === null ? '—' : dur(x.used), x.over ? ' over' : '') + f('expected', x.est === null ? '—' : dur(x.est));
+      f('took', x.seconds === null ? '—' : dur(x.used), x.over ? ' over' : '') + f('expected', x.est === null ? t('noEstimate') : dur(x.est));
   }
   function technical(x) {
     var fields = x.technical || {};
@@ -278,13 +278,19 @@
       return '<div><dt>' + esc(t(k)) + '</dt><dd>' + esc(fields[k]) + '</dd></div>';
     }).join('') + '</dl></details>';
   }
+  function timeUsed(x) { return t(x.est === null ? 'usedUnknown' : x.over ? 'overLine' : 'usedOf', {u:dur(x.used),d:x.est === null ? '' : dur(x.est)}); }
+  function runningFacts(x) {
+    function f(k,v) { return '<div><dt>' + esc(t(k)) + '</dt><dd class="num">' + esc(v) + '</dd></div>'; }
+    return (x.started ? f('started',localTime(x.started,true)) : '') + f('timeUsed',x.started ? timeUsed(x) : t('notStarted')) +
+      (x.started ? f('lastActivity',x.act === null ? t('notAvailable') : t(x.quiet ? 'noAct' : 'lastAct',{d:dur(x.act)})) : '');
+  }
   function sheetHtml(x) {
     if (x.kind === 'question') return '<h2 id="sheet-title" tabindex="-1">' + esc(x.title) + '</h2><p class="sheet-desc">' + esc(x.context) + '</p><p class="summary">' + esc(x.defaultLine) + '</p>' + technical(x);
     var status = x.kind === 'done' ? t(OUT[x.out][0]) : x.kind === 'running' ? t('stRunning') : x.kind === 'next' ? t('stNext', {n:x.pos}) : x.status;
-    return '<h2 id="sheet-title" tabindex="-1">' + title(x) + '</h2><div class="sheet-status"><span class="pill ' + pillTone(x.tone) + '">' + esc(status) + '</span>' + (x.run ? '<span class="chip line">' + esc(t('ownerRun')) + '</span>' : '') + '</div>' +
+    return '<h2 id="sheet-title" tabindex="-1">' + title(x) + '</h2><div class="sheet-status"><span class="pill ' + pillTone(x.tone) + '">' + esc(status) + '</span>' + (x.run ? '<span class="pill quiet">' + esc(t('ownerRun')) + '</span>' : '') + '</div>' +
       '<p class="sheet-desc">' + esc(x.d) + '</p><dl class="facts"><div><dt>' + esc(t('owner')) + '</dt><dd>' + esc(x.o) + '</dd></div>' +
-      (x.kind === 'done' ? doneFacts(x) : '<div><dt>' + esc(t('timeUsed')) + '</dt><dd>' + (x.started ? esc(t('usedOf', {u:dur(x.used),d:x.est === null ? '—' : dur(x.est)})) : esc(t('notStarted'))) + '</dd></div>') + '</dl>' +
-      (x.pr || x.issue ? '<a class="btn" href="' + esc(x.pr || x.issue) + '" target="_blank" rel="noopener noreferrer">' + esc(t('viewWork')) + '</a>' : '') + technical(x);
+      (x.kind === 'done' ? doneFacts(x) : runningFacts(x)) + '</dl>' +
+      (x.pr || x.issue ? '<a class="btn" href="' + esc(x.pr || x.issue) + '" target="_blank" rel="noopener noreferrer">' + esc(t('viewWork')) + ' <svg viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M4 10l6-6M5 4h5v5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></a>' : '') + technical(x);
   }
   var sheet = document.getElementById('sheet'), scrim = document.getElementById('scrim'), sheetBody = document.getElementById('sheet-body');
   var closeBtn = document.getElementById('sheet-close'), returnKey = null;
@@ -312,7 +318,7 @@
     if (!S.sheet) return;
     if (e.key === 'Escape') { closeSheet(); return; }
     if (e.key === 'Tab') {
-      var f = sheet.querySelectorAll('button, a[href], summary');
+      var f = Array.from(sheet.querySelectorAll('button, a[href], summary')).filter(function(el){return el.getClientRects().length && !el.disabled;});
       if (!f.length) return;
       var first = f[0], last = f[f.length - 1];
       if (e.shiftKey && (document.activeElement === first || !sheet.contains(document.activeElement) || document.activeElement.id === 'sheet-title')) { e.preventDefault(); last.focus(); }
@@ -334,11 +340,15 @@
     var keep = {};
     app.querySelectorAll('[data-scroll]').forEach(function (el) { keep[el.getAttribute('data-scroll')] = el.scrollTop; });
     app.innerHTML = band() + '<div class="mid">' + tonight() + flow() + '</div>' + needs() +
-      '<div class="board' + (hasAsk() ? ' with-ask' : '') + '">' + (wide.matches ? upNext() + running() : running() + upNext()) + waiting() + done() + '</div>';
+      '<div class="board' + (hasAsk() ? ' with-ask' : '') + '"><div class="half">' + running() + upNext() + '</div><div class="half">' + waiting() + done() + '</div></div>';
     app.querySelectorAll('[data-scroll]').forEach(function (el) { el.scrollTop = keep[el.getAttribute('data-scroll')] || 0; });
     document.getElementById('legend-sum').innerHTML = esc(t('legend')) + CHEV;
     document.getElementById('legend-list').innerHTML = [['ok','lgOk'],['info','lgInfo'],['warn','lgWarn'],['bad','lgBad'],['rest','lgRest']].map(function(l){return '<li><span class="sdot ' + l[0] + '" aria-hidden="true"></span>' + esc(t(l[1])) + '</li>';}).join('');
     if (S.sheet && !ITEMS[S.sheet]) closeSheet();
+    else if(S.sheet) {
+      var fresh=document.createElement('div');fresh.innerHTML=sheetHtml(ITEMS[S.sheet]);
+      ['.facts','.sheet-status'].forEach(function(selector){var current=sheetBody.querySelector(selector),next=fresh.querySelector(selector);if(current && next)current.innerHTML=next.innerHTML;});
+    }
     if (focusKey) { var el = Array.from(document.querySelectorAll('[data-k]')).find(function (node) { return node.dataset.k === focusKey; }); if (el) el.focus({ preventScroll: true }); }
   }
 
@@ -378,7 +388,10 @@
   });
 
   STR.en.notAvailable = 'not available'; STR.fr.notAvailable = 'non disponible';
-  STR.en.gReview = 'Review'; STR.fr.gReview = 'Révision';
+  STR.en.gReview = 'Needs a reviewer'; STR.fr.gReview = 'À réviser';
+  STR.en.noEstimate = 'no estimate'; STR.fr.noEstimate = 'aucune estimation';
+  STR.en.usedUnknown = '{u} · no estimate'; STR.fr.usedUnknown = '{u} · aucune estimation';
+  STR.en.lastActivity = 'Last activity'; STR.fr.lastActivity = 'Dernière activité';
   STR.en.localControls = 'Local controls'; STR.fr.localControls = 'Commandes locales';
   STR.en.ownerToken = 'Owner token'; STR.fr.ownerToken = 'Jeton du propriétaire';
   STR.en.useToken = 'Use token'; STR.fr.useToken = 'Utiliser le jeton';
@@ -392,8 +405,14 @@
     if (!response.ok) throw Error(S.lang === 'fr' ? 'Ajoutez votre jeton dans les commandes locales.' : 'Add your owner token in Local controls.');
     await refresh();
   }
+  function workWhen(at) {
+    var date=new Date(at), today=new Date(data.now), yesterday=new Date(data.now-86400000);
+    if(date.toDateString()===today.toDateString())return {ago:Math.max(0,Math.round((data.now-at)/60000))};
+    if(date.toDateString()===yesterday.toDateString())return {y:[date.getHours(),date.getMinutes()]};
+    return {day:['sun','mon','tue','wed','thu','fri','sat'][date.getDay()],at:[date.getHours(),date.getMinutes()]};
+  }
   function prepare(item, kind, i) {
-    var x = Object.assign({}, item, { id:kind + ':' + item.id, kind:kind, t:item.title, o:item.owner, d:item.purpose, used:item.seconds === null ? 0 : item.over ? Math.ceil(item.seconds / 60) : Math.round(item.seconds / 60), est:item.estimateSeconds === null ? null : Math.round(item.estimateSeconds / 60), act:item.lastActivity ? Math.max(0, Math.floor((data.now - item.lastActivity) / 60000)) : null, run:!!item.ownerRun, pos:i+1, w:{ago:Math.max(0, Math.round((data.now - item.at) / 60000))} });
+    var x = Object.assign({}, item, { id:kind + ':' + item.id, kind:kind, t:item.title, o:item.owner, d:item.purpose, used:item.seconds === null ? 0 : item.over ? Math.ceil(item.seconds / 60) : Math.round(item.seconds / 60), est:item.estimateSeconds === null ? null : Math.round(item.estimateSeconds / 60), act:item.lastActivity ? Math.max(0, Math.floor((data.now - item.lastActivity) / 60000)) : null, run:!!item.ownerRun, pos:i+1, w:workWhen(item.at) });
     ITEMS[x.id] = x; return x;
   }
   async function refresh(focusKey) {
@@ -409,7 +428,7 @@
       DONE = data.done.map(function(x,i){return prepare(x,'done',i);}); DONE_TOTAL = data.counts.done48h;
       document.getElementById('connection').hidden = !data.notice;
       document.getElementById('connection').textContent = data.notice || '';
-      document.getElementById('controls').hidden = !local;
+      document.getElementById('controls').hidden = !local || !new URLSearchParams(location.search).has('controls');
       document.getElementById('control-title').textContent=t('localControls');
       document.getElementById('token-label').textContent=t('ownerToken');
       document.getElementById('save').textContent=t('useToken');

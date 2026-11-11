@@ -1,21 +1,38 @@
 import { readdir, stat, readFile } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 
-export type OwnerRun = { id: string; title: string; owner: string; started: number; lastActivity: number | null; estimateSeconds: number | null };
+export type OwnerRun = { id: string; title: string; owner: string; purpose?: string; issue?: string | null; started: number; lastActivity: number | null; estimateSeconds: number | null };
 export type BoardEvidence = { ownerRuns: OwnerRun[]; activity: Record<string, number>; ownerFinishedAt?: number };
-export function ownerTitle(brief: string) {
-  const sentence = brief.split(/(?<=[.!?])\s|\n/)[0]!.replace(/^#+\s*/, "").trim();
-  const role = /^You are (?:Alido\s*[·:]?\s*)?(.+?)(?:\s+in\s|\s+for\s|[.;]|$)/i.exec(sentence)?.[1];
-  return role ? role.replace(/[()]/g," ").replace(/\s+/g," ").trim() + " work" : sentence;
+const clean = (s:string) => s.replace(/https?:\/\/\S+|(?:^|\s)~?\/[\w./-]+/g,'').replace(/^[\s#*\-\d.)]+/,'').replace(/[*`]/g,'').replace(/\s+/g,' ').trim();
+export function ownerIdentity(brief:string,fallback:string) {
+  return /^You are (?:Alido\s*[·:]?\s*)?([a-z]+)/i.exec(brief.trim())?.[1]?.toLowerCase() ?? fallback;
+}
+export function ownerSummary(brief:string) {
+  // Prefer an explicit task heading, then the first concrete action after the role/setup.
+  const explicit = /^(?:Task|Goal|Outcome|Title):\s*(.+)$/im.exec(brief)?.[1];
+  const lines = brief.split(/\n|(?<=[.!?])\s+(?=[A-Z])/).map(clean).filter(Boolean);
+  const actions = lines.filter(line=>!/^You are |^(?:Vincent|Design reference|Headless|Last line|Pull first|Preserve|Do not|Never|Run |Tests?;|FIDELITY)/i.test(line));
+  const first=explicit ? clean(explicit) : actions.find(line=>/^(?:Apply|Add|Build|Change|Check|Create|Derive|Details open|Fix|Implement|Make|Move|Open|Port|Remove|Repair|Replace|Show|Update|Use|Wire|Verify)\b/i.test(line)) ?? actions[0] ?? 'Review the current work';
+  const title=first.replace(/\s*\([^)]*\)/g,'').split(';')[0]!.replace(/^Details open as /i,'Show details in ').replace(/[.!?]$/,'').split(/\s+/).slice(0,12).join(' ').slice(0,100);
+  const next=actions.find(line=>line!==first && line.length>25);
+  return {title,purpose:[first,next].filter(Boolean).slice(0,2).map(line=>line!.replace(/[.!?]$/,'')+'.').join(' ').slice(0,500)};
+}
+export function ownerTitle(brief:string) { return ownerSummary(brief).title; }
+export function ownerEstimate(explicit:number|undefined,configured:number|undefined,recent:number[]) {
+  if(explicit && Number.isFinite(explicit) && explicit>0)return explicit;
+  if(configured && Number.isFinite(configured) && configured>0)return configured;
+  const sorted=recent.filter(n=>n>0 && Number.isFinite(n)).slice(-10).sort((a,b)=>a-b), n=sorted.length;
+  return n ? n%2 ? sorted[(n-1)/2]! : (sorted[n/2-1]!+sorted[n/2]!)/2 : null;
 }
 const elapsed = (value: string) => {
   const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
   return Number(days) * 86400 + clock!.split(":").reverse().reduce((sum, n, i) => sum + Number(n) * 60 ** i, 0);
 };
 // Read only native process descriptors, never log/transcript contents or arbitrary home files.
-export async function boardEvidence(dir: string, now = Date.now()): Promise<BoardEvidence> {
+export async function boardEvidence(dir: string, now = Date.now(), configuredEstimate?:number): Promise<BoardEvidence> {
   const activity: Record<string, number> = {}, ownerRuns: OwnerRun[] = [];
   let ownerFinishedAt = 0;
+  const recent = new Map<string,{at:number;seconds:number}[]>();
   try {
     const work = join(dir,"work");
     for (const owner of await readdir(work,{withFileTypes:true})) {
@@ -26,7 +43,15 @@ export async function boardEvidence(dir: string, now = Date.now()): Promise<Boar
         const path=join(parent,run.name);
         for(const name of await readdir(path)) if(/^result(?:\.|$)/.test(name)) {
           const at=(await stat(join(path,name))).mtimeMs;
-          if(at<=now)ownerFinishedAt=Math.max(ownerFinishedAt,at);
+          if(at<=now) {
+            ownerFinishedAt=Math.max(ownerFinishedAt,at);
+            const prompt=['brief.md','brief.txt','prompt.txt','prompt.md'].find(n=>Bun.file(join(path,n)).size>0);
+            if(prompt) {
+              const brief=await readFile(join(path,prompt),'utf8'), started=(await stat(join(path,prompt))).mtimeMs;
+              const identity=ownerIdentity(brief,owner.name), times=recent.get(identity) ?? [];
+              times.push({at,seconds:(at-started)/1000});recent.set(identity,times);
+            }
+          }
         }
       }
     }
@@ -60,11 +85,12 @@ export async function boardEvidence(dir: string, now = Date.now()): Promise<Boar
       const briefName = ["brief.md","brief.txt","prompt.txt","prompt.md"].find(n=>names.includes(n));
       if (!briefName) continue;
       const brief = (await readFile(join(path,briefName),"utf8")).slice(0,12000);
-      const title = ownerTitle(brief);
+      const summary = ownerSummary(brief), owner = ownerIdentity(brief,relative(join(dir,"work"),path).split(sep)[0]!);
       const logName = ["log.txt","native.jsonl","log.jsonl"].find(n=>names.includes(n));
       const lastActivity = logName ? (await stat(join(path,logName))).mtimeMs : null;
       const estimate = /estimateSeconds["'\s:]+(\d+)/.exec(brief);
-      ownerRuns.push({id:relative(join(dir,"work"),path),title,owner:relative(join(dir,"work"),path).split(sep)[0]!,started,lastActivity,estimateSeconds:estimate ? Number(estimate[1]) : null});
+      const issue=brief.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+/)?.[0] ?? null;
+      ownerRuns.push({id:relative(join(dir,"work"),path),...summary,owner,issue,started,lastActivity,estimateSeconds:ownerEstimate(estimate ? Number(estimate[1]) : undefined,configuredEstimate,(recent.get(owner) ?? []).sort((a,b)=>a.at-b.at).map(x=>x.seconds))});
     }
   } catch { /* No process proof means no owner-run claim. */ }
   return {activity,ownerRuns,ownerFinishedAt};
