@@ -1,0 +1,67 @@
+import {test,expect} from 'bun:test';
+import {Store} from '../tracking/store';
+import {maintainFactory,FactoryMergeRejected,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
+const p:FactoryPull={number:1,head:'a'.repeat(40),tree:'b'.repeat(40),createdAt:'2026-01-01',draft:false,state:'OPEN',mergeState:'CLEAN',verify:true};
+function setup(){const s=new Store(':memory:'),effects:string[]=[];const c:Challenge={pr:1,head:p.head,baseRef:'main',baseHead:'b'.repeat(40),ok:true,review:{head:p.head,verdict:'PASS',findings:[],installedGaps:[]},native:{id:'fictional',path:'/fictional',verified:true,models:['gpt-6.1-sol'],efforts:['medium']},cleanup:{verified:true},workspace:'/fictional',startedAt:1};const port:MaintenancePort={pulls:async()=>[p],pull:async()=>({...p}),challenge:async()=>c,verifyChallenge:()=>true,signed:async()=>true,merged:async()=>({state:'MERGED',head:p.head,revision:'c'.repeat(40),tree:p.tree}),merge:async(number,head)=>{effects.push(`merge:${number}:${head}`);return {head:'c'.repeat(40),tree:p.tree};},install:async head=>{effects.push(`install:${head}`);return head;}};return {s,effects,c,port};}
+test('exact independently challenged green signed tree merges then installs',async()=>{const {s,port,effects}=setup();try{expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','installed']);expect(effects).toEqual([`merge:1:${p.head}`,`install:${'c'.repeat(40)}`]);}finally{s.close();}});
+for(const bad of ['head','native','cleanup','findings','verdict','model'] as const)test(`refuse ${bad} challenge evidence`,async()=>{const {s,port,effects,c}=setup();if(bad==='head')c.head='wrong';if(bad==='native')port.verifyChallenge=()=>false;if(bad==='cleanup')c.cleanup.verified=false;if(bad==='findings')c.review.findings=[{defect:true}];if(bad==='verdict')c.review.verdict='CHANGES_REQUESTED';if(bad==='model')c.native.models=['wrong'];try{expect((await maintainFactory(s,port))[0].state).toBe('challenge-needed');expect(effects).toEqual([]);}finally{s.close();}});
+test('head/check race refuses merge',async()=>{const {s,port,effects}=setup();let reads=0;port.pull=async()=>({...p,head:++reads===1?p.head:'raced'});try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(effects).toEqual([]);}finally{s.close();}});
+test('unsigned squash result is never installed',async()=>{const {s,port,effects}=setup();port.signed=async head=>head===p.head;try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(effects).toHaveLength(1);}finally{s.close();}});
+test('dirty installation blocks all merging and retains reason',async()=>{const {s,port,effects}=setup();s.set('factory-install-pending',{head:p.head,tree:p.tree});s.set(`factory-merge-outcome:${p.head}`,{state:'verified',tree:p.tree});port.install=async()=>{throw Error('dirty local work');};try{expect((await maintainFactory(s,port))[0]).toMatchObject({state:'install-blocked',reason:'Error: dirty local work'});expect(effects).toEqual([]);}finally{s.close();}});
+test('oldest first, no draft merge',async()=>{const {s,port,effects}=setup();port.pulls=async()=>[{...p,number:2,createdAt:'2026-02-01',draft:true},p];try{expect((await maintainFactory(s,port)).map(r=>r.pr)).toEqual([1,1,2]);expect(effects.filter(x=>x.startsWith('merge'))).toHaveLength(1);}finally{s.close();}});
+
+test('a rejected squash tree cannot be installed on the next invocation',async()=>{const {s,port,effects}=setup();port.merge=async()=>({head:'c'.repeat(40),tree:'wrong'});port.merged=async()=>({state:'MERGED',head:p.head,revision:'c'.repeat(40),tree:'wrong'});try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');port.pulls=async()=>[];expect((await maintainFactory(s,port))[0].state).toBe('merge-reconcile-blocked');expect(effects).toEqual([]);expect(s.get(`factory-merge-outcome:${'c'.repeat(40)}`)).toMatchObject({state:'blocked'});}finally{s.close();}});
+
+test('a lost merge readback is reconciled without repeating the server effect',async()=>{const {s,port,effects}=setup();let merges=0;port.merge=async()=>{merges++;throw Error('lost readback');};try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(s.get('factory-merge-intent')).toMatchObject({head:p.head,tree:p.tree});port.pulls=async()=>[];const next=await maintainFactory(s,port);expect(next[0].state).toBe('merge-reconciled');expect(effects).toEqual([`install:${'c'.repeat(40)}`]);expect(merges).toBe(1);}finally{s.close();}});
+test('failed installation retains its target and stops before another merge',async()=>{const {s,port,c,effects}=setup();const second={...p,number:2,createdAt:'2026-02-01'};port.pulls=async()=>[p,second];port.pull=async n=>n===1?p:second;port.challenge=async x=>({...c,pr:x.number});port.install=async()=>{throw Error('dirty local work');};try{expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','blocked']);expect(effects).toEqual([`merge:1:${p.head}`]);expect(s.get('factory-install-pending')).toMatchObject({head:'c'.repeat(40)});}finally{s.close();}});
+
+test('behind heads update once and wait for fresh exact-head CI and challenge',async()=>{const {s,port,effects}=setup();port.pull=async()=>({...p,mergeState:'BEHIND'});let updates=0;port.update=async()=>{updates++;};try{expect((await maintainFactory(s,port))[0].state).toBe('branch-update-requested');expect((await maintainFactory(s,port))[0].state).toBe('branch-update-pending');expect(updates).toBe(1);expect(effects).toEqual([]);}finally{s.close();}});
+
+test('an unresolved challenge consumes a normal builder slot without changing capacity',async()=>{const {Engine}=await import('../launcher/engine'),{builderSlots}=await import('../launcher/capacity'),{config}=await import('./fixtures');const s=new Store(':memory:'),e=new Engine(s,config());try{const before=builderSlots(s,e.c);s.set('factory-challenge-slot',{state:'unknown'});expect(builderSlots(s,e.c).used).toBe(before.used+1);expect(builderSlots(s,e.c).max).toBe(before.max);s.set('factory-challenge-slot',{state:'released'});expect(builderSlots(s,e.c).used).toBe(before.used);}finally{s.close();}});
+
+
+test('definitive HTTP rejection releases only merge intent and fresh gates can retry',async()=>{const {s,port,effects}=setup();const normal=port.merge;let tries=0;port.merge=async(n,h)=>{tries++;if(tries===1)throw new FactoryMergeRejected(405,'required checks changed');return normal(n,h);};try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(s.get('factory-merge-intent')).toBeNull();expect(s.get(`factory-merge-rejected:1:${p.head}`)).toMatchObject({status:405});expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','installed']);expect(tries).toBe(2);expect(effects).toHaveLength(2);}finally{s.close();}});
+
+test('retained failed review does not consume a fresh attempt allowance',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');const s=new Store(':memory:');let attempts:number[]=[];
+ const run:typeof import('../adapters/factory-challenge').runFactoryChallenge=async(store,pull,dir,checkout,claimed)=>{attempts.push(pull.number);if(pull.number===2)claimed?.();return undefined;};
+ try{s.set(`factory-challenge:1:${p.head}`,{state:'blocked'});const port=maintenancePort(s,run);await port.challenge(p);await port.challenge({...p,number:2});await port.challenge({...p,number:3});expect(attempts).toEqual([2]);}finally{s.close();}
+});
+
+test('a source freeze blocks new integration and a retained installation without clearing custody',async()=>{
+ const {s,port,effects}=setup();try{
+ port.integrationHold=()=> 'exact Quality proof source freeze';
+ expect((await maintainFactory(s,port))[0].state).toBe('integration-frozen');expect(effects).toEqual([]);
+ s.set('factory-install-pending',{head:p.head,tree:p.tree});s.set(`factory-merge-outcome:${p.head}`,{state:'verified',tree:p.tree});
+ expect((await maintainFactory(s,port))[0].state).toBe('integration-frozen');expect(s.get('factory-install-pending')).toMatchObject({head:p.head});expect(effects).toEqual([]);
+ }finally{s.close();}
+});
+test('freeze crossing a review or merge readback never installs a revision during the proof window',async()=>{
+ for(const boundary of ['review','merge','pending'] as const){const {s,port,effects}=setup();let held=false;
+ try{port.integrationHold=()=>held?'proof window':null;
+ if(boundary==='review'){const prior=port.challenge;port.challenge=async p=>{const c=await prior(p);held=true;return c;};}
+ else if(boundary==='merge'){const prior=port.merge;port.merge=async(n,h)=>{const c=await prior(n,h);held=true;return c;};}
+ else {s.set('factory-install-pending',{head:p.head,tree:p.tree});s.set(`factory-merge-outcome:${p.head}`,{state:'verified',tree:p.tree});port.signed=async()=>{held=true;return true;};}
+ expect((await maintainFactory(s,port)).some(r=>r.state==='integration-frozen')).toBe(true);
+ expect(effects.filter(e=>e.startsWith('install:'))).toEqual([]);
+ if(boundary==='merge')expect(s.get('factory-install-pending')).toMatchObject({head:'c'.repeat(40)});
+ }finally{s.close();}}
+});
+
+test('actual installer rechecks freeze after asynchronous fetch for pending and newly merged source',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');
+ for(const pending of [true,false]){const {s,port,effects}=setup(),target='c'.repeat(40);let held=false,mutated=false;
+ try{
+ const installer=maintenancePort(s,undefined,undefined,{hold:()=>held?'proof window':null,git:async(...args)=>{
+  if(args[0]==='branch')return 'main';if(args[0]==='status')return '';if(args[0]==='remote')return 'https://github.com/fulmar-hq/agent-factory.git';
+  if(args[0]==='fetch'){held=true;return '';}
+  if(args[0]==='merge'){mutated=true;return '';}
+  return args[1]==='origin/main'?target:'d'.repeat(40);
+ },api:async()=>({sha:target,commit:{tree:{sha:p.tree},verification:{verified:true,reason:'valid'}}})});
+ port.install=installer.install;port.integrationHold=installer.integrationHold;
+ if(pending){s.set('factory-install-pending',{head:target,tree:p.tree});s.set(`factory-merge-outcome:${target}`,{state:'verified',tree:p.tree});}
+ await maintainFactory(s,port);
+ expect(held).toBe(true);expect(mutated).toBe(false);expect(s.get('factory-install-pending')).toMatchObject({head:target});
+ expect(effects.filter(e=>e.startsWith('install:'))).toEqual([]);
+ }finally{s.close();}}
+});

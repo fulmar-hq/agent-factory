@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { claudeSettings, materializeSettings, workerSpec, privateDenyPaths } from "../adapters/workers";
 import { ticket, config } from "./fixtures";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { claimSupervisor, superviseSession } from "../launcher/worker";
 
 test("generated per-run native policy protects private siblings without denying the nested worktree", () => {
