@@ -306,8 +306,9 @@ On a day with a valid accepted current-day batch, any pause active or set during
 **17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
 and the accountable pausing role. The authenticated pause control sends directly;
 the 30-second release reconciler catches an earlier pause at freeze start and
-retries retained episode IDs after mail failures. Each new pause episode can
-alert again. Rehearsals also report an active pause as a readiness gap. Nothing
+retries retained episode IDs after mail failures. Each real resume-to-pause transition can alert again; repeated pause requests
+retain the same episode. Pending per-recipient actions retry independently even
+after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
 lifts a pause automatically or permits a late release.
 
 `control.ts pause Platform|Release|Quality|Coordinator` and the authenticated
