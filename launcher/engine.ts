@@ -1,3 +1,5 @@
+import {watchReleasePause,pauseOwner,acceptedPauseDay,capturePauseActions} from './release-pause';
+import type {ReleaseOwner} from './release-actions';
 import { builderSlots, type SlotProcessEvidence } from "./capacity";
 import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
 import {dirname} from 'node:path';
@@ -135,17 +137,24 @@ export class Engine {
       this.recoveryEligible(t, meter, now);
     }
   }
-  pause(paused: boolean, actor: "owner" | "helper") {
+  pause(paused: boolean, actor: "owner" | "helper", accountableOwner?:ReleaseOwner) {
+    const owner=pauseOwner(accountableOwner);
     if (actor !== "owner") blocked("owner only");
+    const noticeDir=this.s.db.filename!==':memory:'?dirname(this.s.db.filename):undefined;
+    const accepted=paused&&noticeDir?acceptedPauseDay(noticeDir):null;
     this.s.atomic(() => {
+      const now=Date.now();
       this.s.set("paused", paused);
       this.s.event(
         randomUUID(),
         paused ? "pause" : "resume",
-        {},
-        `Set pause to ${!paused}`,
+        {owner,ownerSupplied:accountableOwner!==undefined,actor:"owner-control"},
+        `Set pause to ${!paused}`,now,
       );
+      if(paused)capturePauseActions(this.s,accepted,now);
     });
+    if(paused&&this.s.db.filename!==':memory:')try{watchReleasePause(this.s,dirname(this.s.db.filename));}
+    catch(error){this.s.event(randomUUID(),'release-pause-alert-failure',{error:String(error)},'Retain pause; the release reconciler retries the same episode alerts');}
   }
   retryPrior(t: Ticket): Session[] {
     const prior = this.sessions().filter(x => x.ticket === ticketId(t)).sort((a,b) => a.attempt-b.attempt);
