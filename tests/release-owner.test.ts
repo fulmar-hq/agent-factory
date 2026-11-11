@@ -13,3 +13,11 @@ test('Quality scratch has read/write working-directory authority; controller sib
  expect(spec.settings?.sandbox.filesystem.denyWrite.some(p=>scratch===p||scratch.startsWith(p+'/'))).toBe(false);
  }finally{process.env.HOME=home;}
 });
+
+import {AcceptanceSchema} from '../launcher/release';
+test('native findings arrays preserve every finding in canonical wire evidence',()=>{
+ const raw={day:'2026-11-12',revision:'a'.repeat(40),tree:'b'.repeat(40),artifact:'fictional@sha256:'+'c'.repeat(64),verdict:'ACCEPT',evidence:['Hosted tenant denial passed.','Browser interaction remains unproven.']};
+ const parsed=AcceptanceSchema.parse(raw);expect(parsed.evidence).toBe(raw.evidence.join('\n'));expect(parsed.verdict).toBe('ACCEPT');expect(raw.evidence).toHaveLength(2);
+ for(const evidence of [[],[''],[{}],[true],{},null])expect(()=>AcceptanceSchema.parse({...raw,evidence})).toThrow();
+ expect(()=>AcceptanceSchema.parse({...raw,extra:'untrusted'})).toThrow();
+});

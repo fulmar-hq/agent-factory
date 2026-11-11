@@ -1,8 +1,10 @@
 import {z} from 'zod';
+import {createHash} from 'node:crypto';
 import {Store} from '../tracking/store';
-import {queueWake} from './wake';
+import {queueWake,type Wake} from './wake';
+import type {ReleaseBatch} from './release-batch';
 export type ReleaseStep='preflight'|'freeze'|'qa'|'promote'|'readback';
-export type ReleaseContext={day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object};
+export type ReleaseContext={day:string;revision:string;tree:string;holdId:string;deadline:number;acceptance?:object;batch?:ReleaseBatch;readiness?:object};
 export type Snapshot={revision:string;tree:string;holdId:string;held:boolean;overlap:boolean};
 export interface ReleasePort {
  snapshot():Promise<Snapshot>;
@@ -11,7 +13,7 @@ export interface ReleasePort {
 }
 const sha=z.string().regex(/^[a-f0-9]{40}$/);
 const SnapshotSchema=z.object({revision:sha,tree:sha,holdId:z.string().min(1),held:z.boolean(),overlap:z.boolean()});
-export const AcceptanceSchema=z.object({day:z.string(),revision:sha,tree:sha,artifact:z.string().min(1),verdict:z.enum(['ACCEPT','REJECT']),evidence:z.string().min(1)}).strict();
+export const AcceptanceSchema=z.object({day:z.string(),revision:sha,tree:sha,artifact:z.string().min(1),verdict:z.enum(['ACCEPT','REJECT']),evidence:z.union([z.string().trim().min(1),z.array(z.string().trim().min(1)).min(1)]).transform(value=>Array.isArray(value)?value.join('\n'):value)}).strict();
 export type Acceptance=z.infer<typeof AcceptanceSchema> & {at:number;wake:string;native:string;qaRun?:number;qaAttempt?:number};
 type Effect={state:'claimed'|'running'|'success'|'failure';context:ReleaseContext;handle?:Record<string,unknown>;evidence?:Record<string,unknown>};
 type Night={day:string;candidate?:Snapshot;refused?:string};
@@ -23,7 +25,7 @@ export function toronto(now:number) {
 export function deadlineAt(now:number,minute:number){const d=new Date(now);return now-d.getUTCSeconds()*1000-d.getUTCMilliseconds()+(minute-toronto(now).minute)*60000;}
 const undo='Retain effects, handles, frozen source, rollback and receipts. Reconcile uncertain writes; never replay a claim.';
 export class ReleaseExecutor {
- constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{}){}
+ constructor(readonly s:Store,readonly port:ReleasePort,readonly brake:()=>Promise<string|null>,readonly clock=Date.now,readonly reserve:(id:string)=>void=()=>{},readonly batch?:ReleaseBatch,readonly qualityDispatch?:(wake:Wake)=>void){}
  receipt(day:string,kind:string,data:unknown) {this.s.event(`executor:${day}:${kind}`,'release-executor',{day,kind,data},undo,this.clock());}
  effect(day:string,step:ReleaseStep){return this.s.get<Effect>(`executor:${day}:${step}`);}
  refuse(day:string,reason:string){this.receipt(day,`refused:${reason}`,{reason});return {state:'refused',reason};}
@@ -57,7 +59,15 @@ export class ReleaseExecutor {
   const result=await this.port.observe(step,effect.context,effect.handle!);
   if(result.state==='pending')return effect;
   if(this.clock()>=effect.context.deadline)throw Error('completion after deadline');
-  const final:Effect={...effect,state:result.state,evidence:result.evidence};
+  let context=effect.context;
+  if(step==='qa'&&result.state==='success'&&context.batch){
+   if(!sha.safeParse(result.evidence.qaRevision).success||result.evidence.tree!==context.tree)throw Error('Merged QA identity missing');
+   context={...context,revision:String(result.evidence.qaRevision)};
+   const night=this.s.get<Night>(`executor:${day}:night`);
+   if(!night?.candidate)throw Error('Frozen night missing');
+   this.s.set(`executor:${day}:night`,{...night,candidate:{...night.candidate,revision:context.revision}});
+  }
+  const final:Effect={...effect,context,state:result.state,evidence:result.evidence};
   this.s.atomic(()=>{this.s.set(`executor:${day}:${step}`,final);this.receipt(day,`${step}:${result.state}`,result.evidence);});return final;
  }
  async run(stage:'preflight'|'qa'|'production'|'reconcile'){
@@ -82,10 +92,10 @@ export class ReleaseExecutor {
    if(stage==='preflight'){
     if(!night){const candidate=SnapshotSchema.parse(await this.port.snapshot());night=this.s.atomic(()=>{const existing=this.s.get<Night>(`executor:${day}:night`);if(existing)return existing;const value={day,candidate};this.s.set(`executor:${day}:night`,value);return value;});}
     const c=night.candidate!;
-    await this.start(day,'preflight',{day,...c,deadline:deadlineAt(now,1190)},target);
+    await this.start(day,'preflight',{day,...c,...(this.batch?{batch:this.batch}:{}),deadline:deadlineAt(now,1190)},target);
    }else if(stage==='qa'){
     if(!night?.candidate || this.effect(day,'preflight')?.state!=='success')throw Error('successful preflight missing');
-    const context={day,...night.candidate,deadline:deadlineAt(now,1280)};
+    const context={day,...night.candidate,...(this.batch?{batch:this.batch}:{}),deadline:deadlineAt(now,1280)};
     await this.start(day,'qa',context,target);
    }else{
     if(!night?.candidate || this.effect(day,'qa')?.state!=='success')throw Error('QA deployed proof missing');
@@ -103,10 +113,14 @@ export class ReleaseExecutor {
    if(result?.state==='failure'){queueWake(this.s,{id:`release-failed:${day}:${step}`,owner:'release',kind:'release-diagnosis',payload:{step,context:result.context,evidence:result.evidence}},this.clock());return this.refuse(day,`${step} failed or deadline`);}
    if(step==='qa' && result?.state==='success'){
     const at=this.clock(),{context,evidence}=result;
-    if(at>=context.deadline && !this.s.get(`executor:${day}:acceptance`))this.receipt(day,'Quality deadline expired',{tree:context.tree,deadline:context.deadline});
+    if(at>=context.deadline){
+     if(!this.s.get(`executor:${day}:acceptance`))this.receipt(day,'Quality deadline expired',{tree:context.tree,deadline:context.deadline});
+     this.qualityDispatch?.({id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,deadline:context.deadline}});
+    }
     if(at<context.deadline)this.s.atomic(()=>{
      this.receipt(day,'QA deployed',evidence);
-     queueWake(this.s,{id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,artifact:evidence?.artifact,qaEvidence:evidence,deadline:context.deadline}},at);
+     const wake={id:`qa-deployed:${day}:${context.tree}`,owner:'quality',kind:'qa-deployed',payload:{...context,artifact:evidence?.artifact,qaEvidence:evidence,deadline:context.deadline}};
+     queueWake(this.s,wake,at);this.qualityDispatch?.(wake);
     });
    }
    if(step==='promote' && result?.state==='success' && !this.effect(day,'readback')){
@@ -130,5 +144,5 @@ export function recordAcceptance(s:Store,wake:string,native:string,raw:unknown,n
  const a=AcceptanceSchema.parse(raw),qa=s.get<Effect>(`executor:${a.day}:qa`);
  const w=s.get<{owner:string;kind:string;payload:ReleaseContext & {artifact:string}}>(`owner-wake:${wake}`);
  if(!native.trim() || !w || w.owner!=='quality' || w.kind!=='qa-deployed' || w.payload.day!==a.day || w.payload.revision!==a.revision || w.payload.tree!==a.tree || w.payload.artifact!==a.artifact || !qa || qa.state!=='success' || qa.context.tree!==a.tree || qa.context.revision!==a.revision || qa.evidence?.artifact!==a.artifact || now<Number(qa.evidence?.completedAt ?? Infinity) || now>=qa.context.deadline || toronto(now).day!==a.day)throw Error('Quality receipt does not bind timely frozen QA');
- return s.atomic(()=>{if(s.get(`executor:${a.day}:acceptance`))throw Error('Quality verdict already retained');const receipt={...a,at:now,wake,native,qaRun:qa.evidence?.qaRun,qaAttempt:qa.evidence?.qaAttempt};s.set(`executor:${a.day}:acceptance`,receipt);s.event(`executor:${a.day}:quality`,'quality-acceptance',receipt,undo,now);return receipt;});
+ return s.atomic(()=>{if(s.get(`executor:${a.day}:acceptance`))throw Error('Quality verdict already retained');const receipt={...a,inputDigest:createHash('sha256').update(JSON.stringify(raw)).digest('hex'),at:now,wake,native,qaRun:qa.evidence?.qaRun,qaAttempt:qa.evidence?.qaAttempt};s.set(`executor:${a.day}:acceptance`,receipt);s.event(`executor:${a.day}:quality`,'quality-acceptance',receipt,undo,now);return receipt;});
 }
