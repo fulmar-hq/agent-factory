@@ -3,6 +3,7 @@ import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:f
 import {join,resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {command} from '../adapters/github';
+import {integrationFreeze} from '../launcher/integration-freeze';
 import {root,configAt} from '../launcher/config';
 import {reviewProductChanges,type ReviewPass} from '../launcher/code-review';
 import {githubPages} from '../adapters/github-pages';
@@ -23,6 +24,7 @@ async function pull(number:number):Promise<FactoryPull>{
  return {number:p.number,head:p.head.sha,tree:commit.tree.sha,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
 }
 export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:ReviewPass={claims:0}):MaintenancePort{return {
+ integrationHold:()=>integrationFreeze(root),
  pulls:async()=>{const list=await api('pulls?state=open&sort=created&direction=asc&per_page=100');if(!Array.isArray(list)||list.length>=100)throw Error('factory PR inventory truncated');return list.filter(p=>p.base?.ref==='main'&&p.base?.repo?.full_name===factoryRepository&&p.head?.repo?.full_name===factoryRepository).map(p=>({number:p.number,head:p.head.sha,createdAt:p.created_at,draft:p.draft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
  pull,
  update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
@@ -49,6 +51,7 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:Re
  }
 };}
 if(import.meta.main){
+ const freeze=integrationFreeze(root);if(freeze){console.log(JSON.stringify({state:'integration-frozen',reason:freeze}));process.exit(0);}
  if(process.argv.slice(2).join()!=='--once')throw Error('Usage: bun scripts/maintain-factory.ts --once');
  if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('reviewed clean installed main is required before maintenance');
  if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');

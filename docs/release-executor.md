@@ -198,3 +198,17 @@ check. No permanent owner configuration, model qualification, budget, worker
 capacity or independence rule changes. Register the existing read-only acceptance
 workspace through the trusted setup before the release; this source change
 starts no native/model work and does not replay any existing acceptance.
+
+Release job installation uses the canonical factory checkout registered in private
+`repositories.json`, rather than the worktree running the installer. It requires
+clean factory main and the expected origin. Scheduled PATH includes the operator's
+`bin`, the actual Bun directory and standard Homebrew/system directories; required
+local executables are resolved before replacement. Replacing an idle loaded job
+explicitly boots it out and bootstraps the archived/reviewed definition, then reads
+back its actual source and PATH. An active job refuses replacement. This changes
+no release admission minute and performs no catch-up release.
+
+Billing and final QA-server reads check the existing original-password/MFA sign-in
+receipt before invoking AWS. An expired/missing receipt causes a local refusal;
+subsequent observers reread local provenance while waiting for the owner and never
+try SSO or loop on the AWS CLI. A real owner renewal can restore that read path.

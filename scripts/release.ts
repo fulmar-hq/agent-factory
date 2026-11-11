@@ -1,3 +1,4 @@
+import {withReleaseAuth} from '../launcher/release-auth';
 import {readFileSync} from 'node:fs';
 import {dispatchReleaseQuality} from '../launcher/release-quality-dispatch';
 import {releaseWindowResult,readQaServerStates} from '../launcher/release-result';
@@ -26,7 +27,7 @@ try {
   const attempt=s.get<number>('release-billing-refresh-at')??0;
   if(Date.now()-attempt>=300000){
    s.set('release-billing-refresh-at',Date.now());
-   try {const b=await releaseBilling(root);observeReleaseBilling(s,c,b,Date.now());s.event(`billing-import:${b.receipt}`,'billing-import',b,'Retain source receipts; correct through a fresh import');}
+   try {const b=await withReleaseAuth(root,()=>releaseBilling(root));observeReleaseBilling(s,c,b,Date.now());s.event(`billing-import:${b.receipt}`,'billing-import',b,'Retain source receipts; correct through a fresh import');}
    catch(error){s.event(`billing-import-failure:${Date.now()}`,'billing-import-failure',{error:String(error)},'Retry read-only import before the next window');}
   }
  }
@@ -35,7 +36,7 @@ try {
   if(s.get('aws-stop-latched')===true)return 'AWS stop latched';
   if(s.get('paused')!==false)return 'factory paused';
   const now=Date.now();
-  try {admittedBilling=await releaseBilling(root,now);}catch(error){return `billing refresh failed: ${String(error)}`;}
+  try {admittedBilling=await withReleaseAuth(root,()=>releaseBilling(root,now));}catch(error){return `billing refresh failed: ${String(error)}`;}
   if(stage!=='dry-run')observeReleaseBilling(s,c,admittedBilling,now);
   const reason=awsRefusal(s,c,now,admittedBilling);
   if(reason)return reason;
@@ -49,7 +50,7 @@ try {
  }
  if(stage==='dry-run'||stage==='preflight'&&minute===1140||stage==='qa'&&minute===1200){
   let billingRefusal:string|null=null;
-  try{admittedBilling=await releaseBilling(root);const now=Date.now();billingRefusal=awsRefusal(s,c,now,admittedBilling);if(!billingRefusal&&funds(now)<100)billingRefusal='release wallet insufficient';}
+  try{admittedBilling=await withReleaseAuth(root,()=>releaseBilling(root));const now=Date.now();billingRefusal=awsRefusal(s,c,now,admittedBilling);if(!billingRefusal&&funds(now)<100)billingRefusal='release wallet insufficient';}
   catch(error){billingRefusal=String(error);}
   // Billing is collected even when pause or STOP independently refuses starts.
   const factorySource=(await command(['git','rev-parse','HEAD'],import.meta.dir+'/..')).trim();
@@ -94,7 +95,7 @@ try {
  console.error(String(error));process.exitCode=1;
 }finally{
  if(stage==='reconcile')try{
-  await releaseWindowResult(s,{observeServers:()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'})});
+  await releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))});
  }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
  s.close();
 }
