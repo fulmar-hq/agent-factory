@@ -1,0 +1,178 @@
+import importlib.util, json, os, pathlib, sqlite3, subprocess, tempfile, unittest
+from unittest.mock import patch
+spec=importlib.util.spec_from_file_location('cleaner',pathlib.Path(__file__).parents[1]/'scripts/cache-retention.py')
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+
+class Safety(unittest.TestCase):
+ def setUp(self):
+  scratch=pathlib.Path(__file__).parents[1]/'.factory-tmp';scratch.mkdir(exist_ok=True)
+  self.root=pathlib.Path(tempfile.mkdtemp(dir=scratch)).resolve();self.repo=self.root/'workspaces'/'a';self.repo.mkdir(parents=True)
+  self.git('init','-q');self.git('config','user.name','Fixture');self.git('config','user.email','fixture@example.test')
+  (self.repo/'.gitignore').write_text('node_modules/\n.next/\n.factory-tmp/\n')
+  self.git('add','.gitignore');self.git('-c','commit.gpgsign=false','commit','-qm','fixture')
+  self.db=sqlite3.connect(self.root/'controller.sqlite');self.db.executescript('create table sessions(id text,status text,pid integer,provider text,brief text);create table kv(key text,value text);create table events(kind text,data text,at integer);')
+  self.db.execute('insert into events values(?,?,?)',('custody',json.dumps({'id':'a','pid':99999999}),1))
+  self.db.execute("insert into sessions values(?,?,?,?,?)",('a','waiting-browser',None,'codex',json.dumps({'repo':'fulmar-hq/alido'})));self.db.execute('insert into kv values(?,?)',('cleanup-evidence:a',json.dumps({'verified':True})));self.db.commit()
+  self.cache=self.repo/'node_modules';self.cache.mkdir();(self.cache/'generated.js').write_text('regenerable');(self.cache/'result.jsonl').write_text('evidence')
+  self.db.execute('insert into kv values(?,?)',('dependency-installation:a',json.dumps(m.dependency_identity(self.cache))))
+  self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+m.dependency_identity(self.cache),json.dumps(m.dependency_identity(self.cache,True))));self.db.commit()
+ def git(self,*args):
+  return subprocess.check_output(['git','-C',str(self.repo),*args],stderr=subprocess.STDOUT)
+ def test_waiting_browser_preserves_evidence_source_and_git(self):
+  (self.repo/'dirty.txt').write_text('uncommitted')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists());self.assertEqual((self.cache/'result.jsonl').read_text(),'evidence')
+  self.assertFalse((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists());self.assertEqual((self.repo/'dirty.txt').read_text(),'uncommitted');self.git('cat-file','-e','HEAD')
+ def test_null_session_pid_does_not_release_live_or_unknown_original_supervisor(self):
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  for probe in [None,PermissionError('unknown process identity')]:
+   with patch.object(m,'quiet',return_value=True),patch.object(m.os,'kill',side_effect=probe):m.sweep(self.root)
+   self.assertTrue((self.cache/'generated.js').exists())
+  self.db.execute("delete from events where kind='custody'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_pending_browser_request_retains_dependencies_after_supervisor_exit(self):
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  scratch=self.repo/'.factory-tmp';scratch.mkdir();(scratch/'browser-needed.json').write_text('{"result":"BROWSER_NEEDED"}')
+  with patch.object(m,'quiet',return_value=True),patch.object(m.os,'kill',side_effect=ProcessLookupError):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_publisher_clones_require_exact_pretest_binding_and_keep_new_evidence(self):
+  import hashlib
+  self.db.execute("update sessions set status='finished'");self.db.commit()
+  for area in ['delivery','browser-drain']:
+   clone=self.root/'runs'/area/'a'/'attempt'/'publish-fixture';clone.mkdir(parents=True)
+   subprocess.check_call(['git','clone','-q',str(self.repo),str(clone)])
+   cache=clone/'node_modules';cache.mkdir();(cache/'generated.js').write_text('fresh dependency')
+   manifest=m.dependency_identity(cache,True)
+   key='publisher-dependency-installation:'+hashlib.sha256(str(clone).encode()).hexdigest()
+   bound={'version':1,'session':'a','checkout':str(clone),'fingerprint':manifest['fingerprint']}
+   self.assertIsNone(m.cache_manifest(self.db,self.root,clone,'node_modules'))
+   self.db.execute('insert into kv values(?,?)',(key,json.dumps({**bound,'checkout':str(self.repo)})))
+   self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+manifest['fingerprint'],json.dumps(manifest)));self.db.commit()
+   self.assertIsNone(m.cache_manifest(self.db,self.root,clone,'node_modules'))
+   self.db.execute('update kv set value=? where key=?',(json.dumps(bound),key));self.db.commit()
+   (cache/'new-probe.bin').write_text('new test evidence');(cache/'result.jsonl').write_text('test result')
+   with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+   self.assertTrue((cache/'generated.js').exists());self.assertEqual((cache/'new-probe.bin').read_text(),'new test evidence');self.assertTrue((cache/'result.jsonl').exists())
+ def test_reports_and_unknown_or_modified_material_survive(self):
+  reports={'junit.xml':'<testsuite failures="1"/>','results.json':'{"failed":true}', 'report.html':'failure', 'custom-receipt.js':'failed isolation probe'}
+  for name,value in reports.items():(self.cache/name).write_text(value)
+  nested=self.cache/'generated-package';nested.mkdir();(nested/'unknown.bin').write_bytes(b'\x00private evidence')
+  (self.cache/'modified.js').write_text('original dependency')
+  # Even a report present in a trusted installation is protected evidence.
+  manifest=m.dependency_identity(self.cache,True)
+  self.db.execute('insert into kv values(?,?)',('dependency-cache-manifest:'+manifest['fingerprint'],json.dumps(manifest)))
+  self.db.execute("update kv set value=? where key='dependency-installation:a'",(json.dumps(manifest['fingerprint']),));self.db.commit()
+  (self.cache/'modified.js').write_text('failure details written by worker')
+  (self.cache/'new-module.js').write_text('unclassified source/evidence')
+  (nested/'unknown.bin').write_bytes(b'changed failure evidence')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists())
+  for name,value in reports.items():self.assertEqual((self.cache/name).read_text(),value)
+  self.assertEqual((self.cache/'modified.js').read_text(),'failure details written by worker')
+  self.assertTrue((self.cache/'new-module.js').exists());self.assertEqual((nested/'unknown.bin').read_bytes(),b'changed failure evidence')
+ def test_missing_manifest_and_build_caches_remain_unknown(self):
+  build=self.repo/'.next';build.mkdir();(build/'output.js').write_text('unproven')
+  self.db.execute("delete from kv where key like 'dependency-cache-manifest:%'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists());self.assertTrue((build/'output.js').exists())
+ def test_live_or_unknown_cleanup_and_process_references_refuse(self):
+  for status,proof in [('running',True),('finished',False)]:
+   self.db.execute('update sessions set status=?',(status,));self.db.execute('update kv set value=?',(json.dumps({'verified':proof}),));self.db.commit()
+   with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+   self.assertTrue((self.cache/'generated.js').exists())
+  self.db.execute("update sessions set status='finished'");self.db.execute('update kv set value=?',(json.dumps({'verified':True}),));self.db.commit()
+  with patch.object(m,'quiet',return_value=False):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_staged_removal_and_symlink_roots_refuse(self):
+  self.git('add','-f','node_modules/generated.js');self.git('-c','commit.gpgsign=false','commit','-qm','tracked fixture');self.git('rm','--cached','node_modules/generated.js')
+  self.assertFalse(m.eligible(self.repo,self.cache))
+  link=self.repo/'.next';link.symlink_to(self.cache,target_is_directory=True);self.assertFalse(m.eligible(self.repo,link))
+ def test_unknown_probe_and_dry_run_preserve_everything(self):
+  with patch.object(m,'quiet',side_effect=RuntimeError('unknown process evidence')):m.sweep(self.root)
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root,False)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_apply_is_rejected_and_audit_never_deletes(self):
+  before=self.cache.joinpath('generated.js').read_bytes()
+  with self.assertRaisesRegex(RuntimeError,'archive-only'):
+   m.sweep(self.root,True)
+  self.assertFalse((self.root/'receipts').exists())
+  child=subprocess.run(['python3',str(pathlib.Path(__file__).parents[1]/'scripts/cache-retention.py'),'--root',str(self.root),'--apply'],capture_output=True,text=True)
+  self.assertNotEqual(child.returncode,0)
+  self.assertIn('unrecognized arguments: --apply',child.stderr)
+  with patch.object(m,'quiet',return_value=True),patch.object(pathlib.Path,'unlink',side_effect=AssertionError('deletion forbidden')),patch.object(pathlib.Path,'rmdir',side_effect=AssertionError('deletion forbidden')):
+   result=m.sweep(self.root)
+  self.assertEqual(result['mode'],'audit-only');self.assertEqual(result['recoveredBytes'],0)
+  self.assertEqual(self.cache.joinpath('generated.js').read_bytes(),before)
+  self.assertFalse((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists())
+  rows=[json.loads(line) for line in pathlib.Path(result['receipt']).read_text().splitlines()]
+  self.assertTrue(any(row['state']=='planned' and row['retained'] for row in rows))
+ def test_controller_snapshot_is_readonly_and_closed_before_process_work(self):
+  original=m.sqlite3.connect;connections=[]
+  def connect(*args,**kwargs):
+   self.assertTrue(args[0].endswith('?mode=ro'));self.assertTrue(kwargs['uri']);self.assertLessEqual(kwargs['timeout'],1)
+   db=original(*args,**kwargs);connections.append(db);return db
+  def quiet(paths):
+   self.assertTrue(connections)
+   for db in connections:
+    with self.assertRaises(sqlite3.ProgrammingError):db.execute('select 1')
+   return True
+  with patch.object(m.sqlite3,'connect',side_effect=connect),patch.object(m,'quiet',side_effect=quiet):
+   result=m.sweep(self.root)
+  self.assertEqual(result['mode'],'audit-only')
+ def test_incomplete_process_inventories_refuse(self):
+  uid=os.getuid();ps=f'{uid} 4242 S python3\n'
+  complete='p4242\ncpython3\nfcwd\nn/other\nftxt\ntREG\nn/usr/bin/python3\nf0\nn/dev/null\n'
+  def run(files,process=ps):
+   with patch.object(m,'command',side_effect=[(process,99999),files,(process,99998)]):return m.quiet([self.repo])
+  self.assertTrue(run(complete))
+  with patch.object(m,'command',side_effect=[(ps,99999),complete,(ps+f'{uid} 4343 S node server.js\n',99998)]):
+   with self.assertRaises(RuntimeError):m.quiet([self.repo])
+  with self.assertRaises(RuntimeError):run('p4242\ncpython3\nfcwd\ntDIR\nn/other\n')
+  self.assertTrue(run(complete+'ftwd\ntDIR\nn/other-thread-cwd\nffp.\ntREG\nn/other-fileport\n'))
+  self.assertFalse(run(complete+'ftwd\ntDIR\nn'+str(self.repo)+'\n'))
+  for kind in ['PIPE','NPOLICY','NEXUS']:
+   self.assertTrue(run(complete+f'f9\nt{kind}\nn\n'))
+  for kind in ['REG','DIR','unknown']:
+   with self.assertRaises(RuntimeError):run(complete+f'f9\nt{kind}\nn\n')
+  for files in ['p4242\nn/proc/4242/fd (opendir: Permission denied)\n','p4242\ncpython3\nf0\nn/dev/null\n',complete[:-1],complete.replace('n/dev/null','n/proc/fd (stat: Permission denied)'),complete.replace('fcwd\nn/other\n','')]:
+   with self.assertRaises(RuntimeError):run(files)
+  with patch.object(m,'command',side_effect=[('partial\n',99999)]):
+   with self.assertRaises(RuntimeError):m.quiet([self.repo])
+  from subprocess import CompletedProcess
+  with patch.object(m.subprocess,'run',return_value=CompletedProcess([],0,'valid-looking output','warning: incomplete inventory')):
+   with self.assertRaises(RuntimeError):m.command(['lsof'])
+ def test_sqlite_recovery_evidence_remains_usable(self):
+  import sys
+  path=self.cache/'captured.ledger'
+  child=subprocess.Popen([sys.executable,'-c',"import sqlite3,sys,time;c=sqlite3.connect(sys.argv[1]);c.execute('pragma journal_mode=wal');c.execute('pragma wal_autocheckpoint=0');c.execute('create table events(value text)');c.execute(\"insert into events values('retained')\");c.commit();print('ready',flush=True);time.sleep(60)",str(path)],stdout=subprocess.PIPE,text=True)
+  try:self.assertEqual(child.stdout.readline().strip(),'ready')
+  finally:child.terminate();child.wait(timeout=5);child.stdout.close()
+  self.assertTrue(pathlib.Path(str(path)+'-wal').exists())
+  (self.cache/'other.sqlite-journal').write_text('recovery');(self.cache/'other.db-shm').write_text('recovery')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue(path.exists());self.assertTrue(pathlib.Path(str(path)+'-wal').exists());self.assertTrue((self.cache/'other.sqlite-journal').exists());self.assertTrue((self.cache/'other.db-shm').exists())
+  recovered=sqlite3.connect(path)
+  try:self.assertEqual(recovered.execute('select value from events').fetchone()[0],'retained')
+  finally:recovered.close()
+ def test_unbound_browser_parent_keeps_dependencies(self):
+  self.db.execute("delete from kv where key='dependency-installation:a'");self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists())
+ def test_unsupported_browser_parent_retains_dependencies(self):
+  self.db.execute('update sessions set brief=?',(json.dumps({'repo':'fictional/other-project'}),));self.db.commit()
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertTrue((self.cache/'generated.js').exists());self.assertFalse((self.repo/'.factory-tmp/dependencies-evicted.jsonl').exists())
+ def test_hardlinked_marker_cannot_modify_source(self):
+  scratch=self.repo/'.factory-tmp';scratch.mkdir();source=self.repo/'dirty-source';source.write_text('preserve')
+  os.link(source,scratch/'dependencies-evicted.jsonl')
+  with patch.object(m,'quiet',return_value=True):m.sweep(self.root)
+  self.assertEqual(source.read_text(),'preserve');self.assertTrue((self.cache/'generated.js').exists())
+ def test_special_cache_files_refuse(self):
+  os.mkfifo(self.cache/'unknown-pipe');self.assertFalse(m.eligible(self.repo,self.cache))
+ def test_nested_git_refuses_and_links_never_follow(self):
+  target=self.repo/'outside';target.write_text('keep');(self.cache/'link').symlink_to(target)
+  self.assertTrue(m.eligible(self.repo,self.cache));m.sweep(self.root);self.assertTrue((self.cache/'link').is_symlink());self.assertEqual(target.read_text(),'keep')
+  (self.cache/'.git').mkdir();self.assertFalse(m.eligible(self.repo,self.cache))
+
+if __name__=='__main__':unittest.main()
