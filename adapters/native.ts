@@ -15,6 +15,7 @@ export class NativeReceipt {
   private offset=0;
   private pending=Buffer.alloc(0);
   private bound=false;
+  private terminalError?:Error;
   caughtUp=false;
   private models=new Set<string>();
   private efforts=new Set<string>();
@@ -22,7 +23,14 @@ export class NativeReceipt {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("invalid native receipt ID");
   }
   beginTurn() { this.models.clear(); this.efforts.clear(); }
+  private fail(message:string):never {
+    this.terminalError=new Error(message);
+    throw this.terminalError;
+  }
   poll(accounting:WorkerAccounting) {
+    // Verification describes only a completed read, never a previous successful poll.
+    this.caughtUp=false;
+    if(this.terminalError)throw this.terminalError;
     if (!this.path) {
       if(this.provider==="claude") {
         const p=join(this.home,".claude","projects",this.workspace.replace(/[^a-zA-Z0-9]/g,"-"),`${this.id}.jsonl`);
@@ -39,33 +47,33 @@ export class NativeReceipt {
     if(!this.path)return;
     const fd=openSync(this.path,"r");
     try {
-      if(statSync(this.path).size<this.offset)throw Error("native receipt truncated");
+      if(statSync(this.path).size<this.offset)this.fail("native receipt truncated");
       const chunk=Buffer.alloc(1024*1024), n=readSync(fd,chunk,0,chunk.length,this.offset);
       this.offset+=n;
       this.pending=Buffer.concat([this.pending,chunk.subarray(0,n)]);
       let end:number;
       while((end=this.pending.indexOf(10))>=0) {
         const line=this.pending.subarray(0,end).toString("utf8");this.pending=this.pending.subarray(end+1);
-        let json:unknown;try {json=JSON.parse(line);}catch{throw Error("malformed native receipt");}
+        let json:unknown;try {json=JSON.parse(line);}catch{this.fail("malformed native receipt");}
         const parsed=Row.safeParse(json);if(!parsed.success)continue;
         const x=parsed.data;
         if(this.provider==="codex") {
           if(x.type==="session_meta") {
-            if(x.payload?.id!==this.id || x.payload.cwd!==this.workspace)throw Error("native receipt custody mismatch");
+            if(x.payload?.id!==this.id || x.payload.cwd!==this.workspace)this.fail("native receipt custody mismatch");
             this.bound=true;
           }
-          if(!this.bound)throw Error("unbound native receipt");
+          if(!this.bound)this.fail("unbound native receipt");
           if(x.type==="turn_context") {if(x.payload?.model)this.models.add(x.payload.model);if(x.payload?.effort)this.efforts.add(x.payload.effort);}
         } else {
-          if(x.sessionId!==this.id)throw Error("native receipt custody mismatch");
-          if(x.cwd && x.cwd!==this.workspace)throw Error("native receipt workspace mismatch");
+          if(x.sessionId!==this.id)this.fail("native receipt custody mismatch");
+          if(x.cwd && x.cwd!==this.workspace)this.fail("native receipt workspace mismatch");
           if(x.cwd===this.workspace)this.bound=true;
           if(x.type==="assistant") {if(x.message?.model)this.models.add(x.message.model);if(x.effort)this.efforts.add(x.effort);}
           if(x.type==="api-request") {if(x.params?.model)this.models.add(x.params.model);if(x.params?.output_config?.effort)this.efforts.add(x.params.output_config.effort);}
         }
         accounting.ingest(this.provider,line);
       }
-      if(this.pending.length>16*1024*1024)throw Error("native receipt line too large");
+      if(this.pending.length>16*1024*1024)this.fail("native receipt line too large");
       this.caughtUp=this.offset===statSync(this.path).size && this.pending.length===0;
     } finally {closeSync(fd);}
   }
@@ -74,6 +82,6 @@ export class NativeReceipt {
     const models=[...this.models],efforts=[...this.efforts];
     return {path:this.path,id:this.id,bound:this.bound,models,efforts,
       conflict:models.some(m=>m!==expected)||efforts.some(e=>e!==effort),
-      verified:this.caughtUp&&this.bound&&models.length===1&&models[0]===expected&&efforts.length===1&&efforts[0]===effort};
+      verified:!this.terminalError&&this.caughtUp&&this.bound&&models.length===1&&models[0]===expected&&efforts.length===1&&efforts[0]===effort};
   }
 }

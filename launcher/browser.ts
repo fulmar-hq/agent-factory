@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, openSync, closeSync, fstatSync, readFileSync, writeFileSync, mkdirSync, renameSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "./engine";
+import {requireDiskCapacity} from './disk';
 import type { Store } from "../tracking/store";
 import type { Ticket } from "./config";
 
@@ -20,6 +21,7 @@ export const BrowserResult = z.object({
 }).strict().refine(r => r.status !== "done" || (r.tabId !== null && r.tabClosed && !r.blocker), "done requires evidence and closed own tab");
 export type BrowserReceipt = z.infer<typeof BrowserResult>;
 export type BrowserJob = {
+  detached?: boolean;
   id: string; kind: "browser"; parent: string; issue: number; repo: string;
   request: BrowserRequest; state: "queued" | "starting" | "running" | "question" | "fallback" | "returned";
   at: number; deadline: number; runDeadline?: number; launchAt?:number; nonce: string; native: string;
@@ -43,8 +45,17 @@ export function readBrowserJSON(path: string): unknown {
   } finally { closeSync(fd); }
 }
 export const browserDir = (dir:string, j:BrowserJob) => join(dir, "browser", j.id, j.nonce);
+export function isLocalPreview(url:string) {
+  // URL canonicalizes IPv4 aliases and IPv6 spelling, including dotted mapped
+  // addresses. A final DNS root dot does not make localhost a signed-in site.
+  const host=new URL(url).hostname.toLowerCase().replace(/\.$/,"");
+  const mapped=host.match(/^\[::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}\]$/);
+  const mappedLoopback=mapped!==null && (Number.parseInt(mapped[1]!,16) >>> 8)===127;
+  return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host === "[::]" || host === "[::ffff:0:0]" || host === "0.0.0.0" || /^127(?:\.[0-9]{1,3}){3}$/.test(host) || mappedLoopback;
+}
 export function queueBrowser(e: Engine, parent: string, raw: unknown, now = Date.now()) {
   const request = BrowserNeeded.parse(raw);
+  if(isLocalPreview(request.url))throw Error("local preview belongs to nightly hosted acceptance, never the browser queue");
   return e.s.atomic(() => {
     const x = e.sessions().find(x => x.id === parent);
     if (!x || x.provider !== "codex" || !x.native_id || x.status !== "finished" || e.s.get<{verified:boolean}>(`cleanup-evidence:${parent}`)?.verified !== true)
@@ -52,11 +63,11 @@ export function queueBrowser(e: Engine, parent: string, raw: unknown, now = Date
     const id = createHash("sha256").update(`${parent}:${JSON.stringify(request)}`).digest("hex");
     if (e.s.get(`browser-job:${id}`)) throw Error("duplicate browser request");
     const t = JSON.parse(x.brief) as Ticket;
-    const job: BrowserJob = {id, kind:"browser", parent, issue:t.number, repo:t.repo, request, state:"queued", at:now,
+    const job: BrowserJob = {id, detached:true, kind:"browser", parent, issue:t.number, repo:t.repo, request, state:"queued", at:now,
       deadline:now + 2*60*60*1000, nonce:randomUUID(), native:randomUUID()};
     saveBrowser(e.s, job);
-    e.s.db.query("UPDATE sessions SET status='waiting-browser' WHERE id=?").run(parent);
-    e.s.set(`browser-parent:${parent}`, {child:id, state:"RW", deadline:job.deadline, default:"not done"});
+    // The standalone local check owns no builder slot, paths or project copy.
+    // Its result is retained on the child; it never resumes the source author.
     e.s.event(`browser-queued:${id}`, "browser-child-created", job, "Retain child, parent claims, native custody and logs; stop/reconcile before signed revert", now);
     return job;
   });
@@ -97,6 +108,7 @@ function parentScratch(workspace:string) {
   return scratch;
 }
 export async function reconcileBrowsers(e:Engine, dir:string, p:BrowserPorts, now=Date.now()) {
+  e.resumeContinuations(p.resume);
   // Effects are serialized by the caller's cross-process lease. Starting is
   // committed before spawn: an uncertain start is never silently replayed.
   for (const j of browserJobs(e.s)) {
@@ -208,6 +220,7 @@ export async function reconcileBrowsers(e:Engine, dir:string, p:BrowserPorts, no
   if(e.s.get("paused")!==false || browserJobs(e.s).some(j=>j.nativePending || j.fallbackPending || ["starting","running","fallback"].includes(j.state)))return;
   const j=browserJobs(e.s).find(j=>j.state==="queued");
   if(!j)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Retain queued custody.
   j.state="starting";j.launchAt=now;j.runDeadline=Math.min(j.deadline,now+10*60*1000);saveBrowser(e.s,j);
   const path=join(browserDir(dir,j),"result.json");mkdirSync(browserDir(dir,j),{recursive:true,mode:0o700});
   const brief=browserBrief(j,path,e.s.get<string>(`browser-answer:${j.id}`) ?? undefined);
@@ -222,8 +235,10 @@ function signinQuestion(j:BrowserJob) {
   return `${new URL(j.request.url).hostname.slice(0,45)} needs your help. Can you finish the blocked step in Chrome?`;
 }
 export function resumeBrowser(e:Engine,j:BrowserJob,dir:string,spawn:(id:string)=>void) {
+ if(j.detached)return;
+ return e.s.atomic(()=>{
   const x=e.sessions().find(x=>x.id===j.parent);
-  if(!x || x.status!=="waiting-browser" || !j.result || e.s.get<{child:string}>(`browser-parent:${x.id}`)?.child!==j.id || x.pid!==null || e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return;
+  if(!x || x.status!=="waiting-browser" || !j.result || e.s.get<{child:string}>(`browser-parent:${x.id}`)?.child!==j.id || e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)return;
   const workspace=join(dir,"workspaces",x.id);
   const scratch=parentScratch(workspace),target=join(scratch,"browser-result.json");
   try {const existing=lstatSync(target);if(!existing.isFile() || existing.nlink!==1)throw Error("parent receipt link/special file refused");}
@@ -234,19 +249,32 @@ export function resumeBrowser(e:Engine,j:BrowserJob,dir:string,spawn:(id:string)
   e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result,custodyBlocked:!!(j.nativePending || j.fallbackPending)});
   if(!x.native_id || e.s.get("paused")!==false || j.nativePending || j.fallbackPending)return;
   if(e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true || e.budget(x).nextTurnBlocked)return;
-  e.s.atomic(()=>{
-    if(e.s.db.query("UPDATE sessions SET status='starting' WHERE id=? AND status='waiting-browser' AND pid IS NULL").run(x.id).changes!==1)return;
-    const attempt=randomUUID();
-    e.s.set(`continuation:${x.id}`,{attempt,native:x.native_id,receipt:`browser child ${j.id} returned ${j.result!.status}`});
-    e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result});
-    e.s.event(`browser-resume:${j.id}`,"browser-parent-resume",{parent:x.id,child:j.id,attempt},"Preserve original budget, paths and native session",Date.now());
-    spawn(x.id);
-  });
+  const slots=e.slots();
+  if(!slots.dormant.has(x.id) || !slots.free)return;
+  try {requireDiskCapacity(e.diskProbe);}catch{return;} // Keep waiting parent/result.
+  if(e.s.db.query("UPDATE sessions SET status='starting',pid=NULL WHERE id=? AND status='waiting-browser'").run(x.id).changes!==1)return;
+  const attempt=randomUUID();
+  e.s.set(`continuation:${x.id}`,{attempt,native:x.native_id,receipt:`browser child ${j.id} returned ${j.result!.status}`});
+  e.s.set(`browser-parent:${x.id}`,{child:j.id,state:"returned",result:j.result});
+  e.s.event(`browser-resume:${j.id}`,"browser-parent-resume",{parent:x.id,child:j.id,attempt},"Preserve original budget, paths and native session",Date.now());
+  spawn(x.id);
+ });
 }
 export function collectBrowserRequest(e:Engine,id:string,workspace:string,now=Date.now()) {
   const path=join(parentScratch(workspace),"browser-needed.json");
   let raw:unknown;try {raw=readBrowserJSON(path);}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return;throw error;}
-  const job=queueBrowser(e,id,raw,now);
+  const request=BrowserNeeded.parse(raw);
+  if(isLocalPreview(request.url)) {
+    const key=createHash("sha256").update(`${id}:${JSON.stringify(request)}`).digest("hex");
+    const session=e.sessions().find(x=>x.id===id);
+    if(session?.status!=="finished" || e.s.get<{verified:boolean}>(`cleanup-evidence:${id}`)?.verified!==true)throw Error("cleaned completed source required");
+    const t=JSON.parse(session.brief) as Ticket;
+    e.s.set(`nightly-ui:${key}`,{id:key,parent:id,repo:t.repo,issue:t.number,request,state:"pending",at:now,note:"browser check deferred to nightly hosted acceptance"});
+    e.s.event(`nightly-ui:${key}`,"nightly-ui-deferred",{parent:id,issue:t.number,request},"Retain request and nightly evidence; no local browser success inferred",now);
+    renameSync(path,join(workspace,`.factory-tmp/browser-needed-${key}.json`));
+    return;
+  }
+  const job=queueBrowser(e,id,request,now);
   renameSync(path,join(workspace,`.factory-tmp/browser-needed-${job.id}.json`));
   return job;
 }

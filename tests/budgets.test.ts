@@ -1,6 +1,6 @@
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {ConfigSchema,TicketSchema} from '../launcher/config';
 import {WorkerAccounting} from '../adapters/workers';
 import {config,ticket,admission} from './fixtures';
