@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {maintenanceTarget} from '../launcher/maintenance-target';
 import {recordGithubHttp,githubDiagnostic} from '../adapters/github-budget';
 import {mkdirSync,writeFileSync,readFileSync,renameSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
@@ -13,7 +14,9 @@ import {processIdentity} from '../launcher/process';
 import {Store} from '../tracking/store';
 import {runFactoryChallenge} from '../adapters/factory-challenge';
 import {maintainFactory,FactoryMergeRejected,nativeChallenge,factoryRepository,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
-const repo=resolve(import.meta.dir,'..');
+// Always operate on the registered installation, including an explicitly
+// requested serial pass invoked from an isolated source checkout.
+const repo=resolve(JSON.parse(readFileSync(join(root,'repositories.json'),'utf8'))[factoryRepository]);
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
 const git=(...args:string[])=>command(['git','-C',repo,...args]);
 async function pull(number:number,s?:Store,fresh=true):Promise<FactoryPull>{
@@ -64,7 +67,7 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:Re
 };}
 if(import.meta.main){
  const freeze=integrationFreeze(root);if(freeze){console.log(JSON.stringify({state:'integration-frozen',reason:freeze}));process.exit(0);}
- if(process.argv.slice(2).join()!=='--once')throw Error('Usage: bun scripts/maintain-factory.ts --once');
+ const target=maintenanceTarget(process.argv.slice(2));
  if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('reviewed clean installed main is required before maintenance');
  if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');
  await git('fetch','origin','main');await git('merge-base','--is-ancestor',(await git('rev-parse','HEAD')).trim(),'origin/main');
@@ -74,11 +77,12 @@ if(import.meta.main){
  try{mkdirSync(lock,{mode:0o700});}catch{throw Error('maintenance already claimed; reconcile retained lock before retry');}
  writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),checkout:repo}),{mode:0o600});
  const s=new Store(join(root,'controller.sqlite'));let ownsLease=false;const leaseId=`integration:${crypto.randomUUID()}`;
- try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,identity:processIdentity(process.pid),at:Date.now()});ownsLease=true;});const initialLimits=JSON.parse(await command(['gh','api','rate_limit']));if(initialLimits.resources?.core?.remaining<500||initialLimits.resources?.graphql?.remaining<500)throw Error(`GitHub API reserve: wait until reset ${Math.max(initialLimits.resources?.core?.reset??0,initialLimits.resources?.graphql?.reset??0)}`);const pass:ReviewPass={claims:0};console.log(JSON.stringify(await maintainFactory(s,maintenancePort(s,runFactoryChallenge,pass))));
+ try{s.atomic(()=>{if(s.get('launcher-maintenance-lease')&&s.get<{state:string}>('launcher-maintenance-lease')?.state!=='released')throw Error('another launcher maintenance run retains custody');s.set('launcher-maintenance-lease',{id:leaseId,kind:'integration',state:'active',pid:process.pid,identity:processIdentity(process.pid),at:Date.now()});ownsLease=true;});const initialLimits=JSON.parse(await command(['gh','api','rate_limit']));if(initialLimits.resources?.core?.remaining<500||initialLimits.resources?.graphql?.remaining<500)throw Error(`GitHub API reserve: wait until reset ${Math.max(initialLimits.resources?.core?.reset??0,initialLimits.resources?.graphql?.reset??0)}`);const pass:ReviewPass={claims:0};const port=maintenancePort(s,runFactoryChallenge,pass);if(target){const inventory=port.pulls;port.pulls=async()=>(await inventory()).filter(p=>p.number===target);}
+  console.log(JSON.stringify(await maintainFactory(s,port)));
   // Keep API reserve for launcher reconciliation; an exhausted pool waits for
   // the next scheduled pass rather than retrying reads or omitting the review.
   const limits=JSON.parse(await command(['gh','api','rate_limit']));
-  if(limits.resources?.core?.remaining>=500&&limits.resources?.graphql?.remaining>=500&&pass.claims===0) {
+  if(limits.resources?.core?.remaining>=500&&limits.resources?.graphql?.remaining>=500&&pass.claims===0&&!target) {
    const c=await configAt(join(root,'config.yaml')),repositories=JSON.parse(readFileSync(join(root,'repositories.json'),'utf8')) as Record<string,string>;
    await reviewProductChanges(s,c,root,repositories,{pulls:async repo=>await githubPages(repo,'pullRequests') as BoardPull[],files:async(repo,number)=>{const result=JSON.parse(await command(['gh','api',`repos/${repo}/pulls/${number}/files?per_page=100`]));if(!Array.isArray(result)||result.length>=100)throw Error('review files truncated; require bounded change');return result;},review:(p,checkout,target,claimed)=>runFactoryChallenge(s,p,root,checkout,claimed,target)},Date.now(),pass);
   }else s.event(crypto.randomUUID(),'review-wait',{reason:'API reserve or one new review already admitted this pass',coreReset:limits.resources?.core?.reset,graphqlReset:limits.resources?.graphql?.reset},'Wait for the scheduled pass and hourly reset; never retry or waive review');}
