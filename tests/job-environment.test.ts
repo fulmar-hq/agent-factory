@@ -32,7 +32,7 @@ test('new or absent executables, relative PATH entries and ambiguous plist evide
 // executable chain and deliberately updating this small inventory.
 const repo=join(import.meta.dir,'..');
 function sources(path:string):string[]{return readdirSync(join(repo,path),{withFileTypes:true}).flatMap(e=>e.isDirectory()?sources(path+'/'+e.name):/\.(ts|py|cjs)$/.test(e.name)?[path+'/'+e.name]:[]);}
-const files=[...sources('launcher'),...sources('adapters'),...sources('scripts'),...sources('wallet')].filter(p=>!/(?:rehearse-|qualify-delivery|install|prepare|check-job-environment|factory\.ts|watchdog)/.test(p));
+const files=[...sources('launcher'),...sources('adapters'),...sources('scripts'),...sources('wallet')].filter(p=>!/(?:rehearse-|qualify-delivery|install|prepare|check-job-environment|(?:^|\/)factory\.ts$|watchdog)/.test(p));
 const audit=JSON.parse(readFileSync(join(repo,'launchd/executable-audit.json'),'utf8')) as Record<string,string>;
 test('executable inventory covers literal calls and every dynamic execution boundary has a current audit',()=>{
  const known=new Set<string>(scheduledExecutables),dynamic:Record<string,string>={};
