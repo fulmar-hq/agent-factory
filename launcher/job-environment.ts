@@ -1,7 +1,7 @@
 import {readFileSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {releasePath} from './release-install';
-export const scheduledJobs=['tick','product-top-up','health','maintenance','release.preflight','release.qa','release.production','release.reconcile','release.rehearsal-early','release.rehearsal-late'] as const;
+export const scheduledJobs=['tick','product-top-up','health','maintenance','release.preflight','release.qa','release.production','release.reconcile','release.rehearsal-early','release.rehearsal-late','release.freeze-start'] as const;
 export type ScheduledJob=typeof scheduledJobs[number];
 // Union of the scheduled entry points' transitive executable dependencies. An
 // executable is a dependency even when reached only on a failure/recovery path.

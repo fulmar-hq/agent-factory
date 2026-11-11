@@ -286,7 +286,8 @@ receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
 never manufactures freshness. No Cost Explorer, model or resource calls occur.
 
 Every missing input queues one Alido Mail action per day/input to Release,
-Quality or Platform. AWS sign-in, usage decisions and pauses go to Coordinator.
+Quality or Platform. Owner-only decisions, including AWS sign-in and latched
+spending stops, plus usage decisions and pauses go to Coordinator.
 Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
 preflight. Repeated observations reuse the immutable action payload and mail ID;
 clean collections are retained as `release-rehearsal` events and are not mailed.
@@ -298,3 +299,39 @@ Rehearsals grant no exception to gates, holds, spending or release times.
 Install both rehearsal jobs after review, archive prior plists and read back
 loaded arguments/environment. Undo with reviewed source and archived plists;
 retain reports, billing imports and outbox receipts.
+
+### Pauses during the release window
+
+On a day with a valid accepted current-day batch, any pause active or set during
+**17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
+and the accountable pausing role. The authenticated pause control sends directly;
+the 30-second release reconciler catches an earlier pause at freeze start and
+retries retained episode IDs after mail failures. Each real resume-to-pause transition can alert again; repeated pause requests
+retain the same episode. Pending per-recipient actions retry independently even
+after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
+lifts a pause automatically or permits a late release.
+
+`control.ts pause Platform|Release|Quality|Product|Coordinator` and the authenticated
+board's optional `owner` field record the accountable role. Generic and legacy
+owner-token controls belong to Coordinator for escalation; their actual caller
+is explicitly unrecorded and is never represented as a verified human identity.
+A missing owner does not prevent the safety pause. Coordinator identifies and
+contacts the original pausing owner when legacy provenance is incomplete.
+
+### Release usage headroom
+
+The **14:00** rehearsal projects Release and the effective Quality acceptance
+profile's usage at **18:30 Eastern** using the last 15–60 minutes of comparable
+native observations. Every exposed window must project below **0.70**. A
+projection at/above the gate, stale or absent usage, missing burn history,
+changed window/reset identity or decreasing counters is a Coordinator gap.
+The ordinary tick retains at most 72 native metadata observations/provider over
+six hours, normally at five-minute spacing, with intervening discontinuities
+retained immediately, without another model or paid API call. At least 15 minutes
+of continuous comparable evidence is required after the latest discontinuity.
+
+The report retains baseline, current usage, measured hourly burn and target for
+every window. A scheduled reset is labelled a forecast assumption; it never
+creates fresh native zero usage or supplies runtime admission. Coordinator can
+decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
+fresh-read checks remain unchanged. PR #190 is not required or installed.

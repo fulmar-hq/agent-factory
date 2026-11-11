@@ -1,3 +1,6 @@
+import {collectUsageProjection} from '../launcher/release-usage-projection';
+import {requestFreezeProof} from '../launcher/release-freeze-proof';
+import {watchReleasePause} from '../launcher/release-pause';
 import {recordRehearsal} from '../launcher/release-rehearsal';
 import {withReleaseAuth} from '../launcher/release-auth';
 import {readFileSync} from 'node:fs';
@@ -20,9 +23,16 @@ const rehearsal=stage==='rehearsal';
 const rehearsalSlot=process.argv[3]??'14:00';
 if(rehearsal&&!['14:00','17:40'].includes(rehearsalSlot))throw Error('rehearsal slot must be 14:00 or 17:40');
 const invokedAt=Date.now();
-if(!['preflight','qa','production','reconcile','dry-run','rehearsal'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
+if(!['preflight','qa','production','reconcile','dry-run','rehearsal','freeze-start'].includes(stage))throw Error('release preflight|qa|production|reconcile|dry-run');
 const s=new Store(join(root,'controller.sqlite'));
 try {
+ const installedSource=()=>command(['git','rev-parse','HEAD'],import.meta.dir+'/..');
+ if(stage==='freeze-start'){
+  const proof=await requestFreezeProof(s,root,installedSource);watchReleasePause(s,root);
+  console.log(JSON.stringify({effects:false,proof}));
+ }else{
+ if(stage==='reconcile')try{await requestFreezeProof(s,root,installedSource);}
+ catch(error){s.event(`release-freeze-proof-failure:${toronto(Date.now()).day}`,'release-freeze-proof-request-failure',{error:String(error)},'Retry the retained proof request; notification failure never suppresses release reconciliation');}
  const c=await configAt(join(root,'config.yaml'));
  const policy=()=>Bun.YAML.parse(readFileSync(join(root,'config.yaml'),'utf8'));
  const funds=(now:number)=>releaseAvailable(s,c,admittedBilling,policy(),now);
@@ -61,6 +71,7 @@ try {
   const [readings,quota]=await Promise.all([localReadings(),claudeStatus()]);
   if(quota&&(!readings.claude||quota.observedAt>readings.claude.observedAt))readings.claude=quota;
   readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:rehearsal?(s.get('aws-stop-latched')===true?'AWS stop latched':s.get('paused')!==false?'factory paused':null):await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
+  if(rehearsal&&rehearsalSlot==='14:00')await collectUsageProjection(s,c,root,readiness,readings);
   if(rehearsal){recordRehearsal(s,readiness,rehearsalSlot as '14:00'|'17:40');console.log(JSON.stringify({effects:false,slot:rehearsalSlot,readiness}));}
   if(stage==='preflight')readiness.at=invokedAt;
   if(stage==='preflight'){
@@ -89,6 +100,7 @@ try {
   }
   console.log(JSON.stringify(result));
  }
+}
 }catch(error){
  const {day}=toronto(Date.now());s.event(`executor-cli:${day}:${stage}:${String(error)}`,'release-executor-refusal',{stage,error:String(error)},'Retain refusal; reconcile configuration before the next scheduled window');
  if(rehearsal){
@@ -104,6 +116,7 @@ try {
  console.error(String(error));process.exitCode=1;
 }finally{
  if(stage==='reconcile')try{
+  watchReleasePause(s,root);
   await releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))});
  }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
  s.close();
