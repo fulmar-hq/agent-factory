@@ -19,8 +19,31 @@ import {
 } from "../launcher/config";
 import { Engine, usageGate } from "../launcher/engine";
 import { available } from "../wallet/ledger";
-const same = (a: string, b: string) =>
-  a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+export const same = (a: string, b: string) => {
+  const left = Buffer.from(a), right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+const security = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Referrer-Policy": "no-referrer",
+};
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x), {
+    status,
+    headers: { ...security, "Content-Type": "application/json" },
+  });
+export function authorizationResponse(req: Request, port: number, token: string): Response | undefined {
+  if (req.headers.get("host") !== `127.0.0.1:${port}`)
+    return json({ error: "loopback host required" }, 403);
+  if (req.method === "POST" && (
+    req.headers.get("origin") !== `http://127.0.0.1:${port}` ||
+    !same(req.headers.get("authorization") ?? "", `Bearer ${token}`)
+  ))
+    return json({ error: "owner authorization required" }, 403);
+}
 export async function board(dir = root, port = 4318) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite")),
@@ -28,33 +51,15 @@ export async function board(dir = root, port = 4318) {
   const token = String(await Bun.file(join(dir, "owner-token")).text()).trim();
   if (token.length < 32)
     throw Error("owner token missing or too short; run scripts/prepare.ts");
-  const security = {
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy":
-      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-    "Referrer-Policy": "no-referrer",
-  };
-  const json = (x: unknown, status = 200) =>
-    new Response(JSON.stringify(x), {
-      status,
-      headers: { ...security, "Content-Type": "application/json" },
-    });
   let evidenceRefresh: Promise<void> | undefined;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
     async fetch(req) {
       const url = new URL(req.url),
-        host = req.headers.get("host");
-      if (host !== `127.0.0.1:${server.port}`)
-        return json({ error: "loopback host required" }, 403);
+        refusal = authorizationResponse(req, server.port!, token);
+      if (refusal) return refusal;
       if (req.method === "POST") {
-        if (
-          req.headers.get("origin") !== `http://127.0.0.1:${server.port}` ||
-          !same(req.headers.get("authorization") ?? "", `Bearer ${token}`)
-        )
-          return json({ error: "owner authorization required" }, 403);
         try {
           const body = (await req.json()) as Record<string, unknown>;
           if (

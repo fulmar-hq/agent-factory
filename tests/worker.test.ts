@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { config, ticket, admission, qualification, meter } from "./fixtures";
 for (const detached of [false, true]) test(detached ? "supervisor survives tick process-group teardown and still enforces 2x stop" : "real supervisors launch fixture once and terminate its process at 2x", async () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-worker-")),
