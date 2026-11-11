@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Factory-only regenerable caches. Source, Git and operational evidence stay put."""
+"""Audit factory caches only. Source, dependencies and operational evidence stay put."""
 import argparse, fcntl, json, os, pathlib, sqlite3, subprocess, time, stat, re, hashlib
 
 CACHES = {'node_modules', '.next', '.turbo'}
@@ -198,26 +198,6 @@ def has_generated(cache, manifest=None, base=None):
     return False
 
 
-def remove(cache, manifest=None, base=None):
-    base = base or cache
-    # Preserve in-cache evidence at its exact location; never follow links.
-    for item in os.scandir(cache):
-        p = pathlib.Path(item.path)
-        if evidence(p.name):
-            continue
-        if item.is_dir(follow_symlinks=False):
-            remove(p, manifest, base)
-        elif not retained_entry(p, base, manifest):
-            p.unlink()
-    # Unknown empty directories may carry evidence too. Remove only directories
-    # known to the original installation (or the root once it is empty).
-    if manifest is not None and (cache == base or manifest['entries'].get(str(cache.relative_to(base))) == {'kind': 'dir'}):
-        try:
-            cache.rmdir()
-        except OSError:
-            pass
-
-
 def dependency_identity(root, inventory=False):
     if not root.is_dir() or not real(root):
         raise RuntimeError('local dependency installation required')
@@ -353,7 +333,51 @@ def custody(db, root, repo):
     return [repo]
 
 
+class Snapshot:
+    """Bounded materialized rows; the controller is closed before external probes."""
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, query, args=()):
+        row = self.rows.get((query, tuple(args)))
+        class Cursor:
+            def fetchone(self):
+                return row
+        return Cursor()
+
+
+def controller_snapshot(root, repo):
+    sid = session_for(root, repo)
+    rows = {}
+    db = sqlite3.connect((root / 'controller.sqlite').as_uri() + '?mode=ro', uri=True, timeout=0.5)
+    try:
+        def read(query, args):
+            row = db.execute(query, args).fetchone()
+            if row and any(isinstance(value, str) and len(value) > 16 * 1024 * 1024 for value in row):
+                raise RuntimeError('bounded cache observation exceeded')
+            rows[(query, tuple(args))] = row
+            return row
+        keys = ['launcher-maintenance-lease']
+        if sid:
+            read('select status,pid,provider,brief from sessions where id=?', (sid,))
+            read("select data from events where kind='custody' and json_extract(data,'$.id')=? order by at desc,rowid desc limit 1", (sid,))
+            keys += ['cleanup-evidence:' + sid, 'dependency-installation:' + sid,
+                     'publisher-dependency-installation:' + hashlib.sha256(str(repo).encode()).hexdigest()]
+        for key in keys:
+            row = read('select value from kv where key=?', (key,))
+            if row and key.startswith(('dependency-installation:', 'publisher-dependency-installation:')):
+                bound = json.loads(row[0])
+                fingerprint = bound if isinstance(bound, str) else bound.get('fingerprint') if isinstance(bound, dict) else None
+                if isinstance(fingerprint, str) and re.fullmatch(r'[a-f0-9]{64}', fingerprint):
+                    read('select value from kv where key=?', ('dependency-cache-manifest:' + fingerprint,))
+    finally:
+        db.close()
+    return Snapshot(rows)
+
+
 def sweep(root, apply=False):
+    if apply:
+        raise RuntimeError('archive-only policy: destructive cache apply is unavailable')
     if not root.is_dir() or not real(root):
         raise RuntimeError('real existing factory root required')
     database = root / 'controller.sqlite'
@@ -368,7 +392,7 @@ def sweep(root, apply=False):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return {'state': 'already-running'}
+            return {'state': 'already-running', 'mode': 'audit-only', 'recoveredBytes': 0}
         output = receipts / (str(time.time_ns()) + '.jsonl')
         with output.open('x') as log:
             os.chmod(output, 0o600)
@@ -376,54 +400,26 @@ def sweep(root, apply=False):
                 log.write(json.dumps({'at': time.time(), **data}) + '\n')
                 log.flush()
                 os.fsync(log.fileno())
-            record({'state': 'start', 'apply': apply, 'df': command(['/bin/df', '-k', str(root)])})
-            db = sqlite3.connect(root / 'controller.sqlite', timeout=2)
-            try:
-                for repo in repositories(root):
-                    for name in sorted(CACHES):
-                        cache = repo / name
-                        if not cache.exists() or cache.is_symlink():
+            record({'state': 'start', 'mode': 'audit-only', 'recoveredBytes': 0, 'df': command(['/bin/df', '-k', str(root)])})
+            for repo in repositories(root):
+                for name in sorted(CACHES):
+                    cache = repo / name
+                    if not cache.exists() or cache.is_symlink():
+                        continue
+                    try:
+                        db = controller_snapshot(root, repo)
+                        paths = custody(db, root, repo)
+                        if not paths or not eligible(repo, cache):
                             continue
-                        try:
-                            if not custody(db, root, repo) or not eligible(repo, cache):
-                                continue
-                            manifest = cache_manifest(db, root, repo, name)
-                            if not manifest or not has_generated(cache, manifest):
-                                continue
-                            # Serialize against launcher reservation/continuation and
-                            # reread custody + process/path evidence immediately before I/O.
-                            db.execute('BEGIN IMMEDIATE')
-                            try:
-                                paths = custody(db, root, repo)
-                                if not paths or not quiet(paths) or not eligible(repo, cache) or cache_manifest(db, root, repo, name) != manifest:
-                                    continue
-                                record({'state': 'intent', 'path': str(cache), 'apply': apply})
-                                if apply:
-                                    sid = session_for(root, repo)
-                                    state = db.execute('select status from sessions where id=?', (sid,)).fetchone() if sid else None
-                                    if name == 'node_modules' and repo.parent == root / 'workspaces' and state and state[0] == 'waiting-browser':
-                                        scratch = repo / '.factory-tmp'
-                                        if scratch.is_symlink():
-                                            raise RuntimeError('linked scratch refused')
-                                        scratch.mkdir(exist_ok=True)
-                                        marker = scratch / 'dependencies-evicted.jsonl'
-                                        if marker.is_symlink() or (marker.exists() and (not marker.is_file() or marker.stat().st_nlink != 1)):
-                                            raise RuntimeError('linked restoration marker refused')
-                                        if not marker.exists():
-                                            binding = db.execute('select value from kv where key=?', ('dependency-installation:' + sid,)).fetchone()
-                                            identity = json.loads(binding[0])
-                                            with marker.open('x') as pending:
-                                                pending.write(json.dumps({'at': time.time(), 'receipt': str(output), 'dependencyFingerprint': identity}) + '\n')
-                                    remove(cache, manifest)
-                                record({'state': 'removed' if apply else 'planned', 'path': str(cache)})
-                            finally:
-                                db.rollback()
-                        except Exception as exc:
-                            record({'state': 'refused', 'path': str(cache), 'error': str(exc)})
-            finally:
-                db.close()
-            record({'state': 'complete', 'df': command(['/bin/df', '-k', str(root)])})
-        return {'state': 'complete', 'receipt': str(output)}
+                        manifest = cache_manifest(db, root, repo, name)
+                        if not manifest or not has_generated(cache, manifest) or not quiet(paths):
+                            continue
+                        # An observation is never deletion or eviction authority.
+                        record({'state': 'planned', 'mode': 'audit-only', 'path': str(cache), 'retained': True, 'recoveredBytes': 0})
+                    except Exception as exc:
+                        record({'state': 'refused', 'path': str(cache), 'error': str(exc)})
+            record({'state': 'complete', 'mode': 'audit-only', 'recoveredBytes': 0, 'df': command(['/bin/df', '-k', str(root)])})
+        return {'state': 'complete', 'mode': 'audit-only', 'recoveredBytes': 0, 'receipt': str(output)}
 
 
 if __name__ == '__main__':
@@ -431,11 +427,10 @@ if __name__ == '__main__':
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--root', type=pathlib.Path)
     group.add_argument('--fingerprint', type=pathlib.Path)
-    parser.add_argument('--apply', action='store_true')
     parser.add_argument('--inventory', action='store_true')
     args = parser.parse_args()
     if args.fingerprint:
         result = dependency_identity(args.fingerprint, args.inventory)
         print(json.dumps(result) if args.inventory else result)
     else:
-        print(json.dumps(sweep(args.root, args.apply)))
+        print(json.dumps(sweep(args.root)))

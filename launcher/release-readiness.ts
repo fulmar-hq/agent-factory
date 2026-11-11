@@ -26,7 +26,7 @@ const heldLabel=(l:unknown)=>record(l)&&typeof l.name==='string'&&['qa hold','qa
 export function originalSessionExpiry(raw:unknown,now:number,validThrough:number) {
  if(!record(raw)||raw.version!==1||raw.kind!=='original-password-mfa-session'||typeof raw.signedInAt!=='string'||typeof raw.expiresAt!=='string'||typeof raw.receipt!=='string'||!raw.receipt.trim())throw Error('original AWS sign-in receipt is missing');
  const start=Date.parse(raw.signedInAt),end=Date.parse(raw.expiresAt);
- if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=start||end-start>24*3600000||end<=validThrough)throw Error('original AWS sign-in does not remain valid through 22:30');
+ if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=start||end-start>24*3600000||end<=now||end<=validThrough)throw Error('original AWS sign-in does not remain valid through 22:30');
  return {signedInAt:start,expiresAt:end,receipt:raw.receipt};
 }
 

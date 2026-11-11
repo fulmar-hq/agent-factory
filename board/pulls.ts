@@ -3,13 +3,13 @@ import { command } from "../adapters/github";
 import type { Config } from "../launcher/config";
 import type { Store } from "../tracking/store";
 export type BoardPull = {
-  number: number; url: string; title?: string; headRefOid: string; headRefName?: string;
+  number: number; url: string; title?: string; headRefOid: string; headRefName?: string; baseRefName?: string;
   reviewDecision?: string; closingIssuesReferences?: {number:number;url:string}[];
   reviews: {id:string;state:string;submittedAt:string}[];
   statusCheckRollup: {status?:string;conclusion?:string;detailsUrl?:string;targetUrl?:string;state?:string;name?:string}[];
 };
 export type PullSnapshot = {at:number; pulls:BoardPull[]; error?:boolean};
-export const pullFields = 'number,title,headRefOid,headRefName,reviews,reviewDecision,statusCheckRollup,url,closingIssuesReferences';
+export const pullFields = 'number,title,headRefOid,headRefName,baseRefName,reviews,reviewDecision,statusCheckRollup,url,closingIssuesReferences';
 export function pullState(pr: BoardPull) {
   // A release hold is a release dependency, not a broken build or a running check.
   const checks = (pr.statusCheckRollup ?? []).filter(c=>!/release[ -]hold/i.test(c.name ?? ''));
@@ -28,7 +28,7 @@ export function recordPulls(s:Store,repo:string,pulls:BoardPull[],now:number) {
 export async function refreshPulls(s:Store,c:Config,now=Date.now(),execute=command) {
   await Promise.all(Object.values(c.projects).map(async project=>{
     const key=`board-pulls:${project.repo}`, prior=s.get<PullSnapshot>(key);
-    if(prior && prior.at<=now && now-prior.at<60000)return;
+    if(prior && prior.at<=now && now-prior.at<600000)return;
     try {
       const pulls=await githubPages(project.repo,'pullRequests',execute) as BoardPull[];
       recordPulls(s,project.repo,pulls,now);
