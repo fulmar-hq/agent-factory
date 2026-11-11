@@ -49,17 +49,17 @@ export function projectUsage(current:Meter|undefined,history:Meter[],provider:'c
  });
  return {provider,target,gate,assumption:'current measured burn continues; any scheduled reset is a forecast assumption, not available quota',windows,underGate:windows.every(w=>w.underGate)};
 }
-export async function collectUsageProjection(s:Store,c:Config,dir:string,r:ReleaseReadiness,readings:UsageReadings,readJSON=optionalJSON){
+export async function collectUsageProjection(s:Store,c:Config,dir:string,r:ReleaseReadiness,readings:UsageReadings,readJSON=optionalJSON,clock=Date.now){
  const target=deadlineAt(r.at,1110),evidence:Record<string,unknown>={};
  // Preserve this observation for the next collection, but never let one fresh
  // sample substitute for a rate history or stale native usage.
- observeReleaseUsage(s,readings,r.at);
+ observeReleaseUsage(s,readings,clock());
  for(const owner of ['release','quality'] as const){
   try{
    const role=owner==='quality'?(await acceptanceProfile(c,dir,r.day,r.validThrough,readJSON)).role:c.owners.release;
    if(!role)throw Error('release owner configuration unavailable');
    const history=s.get<Meter[]>(historyKey(role.harness))??[],latest=s.get<Meter>(`release-usage-last-native:${role.harness}`);
-   const projection=projectUsage(readings[role.harness],latest?[...history,latest]:history,role.harness,r.at,target,c.usage_gates.admit_below);
+   const projection=projectUsage(readings[role.harness],latest?[...history,latest]:history,role.harness,clock(),target,c.usage_gates.admit_below);
    evidence[owner]=projection;
    if(!projection.underGate)r.missing.push({input:`${owner} usage projection`,reason:`At the current native burn rate, ${owner} is projected at ${projection.windows.map(w=>`${w.name}: ${(w.projectedUsed*100).toFixed(1)}%`).join(', ')} at 18:30 Eastern; every window must be below ${(c.usage_gates.admit_below*100).toFixed(0)}%. Coordinator must decide early; gates remain 0.70/0.90.`});
   }catch(error){r.missing.push({input:`${owner} usage projection`,reason:String(error)});}

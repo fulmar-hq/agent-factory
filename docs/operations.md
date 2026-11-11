@@ -335,3 +335,26 @@ every window. A scheduled reset is labelled a forecast assumption; it never
 creates fresh native zero usage or supplies runtime admission. Coordinator can
 decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
 fresh-read checks remain unchanged. PR #190 is not required or installed.
+
+### Refused and missed nights
+
+The 30-second release reconciler retains one plain incident summary per night
+after a refused window, failed release effect, or a scheduled job absent after
+its fixed minute. It names the input and the earliest recorded time it was
+knowable, using retained 14:00/17:40/19:00 observations, the scheduled 20:00 QA readiness refusal
+causes, and admitted pause events. With no earlier evidence,
+it explicitly uses the first recorded refusal or the missed-minute boundary;
+it never invents an earlier observation. Full reasons remain in the incident.
+
+One immutable Alido Mail action/night goes to Coordinator. Later windows update
+the retained incident, and delivery failures retry that original action ID and
+payload. Existing historical release evidence lets a restarted reconciler
+recover the last two nights, including admitted scheduled refusals that failed
+before a night/report record existed. Pending action retries are independent of
+that discovery horizon and continue after longer outbox outages. CLI errors from
+off-schedule attempts are excluded; original invocation time distinguishes a
+scheduled job whose setup failed later. A prior unshipped night increments the consecutive
+miss count and flags the second consecutive missed night. A later proven ship
+is retained as recovery. Incidents, original messages and old release records
+are archived/retained, never erased. Notification failure cannot suppress other
+release observers or authorize a replay, catch-up or off-schedule release.
