@@ -15,8 +15,9 @@ export function observeIdleQueue(db:Reader,c:Config,now:number):IdleQueueObserva
  if(get('paused')!==false)return no('paused');
  const latest=get<{at:number;status:string;ready?:number;claimed?:number}>('heartbeat');
  const h=latest?.status==='reconciling'?get<typeof latest>('last-successful-heartbeat'):latest;
- if(h?.status==='ok'&&Number.isSafeInteger(h.ready)&&h.ready!>0)return no('queue has ready work');
- if(!h||h.status!=='ok'||h.ready!==0||!Number.isSafeInteger(h.at)||h.at<=0||h.at>now||now-h.at>300000)return no('queue not freshly confirmed empty',true);
+ if(!h||h.status!=='ok'||!Number.isSafeInteger(h.at)||h.at<=0||h.at>now||now-h.at>300000)return no('queue not freshly confirmed empty',true);
+ if(Number.isSafeInteger(h.ready)&&h.ready!>0)return no('queue has ready work');
+ if(h.ready!==0)return no('queue not freshly confirmed empty',true);
  for(const project of Object.values(c.projects)){
   const inventory=get<{observedAt:number;count?:number;truncated?:boolean;error?:string|null}>(`github:${project.repo}`);
   if(!inventory||inventory.error||inventory.truncated!==false||!Number.isSafeInteger(inventory.count)||inventory.count!<0||!Number.isSafeInteger(inventory.observedAt)||inventory.observedAt<=0||inventory.observedAt>h.at||now-inventory.observedAt>300000)return no('complete fresh project inventory unavailable',true);

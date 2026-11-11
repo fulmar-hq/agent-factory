@@ -91,7 +91,18 @@ test('unavailable queue evidence alerts once after twenty minutes across reason 
 test('paused and positively nonempty queues do not accumulate an observation gap',()=>{const f=fixture();try{
  f.s.set('paused',true);expect(watchIdleQueue(f.dir,f.mail,f.now).alert).toBeNull();
  expect(watchIdleQueue(f.dir,f.mail,f.now+30*60000).alert).toBeNull();
- f.s.set('paused',false);f.s.set('heartbeat',{at:f.now,status:'ok',ready:2});
+ f.s.set('paused',false);f.s.set('heartbeat',{at:f.now+60*60000,status:'ok',ready:2});
  expect(watchIdleQueue(f.dir,f.mail,f.now+60*60000)).toMatchObject({reason:'queue has ready work',alert:null});
  expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(0);
+}finally{f.s.close();f.db.close();}});
+
+for(const fallback of [false,true])test(`stale nonempty heartbeat cannot silence queue observation alarm (fallback=${fallback})`,()=>{const f=fixture();try{
+ const key=fallback?'last-successful-heartbeat':'heartbeat';
+ if(fallback)f.s.set('heartbeat',{at:f.now,status:'reconciling'});
+ f.s.set(key,{at:f.now,status:'ok',ready:2});
+ expect(watchIdleQueue(f.dir,f.mail,f.now+300001)).toMatchObject({eligible:false,observationUnavailable:true,alert:null});
+ const r=watchIdleQueue(f.dir,f.mail,f.now+1500002);
+ expect(r.alert).toStartWith('factory-queue-observation:');
+ expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);
+ for(const at of [undefined,0,f.now+3600001]){f.s.set(key,{at,status:'ok',ready:2});expect(observeIdleQueue(f.s.db,f.c,f.now+3600000).observationUnavailable).toBe(true);}
 }finally{f.s.close();f.db.close();}});
