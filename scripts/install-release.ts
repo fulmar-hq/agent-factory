@@ -1,9 +1,11 @@
 import {mkdirSync,existsSync,copyFileSync,writeFileSync,renameSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {realpathSync} from 'node:fs';
+import {assertReleaseInstallQuiescent} from '../launcher/release-install-quiescence';
 import {releasePath,releaseTools,rebindReleaseJob} from '../launcher/release-install';
 import {homedir} from 'node:os';
 import {root} from '../launcher/config';
+import {processIdentity} from '../launcher/process';
 import {command} from '../adapters/github';
 const zone=await command(['readlink','/etc/localtime']);if(!zone.trim().endsWith('/America/Toronto'))throw Error('launchd calendar requires system timezone America/Toronto');
 const install=process.argv.includes('--install');
@@ -17,7 +19,8 @@ const missing=releaseTools.filter(tool=>!Bun.which(tool,{PATH:pathEnv}));if(miss
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
-const lock=join(root,'release-install-active');mkdirSync(lock,{mode:0o700});writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),repo,install}),{mode:0o600});
+const identity=processIdentity(process.pid);if(!identity)throw Error('installer process identity unavailable');
+const lock=join(root,'release-install-active');mkdirSync(lock,{mode:0o700});writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,identity,at:Date.now(),repo,install}),{mode:0o600});
 try{
 for(const [stage,hour,minute] of jobs){
  const label=`com.agent-factory.release.${stage}`,path=join(root,`${label}.plist`);
@@ -28,7 +31,7 @@ for(const [stage,hour,minute] of jobs){
  if(install){
   const installed=join(homedir(),'Library/LaunchAgents',`${label}.plist`);mkdirSync(resolve(installed,'..'),{recursive:true});
   if(existsSync(installed))copyFileSync(installed,join(archive,`${label}.installed.plist`));
-  await rebindReleaseJob(label,installed,process.getuid!(),{program:process.execPath,args:[process.execPath,join(repo,'scripts/release.ts'),stage],directory:repo,path:pathEnv},command,()=>copyFileSync(path,installed));
+  await rebindReleaseJob(label,installed,process.getuid!(),{program:process.execPath,args:[process.execPath,join(repo,'scripts/release.ts'),stage],directory:repo,path:pathEnv},()=>assertReleaseInstallQuiescent(root),command,()=>copyFileSync(path,installed));
  }
  console.log(`${install?'installed':'prepared'} ${label}`);
 }

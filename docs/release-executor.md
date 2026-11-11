@@ -203,9 +203,10 @@ Release job installation uses the canonical factory checkout registered in priva
 `repositories.json`, rather than the worktree running the installer. It requires
 clean factory main and the expected origin. Scheduled PATH includes the operator's
 `bin`, the actual Bun directory and standard Homebrew/system directories; required
-local executables are resolved before replacement. Replacing an idle loaded job
-explicitly boots it out and bootstraps the archived/reviewed definition, then reads
-back its actual source and PATH. An active job refuses replacement. This changes
+local executables are resolved before replacement. Rebinding under verified application quiescence
+boots out the old definition and bootstraps the archived/reviewed one, then reads
+back its exact actual source and PATH. Active calendar processes retain custody;
+the bounded read-only reconciler exception is described below. This changes
 no release admission minute and performs no catch-up release.
 
 Billing and final QA-server reads check the existing original-password/MFA sign-in
@@ -215,9 +216,19 @@ try SSO or loop on the AWS CLI. A real owner renewal can restore that read path.
 
 Installation retains one exclusive private `release-install-active` claim for the
 whole operation (including preparation); completed claims are archived and a
-crashed claim requires identity reconciliation, never timeout stealing. Before
-its final idle read it disables future scheduled starts and verifies the launchd
-disabled-state interlock. Already-running jobs retain custody and the original
-enabled state is restored. Only an interlocked idle job is booted out; the new
-reviewed definition is copied before enabling/bootstrap restores its fixed
-schedule. A preexisting disabled hold is preserved and refuses replacement.
+crashed claim requires identity reconciliation, never timeout stealing.
+
+`--install` requires the existing authenticated admission pause, no active/unknown
+workers, no claimed/running/unknown release effect, and a time outside17:30–22:35
+Toronto and any explicit source freeze. These read-only checks repeat immediately
+before unload/bootstrap. Calendar processes retain custody. With admission paused,
+no in-flight effect and the protected hours excluded, the30-second reconciler is
+an unadmitted observer; it may be interrupted and resumes its durable reads after
+rebinding. The operator restores the prior pause state after installation, never
+implicitly overrides a preexisting disabled hold or forces a release.
+
+A native35-second observation on this installation showed a loaded reconciler
+starting despite `launchctl disable`; that flag is not an admission interlock.
+Installation therefore uses the application's existing deterministic pause and
+effect inventory instead. No fixture or Disabled readback can substitute for
+those checks.

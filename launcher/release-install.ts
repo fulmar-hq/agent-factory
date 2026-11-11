@@ -15,27 +15,28 @@ function disabledService(raw:string,label:string){
  const rows=blocks[0][1].split('\n').filter(l=>l.trim()).map(line=>{const row=line.match(/^\s*"([^"\n]+)" => (enabled|disabled)\s*$/);if(!row)throw Error('launchd disabled-service row malformed');return {label:row[1],disabled:row[2]==='disabled'};});
  const matches=rows.filter(row=>row.label===label);if(matches.length>1)throw Error('launchd disabled-service identity ambiguous');return matches[0]?.disabled??false;
 }
-// Caller holds exclusive installation custody. Disable future scheduled starts
-// before the final idle observation; an already-running job is never booted out.
-// Restore the original enabled state, including when an idle check refuses.
-export async function rebindReleaseJob(label:string,path:string,uid:number,expected:ReleaseJobIdentity,execute=command,prepare=()=>{}){
+// Caller holds exclusive installation custody and verifies the existing
+// admission pause, protected hours and empty effect inventory. Disabled alone
+// does not fence a loaded launchd job. Only an unadmitted read-only reconciler
+// may be interrupted; calendar release processes retain their native custody.
+export async function rebindReleaseJob(label:string,path:string,uid:number,expected:ReleaseJobIdentity,assertQuiescent:()=>void,execute=command,prepare=()=>{}){
  const domain=`gui/${uid}`,service=`${domain}/${label}`;
  if(disabledService(await execute(['launchctl','print-disabled',domain]),label))throw Error(`${label} is already disabled; preserve its owner's hold`);
- let interlocked=true;
- try{
-  await execute(['launchctl','disable',service]);
-  if(!disabledService(await execute(['launchctl','print-disabled',domain]),label))throw Error('scheduled-start interlock not verified');
-  let loaded:string|undefined;
-  try{loaded=await execute(['launchctl','print',service]);}catch(error){if(!/Could not find (?:service|specified service)/i.test(String(error)))throw error;}
-  if(loaded){const states=[...loaded.matchAll(/^\tstate = (.+)$/gm)],counts=[...loaded.matchAll(/^\tactive count = (\d+)$/gm)];
-   if(states.length!==1||states[0][1]!=='not running'||counts.length!==1||counts[0][1]!=='0'||/^\tpid = /m.test(loaded))throw Error(`${label} is running or custody is unknown; retain it and retry installation after it exits`);
-  }
-  if(loaded)await execute(['launchctl','bootout',service]);
-  prepare();
-  await execute(['launchctl','enable',service]);interlocked=false;
-  await execute(['launchctl','bootstrap',domain,path]);
-  const actual=await execute(['launchctl','print',service]),identity=loadedReleaseJob(actual);
-  if(identity.program!==expected.program||identity.directory!==expected.directory||identity.path!==expected.path||JSON.stringify(identity.args)!==JSON.stringify(expected.args))throw Error(`${label} loaded definition differs; retain installation evidence`);
-  return actual;
- }finally{if(interlocked)await execute(['launchctl','enable',service]);}
+ assertQuiescent();
+ let loaded:string|undefined;
+ try{loaded=await execute(['launchctl','print',service]);}catch(error){if(!/Could not find (?:service|specified service)/i.test(String(error)))throw error;}
+ if(loaded){
+  const old=loadedReleaseJob(loaded),states=[...loaded.matchAll(/^\tstate = (.+)$/gm)],counts=[...loaded.matchAll(/^\tactive count = (\d+)$/gm)];
+  if(old.program!==expected.program||old.args.length!==3||old.args[2]!==expected.args[2]||!old.args[1].endsWith('/scripts/release.ts'))throw Error('loaded release job identity is unknown; retain custody');
+  const idle=states.length===1&&states[0][1]==='not running'&&counts.length===1&&counts[0][1]==='0'&&!/^\tpid = /m.test(loaded);
+  if(!idle&&expected.args[2]!=='reconcile')throw Error(`${label} calendar process is active or unknown; retain it`);
+  // Recheck synchronously immediately before bootout after all async reads.
+  assertQuiescent();await execute(['launchctl','bootout',service]);
+ }
+ prepare();
+ // The exclusive operation claim and pause remain in place through readback.
+ assertQuiescent();await execute(['launchctl','bootstrap',domain,path]);
+ const actual=await execute(['launchctl','print',service]),identity=loadedReleaseJob(actual);
+ if(identity.program!==expected.program||identity.directory!==expected.directory||identity.path!==expected.path||JSON.stringify(identity.args)!==JSON.stringify(expected.args))throw Error(`${label} loaded definition differs; retain installation evidence`);
+ return actual;
 }
