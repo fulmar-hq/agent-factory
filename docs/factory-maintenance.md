@@ -84,3 +84,13 @@ Alido review sweeps require the authentic current frozen release packet. Missing
 The Alido protected set comes exclusively from `readReleaseBatch` and the existing strict `ReleaseBatchSchema` for the current Toronto day. Version, carrier/base/revision/tree/ref/hold identity, nonempty full source identities, overlap order and review provenance use that canonical contract; a partial local object is never another accepted schema. Public review text uses one central redactor for findings and gaps, including recognizable classic and fine-grained GitHub credential formats.
 
 Native review results retain the actual reviewed base ref and immutable base head. Reuse and publication require that original identity to match the current PR, even for previously published verdicts. Missing or retargeted base evidence remains blocked for explicit reconciliation. Deterministic repository-inventory failures are recorded per repository while independent projects continue; transport and quota failures retain global backoff. Product-domain actions such as email verification are classified by workflow context and actual source scope, not their leading verb alone.
+
+A private `integration-freeze.json` may hold source integration for one explicit
+window of at most24hours: `{version:1,from:ISO_WITH_OFFSET,until:ISO_WITH_OFFSET,reason}`.
+Missing file means no extra hold; malformed input refuses integration. Maintenance
+checks the dated hold before work and immediately before merge/install, including
+retained pending installs and a window crossed during review/readback. Pending
+custody is retained. Workers, qualifications, usage/capacity and 20:00/21:30 release
+times are unchanged. Archive the file after the bounded window; never extend it
+implicitly. Release verifies the installed revision after the freeze starts;
+Quality then proves that exact revision through22:30 before19:00 preflight.
