@@ -1,3 +1,4 @@
+import {unavailable} from '../adapters/github-budget';
 import {githubPages} from '../adapters/github-pages';
 import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
 import {dirname} from 'node:path';
@@ -59,6 +60,8 @@ export function dispatchWake(s:Store,w:Wake,spawn:(id:string)=>void,identity=pro
 export function recoverWorkers(e:Engine,now=Date.now()) {
  for(const x of e.active()) {
   if(x.status!=='unknown' || x.pid!==null || !x.native_id)continue;
+  const failure=e.s.db.query("SELECT data FROM events WHERE kind='worker-failure' AND json_extract(data,'$.id')=? ORDER BY at DESC LIMIT 1").get(x.id) as {data:string}|null;
+  if(failure && unavailable(JSON.parse(failure.data).error))continue;
   if(e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)continue;
   e.s.atomic(()=>{
    const current=e.sessions().find(y=>y.id===x.id);
@@ -82,6 +85,8 @@ export function localWakes(s:Store,c:Config,ready:Ticket[],qualifications:Record
 // Stable GitHub IDs, not tick times, deduplicate reviews and completed CI runs.
 export async function githubWakes(s:Store,c:Config,execute=command,now=Date.now()) {
  for(const project of Object.values(c.projects)) {
+  const checked=s.get<number>(`owner-github-checked:${project.repo}`);
+  if(checked!==null && now>=checked && now-checked<600000)continue;
   const primed=s.get(`owner-github-primed:${project.repo}`)===true;
   const emit=(w:Wake)=>{if(primed)queueWake(s,w,now);else s.event(`owner-event:${w.id}`,'owner-wake-baseline',w,'Retain historical baseline; only new events cause owner turns',now);};
   const prs=await githubPages(project.repo,'pullRequests',execute) as BoardPull[];
@@ -98,6 +103,7 @@ export async function githubWakes(s:Store,c:Config,execute=command,now=Date.now(
    }
   }
   s.set(`owner-github-primed:${project.repo}`,true);
+  s.set(`owner-github-checked:${project.repo}`,now);
  }
 }
 export function spawnOwner(id:string,dir:string) {

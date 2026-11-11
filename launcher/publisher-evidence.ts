@@ -8,7 +8,7 @@ import {QualificationSchema} from './config';
 import type {Store} from '../tracking/store';
 const receiptJSON=(path:string):unknown=>JSON.parse(new TextDecoder().decode(readCodexRenewalReceipt(path)));
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
-export const publisherSources=['adapters/delivery.ts','adapters/github.ts','adapters/native.ts','adapters/workers.ts','launcher/child.ts','launcher/process.ts','launcher/worker.ts','launcher/worker-entry.ts','launcher/publisher-evidence.ts','launcher/config.ts'];
+export const publisherSources=['adapters/delivery.ts','adapters/github.ts','adapters/native.ts','adapters/workers.ts','launcher/child.ts','launcher/process.ts','launcher/worker.ts','launcher/cache-provenance.ts','launcher/worker-entry.ts','launcher/publisher-evidence.ts','launcher/config.ts','scripts/cache-retention.py'];
 const sha=z.string().regex(/^[a-f0-9]{64}$/);
 const boundarySchema=z.object({version:z.literal(1),hashes:z.record(z.string(),sha),policy:sha,bun:z.literal('1.3.14'),git:z.string().min(1)}).strict();
 export type PublisherBoundary=z.infer<typeof boundarySchema>;

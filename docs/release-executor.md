@@ -198,3 +198,43 @@ check. No permanent owner configuration, model qualification, budget, worker
 capacity or independence rule changes. Register the existing read-only acceptance
 workspace through the trusted setup before the release; this source change
 starts no native/model work and does not replay any existing acceptance.
+
+Release job installation uses the canonical factory checkout registered in private
+`repositories.json`, rather than the worktree running the installer. It requires
+clean factory main and the expected origin. Scheduled PATH includes the operator's
+`bin`, the actual Bun directory and standard Homebrew/system directories; required
+local executables are resolved before replacement. Rebinding under verified application quiescence
+boots out the old definition and bootstraps the archived/reviewed one, then reads
+back its exact actual source and PATH. Active calendar processes retain custody;
+the bounded read-only reconciler exception is described below. This changes
+no release admission minute and performs no catch-up release.
+
+Billing and final QA-server reads check the existing original-password/MFA sign-in
+receipt before invoking AWS. An expired/missing receipt causes a local refusal;
+subsequent observers reread local provenance while waiting for the owner and never
+try SSO or loop on the AWS CLI. A real owner renewal can restore that read path.
+
+Installation retains one exclusive private `release-install-active` claim for the
+whole operation (including preparation); completed claims are archived and a
+crashed claim requires identity reconciliation, never timeout stealing.
+
+`--install` requires the existing authenticated admission pause, no active/unknown
+workers, no claimed/running/unknown release effect, and a time outside17:30–22:35
+Toronto and any explicit source freeze. These read-only checks repeat immediately
+before unload/bootstrap. Calendar processes retain custody. With admission paused,
+no in-flight effect and the protected hours excluded, the30-second reconciler is
+an unadmitted observer; it may be interrupted and resumes its durable reads after
+rebinding. The operator restores the prior pause state after installation, never
+implicitly overrides a preexisting disabled hold or forces a release.
+
+A native35-second observation on this installation showed a loaded reconciler
+starting despite `launchctl disable`; that flag is not an admission interlock.
+Installation therefore uses the application's existing deterministic pause and
+effect inventory instead. No fixture or Disabled readback can substitute for
+those checks.
+
+Dormant worker states require a cleared PID and positive retained descendant
+cleanup, including paused/waiting custody. A failed release state alone is never
+settled proof: deadline and identity/inventory failures retain uncertainty. The
+existing adapter's observed completed-run conclusion can prove a terminal remote
+failure; other failures remain with Release for real custody reconciliation.

@@ -1,3 +1,4 @@
+import {unavailable} from '../adapters/github-budget';
 import {Engine} from './engine';
 import {processIdentity} from './process';
 import type {Ticket} from './config';
@@ -23,7 +24,16 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
   if(!receipt)continue;
   const t=JSON.parse(x.brief) as Ticket;
   const row=e.s.db.query('SELECT snapshot FROM tickets WHERE id=?').get(x.ticket) as {snapshot:string}|null;
-  if(row){const snapshot=JSON.parse(row.snapshot) as Issue;if(!snapshot.labels.some(l=>['state:ready','state:building','state:review'].includes(l.name)))continue;}
+  if(row){const snapshot=JSON.parse(row.snapshot) as Issue;if(!snapshot.labels.some(l=>['state:ready','state:building','state:review'].includes(l.name)))continue;
+   if(snapshot.labels.some(l=>l.name==='state:review')){
+    const url=(JSON.parse(receipt.data) as {url?:string}).url;
+    const pr=url?e.s.get<{at:number;review?:string}>(`board-pr:${url}`):null;
+    if(pr?.review==='CHANGES_REQUESTED')e.s.set(`review-returned:${x.id}:${x.approval_digest}`,{pr:url,at:Date.now()});
+    // Already reviewing work belongs to the shared inventory even when an
+    // open-only read has no entry for its now-closed PR. Never rescan per worker.
+    continue;
+   }
+  }
   try {
    const i=JSON.parse(await execute(['gh','issue','view',String(t.number),'--repo',t.repo,'--json','number,title,body,url,updatedAt,state,labels'])) as Issue;
    if(i.number!==t.number || i.state!=='OPEN' || intakeLabel(t.repo,i)!==x.approval_digest)continue;
@@ -41,6 +51,7 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
    changed++;
   } catch(error) {
    e.s.event(crypto.randomUUID(),'github-review-failure',{id:x.id,error:String(error)},'Retry label reconciliation; retain published work and claim');
+   if(unavailable(error))break;
   }
  }
  return changed;

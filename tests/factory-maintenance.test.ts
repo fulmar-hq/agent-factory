@@ -2,7 +2,7 @@ import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
 import {maintainFactory,FactoryMergeRejected,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
 const p:FactoryPull={number:1,head:'a'.repeat(40),tree:'b'.repeat(40),createdAt:'2026-01-01',draft:false,state:'OPEN',mergeState:'CLEAN',verify:true};
-function setup(){const s=new Store(':memory:'),effects:string[]=[];const c:Challenge={pr:1,head:p.head,ok:true,review:{head:p.head,verdict:'PASS',findings:[]},native:{id:'fictional',path:'/fictional',verified:true,models:['gpt-6.1-sol'],efforts:['medium']},cleanup:{verified:true},workspace:'/fictional',startedAt:1};const port:MaintenancePort={pulls:async()=>[p],pull:async()=>({...p}),challenge:async()=>c,verifyChallenge:()=>true,signed:async()=>true,merged:async()=>({state:'MERGED',head:p.head,revision:'c'.repeat(40),tree:p.tree}),merge:async(number,head)=>{effects.push(`merge:${number}:${head}`);return {head:'c'.repeat(40),tree:p.tree};},install:async head=>{effects.push(`install:${head}`);return head;}};return {s,effects,c,port};}
+function setup(){const s=new Store(':memory:'),effects:string[]=[];const c:Challenge={pr:1,head:p.head,baseRef:'main',baseHead:'b'.repeat(40),ok:true,review:{head:p.head,verdict:'PASS',findings:[],installedGaps:[]},native:{id:'fictional',path:'/fictional',verified:true,models:['gpt-6.1-sol'],efforts:['medium']},cleanup:{verified:true},workspace:'/fictional',startedAt:1};const port:MaintenancePort={pulls:async()=>[p],pull:async()=>({...p}),challenge:async()=>c,verifyChallenge:()=>true,signed:async()=>true,merged:async()=>({state:'MERGED',head:p.head,revision:'c'.repeat(40),tree:p.tree}),merge:async(number,head)=>{effects.push(`merge:${number}:${head}`);return {head:'c'.repeat(40),tree:p.tree};},install:async head=>{effects.push(`install:${head}`);return head;}};return {s,effects,c,port};}
 test('exact independently challenged green signed tree merges then installs',async()=>{const {s,port,effects}=setup();try{expect((await maintainFactory(s,port)).map(r=>r.state)).toEqual(['merged','installed']);expect(effects).toEqual([`merge:1:${p.head}`,`install:${'c'.repeat(40)}`]);}finally{s.close();}});
 for(const bad of ['head','native','cleanup','findings','verdict','model'] as const)test(`refuse ${bad} challenge evidence`,async()=>{const {s,port,effects,c}=setup();if(bad==='head')c.head='wrong';if(bad==='native')port.verifyChallenge=()=>false;if(bad==='cleanup')c.cleanup.verified=false;if(bad==='findings')c.review.findings=[{defect:true}];if(bad==='verdict')c.review.verdict='CHANGES_REQUESTED';if(bad==='model')c.native.models=['wrong'];try{expect((await maintainFactory(s,port))[0].state).toBe('challenge-needed');expect(effects).toEqual([]);}finally{s.close();}});
 test('head/check race refuses merge',async()=>{const {s,port,effects}=setup();let reads=0;port.pull=async()=>({...p,head:++reads===1?p.head:'raced'});try{expect((await maintainFactory(s,port))[0].state).toBe('blocked');expect(effects).toEqual([]);}finally{s.close();}});
@@ -26,4 +26,42 @@ test('retained failed review does not consume a fresh attempt allowance',async()
  const {maintenancePort}=await import('../scripts/maintain-factory');const s=new Store(':memory:');let attempts:number[]=[];
  const run:typeof import('../adapters/factory-challenge').runFactoryChallenge=async(store,pull,dir,checkout,claimed)=>{attempts.push(pull.number);if(pull.number===2)claimed?.();return undefined;};
  try{s.set(`factory-challenge:1:${p.head}`,{state:'blocked'});const port=maintenancePort(s,run);await port.challenge(p);await port.challenge({...p,number:2});await port.challenge({...p,number:3});expect(attempts).toEqual([2]);}finally{s.close();}
+});
+
+test('a source freeze blocks new integration and a retained installation without clearing custody',async()=>{
+ const {s,port,effects}=setup();try{
+ port.integrationHold=()=> 'exact Quality proof source freeze';
+ expect((await maintainFactory(s,port))[0].state).toBe('integration-frozen');expect(effects).toEqual([]);
+ s.set('factory-install-pending',{head:p.head,tree:p.tree});s.set(`factory-merge-outcome:${p.head}`,{state:'verified',tree:p.tree});
+ expect((await maintainFactory(s,port))[0].state).toBe('integration-frozen');expect(s.get('factory-install-pending')).toMatchObject({head:p.head});expect(effects).toEqual([]);
+ }finally{s.close();}
+});
+test('freeze crossing a review or merge readback never installs a revision during the proof window',async()=>{
+ for(const boundary of ['review','merge','pending'] as const){const {s,port,effects}=setup();let held=false;
+ try{port.integrationHold=()=>held?'proof window':null;
+ if(boundary==='review'){const prior=port.challenge;port.challenge=async p=>{const c=await prior(p);held=true;return c;};}
+ else if(boundary==='merge'){const prior=port.merge;port.merge=async(n,h)=>{const c=await prior(n,h);held=true;return c;};}
+ else {s.set('factory-install-pending',{head:p.head,tree:p.tree});s.set(`factory-merge-outcome:${p.head}`,{state:'verified',tree:p.tree});port.signed=async()=>{held=true;return true;};}
+ expect((await maintainFactory(s,port)).some(r=>r.state==='integration-frozen')).toBe(true);
+ expect(effects.filter(e=>e.startsWith('install:'))).toEqual([]);
+ if(boundary==='merge')expect(s.get('factory-install-pending')).toMatchObject({head:'c'.repeat(40)});
+ }finally{s.close();}}
+});
+
+test('actual installer rechecks freeze after asynchronous fetch for pending and newly merged source',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');
+ for(const pending of [true,false]){const {s,port,effects}=setup(),target='c'.repeat(40);let held=false,mutated=false;
+ try{
+ const installer=maintenancePort(s,undefined,undefined,{hold:()=>held?'proof window':null,git:async(...args)=>{
+  if(args[0]==='branch')return 'main';if(args[0]==='status')return '';if(args[0]==='remote')return 'https://github.com/fulmar-hq/agent-factory.git';
+  if(args[0]==='fetch'){held=true;return '';}
+  if(args[0]==='merge'){mutated=true;return '';}
+  return args[1]==='origin/main'?target:'d'.repeat(40);
+ },api:async()=>({sha:target,commit:{tree:{sha:p.tree},verification:{verified:true,reason:'valid'}}})});
+ port.install=installer.install;port.integrationHold=installer.integrationHold;
+ if(pending){s.set('factory-install-pending',{head:target,tree:p.tree});s.set(`factory-merge-outcome:${target}`,{state:'verified',tree:p.tree});}
+ await maintainFactory(s,port);
+ expect(held).toBe(true);expect(mutated).toBe(false);expect(s.get('factory-install-pending')).toMatchObject({head:target});
+ expect(effects.filter(e=>e.startsWith('install:'))).toEqual([]);
+ }finally{s.close();}}
 });

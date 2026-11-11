@@ -27,3 +27,15 @@ test('successful renewal cannot repeat six native runs against an unchanged aged
   expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>starts++,now+60000).state).toBe('waiting-publisher-proof');expect(starts).toBe(1);
  }finally{f.s.close();}
 });
+
+
+test('changing only the trusted dependency helper changes renewal fingerprint and refuses old publisher proof',()=>{
+ const f=setup();try{
+  const helper='scripts/cache-retention.py',before=renewalFingerprint(f.source,'fixture');
+  writeFileSync(join(f.source,helper),'fictional changed dependency helper');
+  const after=renewalFingerprint(f.source,'fixture');expect(after.hashes[helper]).not.toBe(before.hashes[helper]);
+  expect(Object.fromEntries(Object.entries(after.hashes).filter(([path])=>path!==helper))).toEqual(Object.fromEntries(Object.entries(before.hashes).filter(([path])=>path!==helper)));
+  let calls=0;expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('waiting-publisher-proof');expect(calls).toBe(0);
+  f.savePublisher();expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('starting');expect(calls).toBe(1);
+ }finally{f.s.close();}
+});

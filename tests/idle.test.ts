@@ -16,7 +16,7 @@ test("two idle ticks and controlled relaunch call no models and preserve read-on
   for (const name of ["gh", "codex", "claude"])
     writeFileSync(
       join(bin, name),
-      `#!/bin/sh\necho "${name} $*" >> '${calls}'\nif [ "$1" = '--version' ]; then echo fixture; elif [ "$1" = api ]; then case "$*" in *pullRequests*) echo '${githubPage('pullRequests',[])}';; *) echo '${githubPage('issues',[])}';; esac; else exit 81; fi\n`,
+      `#!/bin/sh\necho "${name} $*" >> '${calls}'\nif [ "$1" = '--version' ]; then echo fixture; elif [ "$1" = api ]; then case "$*" in *state=open*) echo '[[]]';; *pullRequests*) echo '${githubPage('pullRequests',[])}';; *) echo '${githubPage('issues',[])}';; esac; else exit 81; fi\n`,
       { mode: 0o700 },
     );
   const old = process.env.PATH;
@@ -27,7 +27,8 @@ test("two idle ticks and controlled relaunch call no models and preserve read-on
     await tick(dir);
     const text = await Bun.file(calls).text();
     expect(text).not.toMatch(/exec| -p| --bg|login|auth/);
-    expect((text.match(/api graphql/g) || []).length).toBe(4);
+    expect((text.match(/api graphql/g) || []).length).toBe(1);
+    expect((text.match(/api --paginate --slurp/g) || []).length).toBe(4);
     expect(await Bun.file(join(dir, "config.yaml")).text()).toBe(raw);
     const s = new Store(join(dir, "controller.sqlite"));
     expect(s.get("paused")).toBe(true);
