@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import {claimableReady} from './queue';
 import {enforceIntakeMode} from './intake-policy';
+import {intakeContext,completeIntakeDraft} from './intake-context';
 import {join} from 'node:path';
 import {readFileSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
 import {createHash} from 'node:crypto';
@@ -119,15 +120,15 @@ export function supply(e:Engine,ready:Ticket[],now:number,observation?:SupplyObs
  if(!round || round.closed){const id=`${now}-${crypto.randomUUID()}`;round={id,at:now,attempt:1,wake:`intake:${id}:1`};}
  e.s.set('intake-round',round);
  const publications=new Map((e.s.db.query("SELECT data FROM events WHERE kind IN ('launcher-publish','worker-delivery') ORDER BY at").all() as {data:string}[]).map(r=>{const d=JSON.parse(r.data) as {id:string;url:string};return [d.id,d.url];}));
- const existing=(e.s.rows('tickets') as {id:string;snapshot:string}[]).map(r=>{
+ const existing=(e.s.rows('tickets') as {id:string;snapshot:string;decision:string|null}[]).map(r=>{
   const i=JSON.parse(r.snapshot) as Issue;
   const session=sessions.filter(x=>x.ticket===r.id).sort((a,b)=>b.attempt-a.attempt).find(x=>publications.has(x.id));
   const pr=session ? publications.get(session.id) : undefined;
-  return {id:r.id,title:i.title.slice(0,180),state:i.state,labels:i.labels.filter(l=>/^(state|area|kind):/.test(l.name)).slice(0,8).map(l=>({name:l.name.slice(0,80)})),scope:i.body?.match(/```factory\s*\n([\s\S]*?)\n```/)?.[1].slice(0,1200),pr,checks:pr ? e.s.get(`board-pr:${pr}`) : undefined};
+  return {id:r.id,bodyDigest:createHash('sha256').update(i.body??'').digest('hex'),decision:r.decision,source:i.body?.slice(0,1800),title:i.title.slice(0,180),state:i.state,labels:i.labels.filter(l=>/^(state|area|kind):/.test(l.name)).slice(0,8).map(l=>({name:l.name.slice(0,80)})),scope:i.body?.match(/```factory\s*\n([\s\S]*?)\n```/)?.[1].slice(0,1200),pr,checks:pr ? e.s.get(`board-pr:${pr}`) : undefined};
  }).filter(i=>i.state==='OPEN');
  const review=existing.filter(i=>i.labels.some(l=>l.name==='state:review'));
- const brief=e.c.refill ? 'Free capacity goes to product tasks from the existing real backlog only: multi-staff and mixed-calendar booking, Outlook, Leads, onboarding, Settings and reply quality first. No review, challenge or acceptance issues. Review is automatic on the original PR after green checks. Return product/other mix; empty intake is valid.' : 'Free capacity is work to staff. Review-state issues need bounded review, challenge or fix-up tasks tied to their existing issue/PR; do not wait for the whole review queue or invent new scope. Inspect current evidence, avoid duplicate/occupied paths, and return source-backed factory briefs with executable checks. A rejected/defaulted proposal stays unapproved. Report concrete blockers if no safe leaf exists; the launcher retries with backoff.';
- queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,brief,idleSince:idle?.since,free:e.slots().free,refusals:observation?.refusals.slice(0,20).map(r=>({...r,reason:r.reason.slice(0,500)})),reviewCount:review.length,existing:[...review,...existing.filter(i=>!review.includes(i))].slice(0,50),existingCount:existing.length,occupied:e.active().slice(0,12).map(x=>({id:x.id,ticket:x.ticket,paths:(JSON.parse(x.brief) as Ticket).paths.slice(0,30)}))}},now);
+ const brief=e.c.refill ? 'Free capacity goes to product tasks from the existing real backlog only: multi-staff and mixed-calendar booking, Outlook, Leads, onboarding, Settings and reply quality first. Ready labels alone are not runnable supply: inspect each decision. Complete safe unattempted coding drafts with a pinned existingIssue/bodyDigest rather than duplicating them. Operational setup and owner-only tasks remain dependencies, not coding work. Work past blocked items through the real backlog. No review, challenge or acceptance issues. Review is automatic on the original PR after green checks. Return product/other mix; empty intake is valid.' : 'Free capacity is work to staff. Review-state issues need bounded review, challenge or fix-up tasks tied to their existing issue/PR; do not wait for the whole review queue or invent new scope. Inspect current evidence, avoid duplicate/occupied paths, and return source-backed factory briefs with executable checks. A rejected/defaulted proposal stays unapproved. Report concrete blockers if no safe leaf exists; the launcher retries with backoff.';
+ queueWake(e.s,{id:round.wake,owner:p.intake_owner,kind:'product-intake',payload:{round:round.id,ready:unclaimed.length,target,intake_mode:p.intake_mode,projects:e.c.projects,policy:p.auto_approval,brief,idleSince:idle?.since,free:e.slots().free,refusals:observation?.refusals.slice(0,20).map(r=>({...r,reason:r.reason.slice(0,500)})),reviewCount:review.length,existing:intakeContext(existing,!!e.c.refill),existingCount:existing.length,occupied:e.active().slice(0,12).map(x=>({id:x.id,ticket:x.ticket,paths:(JSON.parse(x.brief) as Ticket).paths.slice(0,30)}))}},now);
  markIdleWake(round.wake);
 }
 // Missing proof is an escalation, not a synthesized successful session.
@@ -170,7 +171,7 @@ function artifact(scratch:string,name:string):unknown {
  const fd=openSync(join(scratch,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
  try {const stat=fstatSync(fd);if(!stat.isFile() || stat.size>128*1024)throw Error('bounded regular result required');return JSON.parse(readFileSync(fd,'utf8'));}finally{closeSync(fd);}
 }
-const Intake=z.object({tickets:z.array(z.object({repo:z.string(),title:z.string().min(1).max(100),brief:z.record(z.string(),z.unknown())})).max(15),mix:z.object({product:z.number().int().nonnegative(),other:z.number().int().nonnegative()}).strict().optional()}).strict();
+const Intake=z.object({tickets:z.array(z.object({repo:z.string(),title:z.string().min(1).max(100),existingIssue:z.number().int().positive().optional(),bodyDigest:z.string().regex(/^[a-f0-9]{64}$/).optional(),brief:z.record(z.string(),z.unknown())})).max(15),mix:z.object({product:z.number().int().nonnegative(),other:z.number().int().nonnegative()}).strict().optional()}).strict();
 const Retry=z.object({session:z.string(),diagnosis:z.string().min(20),estimateBasis:z.string().min(20),test:z.string().min(1),outcome:z.string().min(1)}).strict();
 // Only a completed, native-verified wake with independently verified cleanup can
 // propose effects. Files are data, never controller commands or credentials.
@@ -196,6 +197,12 @@ export async function applyOwnerResults(e:Engine,dir:string,billing:Billing|unde
      const brief:Record<string,unknown>={...proposal.brief,title:proposal.title,owner:w.owner,creator:`launcher:${w.id}`,source:`factory-event:${w.id}`,approved:true};
      const fake:Issue={number:1,title:proposal.title,body:'```factory\n'+JSON.stringify(brief,null,2)+'\n```',url:'',updatedAt:'',state:'OPEN',labels:[{name:`kind:${String(brief.kind)}`},{name:`area:${String(brief.area)}`} ]};
      const t=prospective(proposal.repo,fake);executableTest(t.test);
+     if(proposal.existingIssue!==undefined){
+      if(!e.c.refill)throw Error('existing draft completion requires product-only refill');
+      const number=await completeIntakeDraft(e,proposal,brief,key,execute);
+      e.s.set(`proposal-round:${t.repo}#${number}`,round);continue;
+     }
+     if(proposal.bodyDigest!==undefined)throw Error('bodyDigest requires existingIssue');
      await enforceIntakeMode(e,proposal.repo,brief,dir,execute);
      // Durable marker recovers an uncertain create without duplicating issues.
      let number=e.s.get<number>(key);

@@ -17,3 +17,16 @@ AWS expiry uses only the existing non-secret original sign-in provenance file `r
 Bridge IDs are stable per condition, incident and destination. State is persisted before insertion. A successful insert means queued only. Vincent delivery needs the bridge's `telegram_messages` receipt; Coordinator delivery needs its recorded native wake. Notification retries reuse the same mail ID after crashes. Separate receipts prevent one destination hiding the other. Recovery requires newer positive evidence and two-hour opening/recovery rate limits remain in the evaluator.
 
 After installation, `bun scripts/factory-health-watch.ts --rehearse YYYY-MM-DD` exercises a synthetic disk incident in memory and inserts exactly one clearly labelled test through the actual bridge, solely to Vincent. Its fixed date ID makes retries idempotent. Run again only to read delivery; no other condition or Coordinator is sent by the rehearsal. Preserve the returned ID and actual Telegram receipt privately. This does not alter controller evidence or manufacture qualification. Full six-condition source tests and real monitoring operation are separate from the single authorized Telegram test.
+
+Product-only intake sees unapproved ready drafts and the open product backlog
+before review/building context; a ready label alone is never counted as runnable.
+Its context includes the reconciler's refusal and the exact body SHA-256. Product
+may return `existingIssue` and `bodyDigest` on an intake proposal to complete a
+never-attempted, unapproved coding draft on that original issue. The result must
+cite that same product issue. The launcher preserves its prose and retained edit
+plan, refuses changed bodies, existing approval, blocked/building/review states
+and prior session custody, and confirms the edit before normal auto-approval.
+This route never approves work, resets an attempt or converts owner setup work
+into a coding task. An uncertain response reuses the retained exact edit; it
+cannot overwrite an author's later body change. New product leaves still use the
+ordinary proposal path; review work remains on the original PR.
