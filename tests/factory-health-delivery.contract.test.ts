@@ -12,7 +12,7 @@ import {
   transitionFactoryHealth, unconfirmedHealthDeliveries,
   type FactoryHealthSnapshot, type FactoryHealthState, type HealthNotification, type HealthRecipient,
 } from "../launcher/factory-health";
-import { HEALTH_HARD_STOPS, HEALTH_PROTECTED_PATHS, healthBridge, healthHardStopId, watchFactoryHealth } from "../launcher/factory-health-runtime";
+import { HEALTH_HARD_STOPS, HEALTH_PROTECTED_PATHS, healthBridge, healthHardStopId, watchFactoryHealth, type HealthHardStop } from "../launcher/factory-health-runtime";
 import { LoopHeartbeatSchema, parseOwnerMessageId } from "../launcher/loop-contract";
 import { Store } from "../tracking/store";
 import { config } from "./fixtures";
@@ -297,6 +297,8 @@ function workspace() {
   return { dir, factory, path, db };
 }
 const offline = { execute: async () => { throw Error("fictional no network"); } };
+// These runs read this machine's real disk, which may itself be over its limit, so tests look at the tick only.
+const aboutTick = <T extends { notification: string }>(list: T[]) => list.filter(u => u.notification.includes(":tick:"));
 const tickLog = (factory: string, entries: [number, "ok" | "error"][]) =>
   writeFileSync(join(factory, "tick.log"), entries.map(([at, status]) => JSON.stringify({ at, status })).join("\n") + "\n");
 const ids = (db: Database, where: string) => (db.query(`SELECT id FROM messages WHERE ${where} ORDER BY id`).all() as { id: string }[]).map(r => r.id);
@@ -381,7 +383,8 @@ describe("a message nobody confirmed is a fault of its own", () => {
       expect(late.unconfirmed.map(u => u.notification)).not.toContain(work);
       // The hard stop is named first.
       expect(late.unconfirmed[0]).toEqual({ notification: `factory-health:tick:1:${AT}:opening`, recipient: "Vincent", hardStop: true, reason: "written to Alido Mail but not sent", createdAt: AT });
-      expect(late.deliveryAlarm).toBe(`${late.unconfirmed.length} health messages unconfirmed after 10 minutes, 1 of them a hard stop. First: factory-health:tick:1:${AT}:opening for Vincent, created 2026-11-10, 12:00 Toronto time, written to Alido Mail but not sent.`);
+      const stops = late.unconfirmed.filter(u => u.hardStop).length;
+      expect(late.deliveryAlarm).toBe(`${late.unconfirmed.length} health messages unconfirmed after 10 minutes, ${stops} of them a hard stop. First: factory-health:tick:1:${AT}:opening for Vincent, created 2026-11-10, 12:00 Toronto time, written to Alido Mail but not sent.`);
       expect(LoopHeartbeatSchema.parse(heartbeat(f.factory))).toEqual({ at: AT + 11 * M, alarm: late.deliveryAlarm! });
       // The Coordinator's leg was confirmed by "digested"; that says nothing about Vincent's.
       const state = storedState(f.factory), tick = state.outbox.find(n => n.condition === "tick")!;
@@ -408,19 +411,21 @@ describe("a message nobody confirmed is a fault of its own", () => {
       f.db.query("UPDATE messages SET wake_state='cancelled' WHERE id=?").run(`${aws}:Vincent`);
       f.db.query("UPDATE messages SET wake_state='digested',wake_id='fictional-wake' WHERE recipient='Coordinator'").run();
       const late = await watchFactoryHealth(f.factory, f.path, AT + 11 * M, offline);
-      expect(late.unconfirmed).toEqual([{ notification: `factory-health:tick:1:${AT}:opening`, recipient: "Vincent", hardStop: true, reason: "held by the mail gate", createdAt: AT }]);
-      expect(late.deliveryAlarm).toContain("1 health message unconfirmed after 10 minutes, 1 of them a hard stop");
+      expect(aboutTick(late.unconfirmed)).toEqual([{ notification: `factory-health:tick:1:${AT}:opening`, recipient: "Vincent", hardStop: true, reason: "held by the mail gate", createdAt: AT }]);
+      // Every other row for Vincent is routine and held, so only hard stops are left to report.
+      expect(late.unconfirmed.every(u => u.hardStop)).toBe(true);
+      expect(late.deliveryAlarm).toMatch(/^\d health messages? unconfirmed after 10 minutes, \d of them a hard stop\. First: /);
       const state = storedState(f.factory), reason = (id: string) => state.outbox.find(n => n.id === id)!.deliveries.Vincent.superseded?.reason;
       expect([reason(work), reason(aws)]).toEqual(["folded by Alido Mail", "cancelled by Alido Mail"]);
       // Even cancelled, a hard stop is not quietly archived while its condition is open.
       f.db.query("UPDATE messages SET wake_state='cancelled' WHERE id=?").run(stop);
       const still = await watchFactoryHealth(f.factory, f.path, AT + 16 * M, offline);
-      expect(still.unconfirmed).toEqual([{ notification: `factory-health:tick:1:${AT}:opening`, recipient: "Vincent", hardStop: true, reason: "cancelled by the mail gate", createdAt: AT }]);
+      expect(aboutTick(still.unconfirmed)).toEqual([{ notification: `factory-health:tick:1:${AT}:opening`, recipient: "Vincent", hardStop: true, reason: "cancelled by the mail gate", createdAt: AT }]);
       // Once the condition has cleared there is nothing left to say, so it is archived with its reason.
       tickLog(f.factory, [[AT - M, "ok"], [AT, "error"], [AT + 20 * M, "ok"]]);
       await watchFactoryHealth(f.factory, f.path, AT + 21 * M, offline);
       const ended = await watchFactoryHealth(f.factory, f.path, AT + 26 * M, offline);
-      expect(ended.unconfirmed).toEqual([]);
+      expect(aboutTick(ended.unconfirmed)).toEqual([]);
       expect(storedState(f.factory).outbox.filter(n => n.condition === "tick").map(n => n.deliveries.Vincent.superseded?.reason)).toEqual(["cancelled by Alido Mail", "its opening was never sent"]);
     } finally { f.db.close(); }
   });
@@ -546,7 +551,7 @@ describe.skipIf(!realMailSource())("delivery proof on the real mail store", () =
       tickLog(factory, [[at - M, "ok"], [at, "error"]]);
       await watchFactoryHealth(factory, mail.path, at, offline);
       const openings = state().outbox, stop = healthHardStopId("tick", at);
-      const vincentRow = (n: HealthNotification) => n.hardStop ? stop : `${n.id}:Vincent`;
+      const vincentRow = (n: HealthNotification) => n.hardStop ? healthHardStopId(n.condition as HealthHardStop, n.createdAt) : `${n.id}:Vincent`;
       expect(openings.length).toBeGreaterThan(3);
       expect(mail.row(stop)).toMatchObject({ recipient: "Vincent", recipient_app: "telegram", wake_state: "pending" });
       for (const n of openings) expect(mail.row(`${n.id}:Coordinator`)).toMatchObject({ kind: "fyi", state: "unread", wake_state: "pending" });
@@ -569,7 +574,7 @@ describe.skipIf(!realMailSource())("delivery proof on the real mail store", () =
       // Nothing was sent to Telegram, so every Vincent row is a failure, except the held one.
       expect(late.unconfirmed.map(u => u.notification).sort()).toEqual(openings.filter(n => n.id !== held.id).map(n => n.id).sort());
       expect(late.unconfirmed.every(u => u.recipient === "Vincent")).toBe(true);
-      expect(late.deliveryAlarm).toContain("unconfirmed after 10 minutes, 1 of them a hard stop");
+      expect(late.deliveryAlarm).toMatch(/ unconfirmed after 10 minutes, \d of them a hard stop\. First: /);
 
       // Alido Mail's one send function, through a stand-in Telegram connection.
       expect((await mail.sendToVincent()).length).toBeGreaterThan(0);
