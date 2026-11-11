@@ -64,6 +64,7 @@ test('actual preparers emit resolvable scheduled plists even under a hostile inv
  // credential or model command is allowed by these executable fixtures.
  writeFileSync(join(shim,'readlink'),'#!/bin/sh\nprintf /usr/share/zoneinfo/America/Toronto\n',{mode:0o700});
  writeFileSync(join(shim,'plutil'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+ writeFileSync(join(shim,'launchctl'),'#!/bin/sh\nprintf forbidden-launchd-effect >&2\nexit 93\n',{mode:0o700});
  writeFileSync(join(shim,'git'),'#!/bin/sh\ncase "$*" in "branch --show-current") printf main;; "status --porcelain") :;; "remote get-url origin") printf https://github.com/fulmar-hq/agent-factory.git;; *) exit 92;; esac\n',{mode:0o700});
  await run('install-release.ts');
  const available=new Set(Object.values(executableLocations).map(p=>p.replace('HOME',fixtureHome).replace('BUN',dirname(process.execPath))));
@@ -100,4 +101,12 @@ test('the real installed checker rejects a missing loaded Bun even when another 
  const fixture=join(root,'loaded.txt');writeFileSync(fixture,raw);
  writeFileSync(join(shim,'launchctl'),'#!/bin/sh\n/bin/cat "$LOADED_JOB_FIXTURE"\n',{mode:0o700});writeFileSync(join(shim,'bun'),'#!/bin/sh\nexit 91\n',{mode:0o700});expect(Bun.which('bun',{PATH:path})).not.toBeNull();
  const p=Bun.spawn([process.execPath,join(repo,'scripts/check-job-environment.ts')],{env:{HOME:root,FACTORY_PRIVATE_DIR:privateDir,PATH:path,LOADED_JOB_FIXTURE:fixture},stdout:'pipe',stderr:'pipe'});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);expect(code).toBe(1);expect(out).toBe('');expect(err).toContain('loaded runtime executable unavailable');
+});
+
+test('a missing delegated Git SSH signing helper refuses every scheduled environment',()=>{
+ const agents=mkdtempSync(join(tmpdir(),'signing-helper-'));
+ for(const job of scheduledJobs)writeFileSync(join(agents,`com.agent-factory.${job}.plist`),plist(jobEnvironment(home,bun,dir)));
+ const resolver=(name:string,path:string)=>name==='ssh-keygen'?null:which(name,path);
+ expect(missingExecutables(jobEnvironment(home,bun,dir).PATH,undefined,resolver)).toContain('ssh-keygen');
+ expect(()=>checkInstalledEnvironments(agents,dir,resolver,job=>join(agents,`com.agent-factory.${job}.plist`))).toThrow('ssh-keygen');
 });
