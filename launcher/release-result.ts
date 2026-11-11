@@ -26,7 +26,7 @@ export async function readQaServerStates(target:QaServerTarget,execute=command):
  return {observedAt:Date.now(),ec2:vm[0][1],rds:database[0][1],evidence:'AWS EC2 DescribeInstances and RDS DescribeDBInstances for exact private QA targets'};
 }
 
-function outcome(s:Store,day:string) {
+export function releaseOutcome(s:Store,day:string) {
  const effect=(step:string)=>s.get<Effect>(`executor:${day}:${step}`);
  const preflight=effect('preflight'),qa=effect('qa'),promote=effect('promote'),readback=effect('readback');
  const accepted=s.get<Acceptance>(`executor:${day}:acceptance`);
@@ -58,7 +58,7 @@ function outcome(s:Store,day:string) {
 export async function releaseWindowResult(s:Store,o:ReleaseResultOptions={}) {
  const now=o.now??Date.now(),{day,minute}=toronto(now),id=`release-window-result:${day}`;
  if(minute<1320||s.get(id))return {queued:false};
- const result=outcome(s,day);
+ const result=releaseOutcome(s,day);
  let servers:QaServerStates|undefined,error:string|undefined;
  try{
   if(!o.observeServers)throw Error('QA resource observer unavailable');
