@@ -155,6 +155,9 @@ export async function claudeStatus(execute=command,cwd=resolve(import.meta.dir,'
 export async function localReadings(now = Date.now(), sources = {
   receipt: () => codexReading(now), claude: () => claudeReading(now), status: () => codexStatus(),
 }) {
-  const [receipt, claude, status] = await Promise.all([sources.receipt(), sources.claude(), sources.status()]);
+  // Defer each invocation so synchronous throws and rejected reads are both
+  // isolated. A failed source supplies no observation, not a zero reading.
+  const read = (source: () => Promise<Meter | undefined>) => Promise.resolve().then(source).catch(() => undefined);
+  const [receipt, claude, status] = await Promise.all([read(sources.receipt), read(sources.claude), read(sources.status)]);
   return { codex: status && (!receipt || status.observedAt > receipt.observedAt) ? status : receipt, claude };
 }
