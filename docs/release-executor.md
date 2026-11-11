@@ -212,3 +212,12 @@ Billing and final QA-server reads check the existing original-password/MFA sign-
 receipt before invoking AWS. An expired/missing receipt causes a local refusal;
 subsequent observers reread local provenance while waiting for the owner and never
 try SSO or loop on the AWS CLI. A real owner renewal can restore that read path.
+
+Installation retains one exclusive private `release-install-active` claim for the
+whole operation (including preparation); completed claims are archived and a
+crashed claim requires identity reconciliation, never timeout stealing. Before
+its final idle read it disables future scheduled starts and verifies the launchd
+disabled-state interlock. Already-running jobs retain custody and the original
+enabled state is restored. Only an interlocked idle job is booted out; the new
+reviewed definition is copied before enabling/bootstrap restores its fixed
+schedule. A preexisting disabled hold is preserved and refuses replacement.

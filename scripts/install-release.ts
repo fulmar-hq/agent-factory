@@ -1,4 +1,4 @@
-import {mkdirSync,existsSync,copyFileSync,writeFileSync} from 'node:fs';
+import {mkdirSync,existsSync,copyFileSync,writeFileSync,renameSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {realpathSync} from 'node:fs';
 import {releasePath,releaseTools,rebindReleaseJob} from '../launcher/release-install';
@@ -17,6 +17,8 @@ const missing=releaseTools.filter(tool=>!Bun.which(tool,{PATH:pathEnv}));if(miss
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
+const lock=join(root,'release-install-active');mkdirSync(lock,{mode:0o700});writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,at:Date.now(),repo,install}),{mode:0o600});
+try{
 for(const [stage,hour,minute] of jobs){
  const label=`com.agent-factory.release.${stage}`,path=join(root,`${label}.plist`);
  if(existsSync(path))copyFileSync(path,join(archive,`${label}.plist`));
@@ -31,3 +33,5 @@ for(const [stage,hour,minute] of jobs){
  console.log(`${install?'installed':'prepared'} ${label}`);
 }
 writeFileSync(join(archive,'undo.txt'),jobs.map(([stage])=>`launchctl bootout gui/${process.getuid!()}/com.agent-factory.release.${stage}`).join('\n')+'\nArchive installed plists. Restore prior definitions only after reconciling effects. Retain release receipts and claims.\n');
+
+}finally{renameSync(lock,join(archive,'completed-custody'));}

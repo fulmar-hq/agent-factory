@@ -10,17 +10,32 @@ export function loadedReleaseJob(raw:string):ReleaseJobIdentity {
  const paths=[...block('environment').matchAll(/^\t\tPATH => (.+)$/gm)];if(paths.length!==1)throw Error('loaded job PATH unavailable or ambiguous');
  return {program:field('program'),args,directory:field('working directory'),path:paths[0][1]};
 }
-// A copied plist does not change a loaded job. Rebind an idle job explicitly;
-// never terminate an active release/reconciliation process during installation.
+function disabledService(raw:string,label:string){
+ const blocks=[...raw.matchAll(/^\s*disabled services = \{\n([\s\S]*?)^\s*\}/gm)];if(blocks.length!==1)throw Error('launchd disabled-service inventory unavailable');
+ const rows=blocks[0][1].split('\n').filter(l=>l.trim()).map(line=>{const row=line.match(/^\s*"([^"\n]+)" => (enabled|disabled)\s*$/);if(!row)throw Error('launchd disabled-service row malformed');return {label:row[1],disabled:row[2]==='disabled'};});
+ const matches=rows.filter(row=>row.label===label);if(matches.length>1)throw Error('launchd disabled-service identity ambiguous');return matches[0]?.disabled??false;
+}
+// Caller holds exclusive installation custody. Disable future scheduled starts
+// before the final idle observation; an already-running job is never booted out.
+// Restore the original enabled state, including when an idle check refuses.
 export async function rebindReleaseJob(label:string,path:string,uid:number,expected:ReleaseJobIdentity,execute=command,prepare=()=>{}){
- const service=`gui/${uid}/${label}`;let loaded:string|undefined;
- try{loaded=await execute(['launchctl','print',service]);}catch(error){if(!/Could not find (?:service|specified service)/i.test(String(error)))throw error;}
- if(loaded&&/\bpid = [1-9]\d*|\bstate = running\b/.test(loaded))throw Error(`${label} is running; retain its custody and retry installation after it exits`);
- if(loaded)await execute(['launchctl','bootout',service]);
- prepare();
- await execute(['launchctl','bootstrap',`gui/${uid}`,path]);
- const actual=await execute(['launchctl','print',service]);
- const identity=loadedReleaseJob(actual);
- if(identity.program!==expected.program||identity.directory!==expected.directory||identity.path!==expected.path||JSON.stringify(identity.args)!==JSON.stringify(expected.args))throw Error(`${label} loaded definition differs; retain installation evidence`);
- return actual;
+ const domain=`gui/${uid}`,service=`${domain}/${label}`;
+ if(disabledService(await execute(['launchctl','print-disabled',domain]),label))throw Error(`${label} is already disabled; preserve its owner's hold`);
+ let interlocked=true;
+ try{
+  await execute(['launchctl','disable',service]);
+  if(!disabledService(await execute(['launchctl','print-disabled',domain]),label))throw Error('scheduled-start interlock not verified');
+  let loaded:string|undefined;
+  try{loaded=await execute(['launchctl','print',service]);}catch(error){if(!/Could not find (?:service|specified service)/i.test(String(error)))throw error;}
+  if(loaded){const states=[...loaded.matchAll(/^\tstate = (.+)$/gm)],counts=[...loaded.matchAll(/^\tactive count = (\d+)$/gm)];
+   if(states.length!==1||states[0][1]!=='not running'||counts.length!==1||counts[0][1]!=='0'||/^\tpid = /m.test(loaded))throw Error(`${label} is running or custody is unknown; retain it and retry installation after it exits`);
+  }
+  if(loaded)await execute(['launchctl','bootout',service]);
+  prepare();
+  await execute(['launchctl','enable',service]);interlocked=false;
+  await execute(['launchctl','bootstrap',domain,path]);
+  const actual=await execute(['launchctl','print',service]),identity=loadedReleaseJob(actual);
+  if(identity.program!==expected.program||identity.directory!==expected.directory||identity.path!==expected.path||JSON.stringify(identity.args)!==JSON.stringify(expected.args))throw Error(`${label} loaded definition differs; retain installation evidence`);
+  return actual;
+ }finally{if(interlocked)await execute(['launchctl','enable',service]);}
 }
