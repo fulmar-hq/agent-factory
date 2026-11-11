@@ -1,6 +1,6 @@
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {claimableReady,reviewPublished as reconcilePublished} from '../launcher/queue';
 import {observeClaimProgress,checkClaimStall} from '../launcher/watchdog';
 import {intakeLabel,type Issue} from '../adapters/github';
