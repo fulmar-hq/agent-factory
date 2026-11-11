@@ -272,3 +272,26 @@ Inspect the heartbeat, source error, backoff and counters before resuming. Allow
 Owner inspections use read-only SQLite with a one-second timeout, bounded reads and prompt close (see AGENTS.md); mutations use authenticated controls. The writer's ten-second busy timeout is installed before WAL setup. Immediate transactions retry lock acquisition twice with bounded backoff; callbacks and complete ticks are never replayed, preserving exactly-once reservation/spawn and external effects. Persistent contention still fails visibly rather than bypassing custody.
 
 The CLI tick queues a Coordinator **action** on the first error of an episode, without opening the controller database. A successful tick rearms the next error episode. The independent health job retries retained messages before reading the controller and also alerts for a pause lasting five minutes with recently observed ready tasks and no starting/running builders. This closes #188's intentional empty-queue/unpaused-only coverage gap; neither usage availability nor an empty-queue observation is needed for the pause alarm. The read-only controller snapshot closes before mail work. Private `health/controller-alerts.sqlite` retains incidents, stable mail IDs and actual wake receipts; queued is not woken. Bridge outages retain incidents for retry. No alarm clears a pause, starts work or alters admission/release policy. Undo through a reviewed signed revert; archive and retain all state and receipts.
+
+## Daily release rehearsal
+
+Release readiness is collected at **14:00** and **17:40 America/Toronto**, using
+`scripts/release.ts rehearsal 14:00|17:40` from the registered installed checkout.
+The rehearsal plists use the release preflight's executable, WorkingDirectory,
+PATH, private directory and timezone. Rehearsals cannot run the release executor,
+reserve release funds, dispatch acceptance, merge, deploy or observe servers.
+They use the same independent readiness collector and the existing read-only
+AWS Budgets DescribeBudget path. The 14:00 collection imports a fresh billing
+receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
+never manufactures freshness. No Cost Explorer, model or resource calls occur.
+
+Every missing input queues one Alido Mail action per day/input to Release,
+Quality or Platform. AWS sign-in, usage decisions and pauses go to Coordinator.
+Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
+preflight. Repeated observations reuse the immutable action payload and mail ID;
+clean collections are retained as `release-rehearsal` events and are not mailed.
+The 17:40 collection confirms readiness after source integration freezes.
+Rehearsals grant no exception to gates, holds, spending or release times.
+Install both rehearsal jobs after review, archive prior plists and read back
+loaded arguments/environment. Undo with reviewed source and archived plists;
+retain reports, billing imports and outbox receipts.
