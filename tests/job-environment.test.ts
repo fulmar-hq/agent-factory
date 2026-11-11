@@ -1,7 +1,8 @@
 import {test,expect} from 'bun:test';
-import {mkdtempSync,writeFileSync,readFileSync,readdirSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,readdirSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
+import {config} from './fixtures';
 import {createHash} from 'node:crypto';
 import {scheduledJobs,scheduledExecutables,executableLocations,jobEnvironment,plistEnvironment,missingExecutables,checkInstalledEnvironments} from '../launcher/job-environment';
 const home='/Users/fictional',bun=home+'/.bun/bin/bun',dir=home+'/.factory';
@@ -11,13 +12,13 @@ const plist=(env:Record<string,string>)=>`<plist><dict><key>EnvironmentVariables
 test('every installed job resolves the full transitive executable set in its own plist PATH',()=>{
  const agents=mkdtempSync(join(tmpdir(),'job-parity-'));
  for(const job of scheduledJobs)writeFileSync(join(agents,`com.agent-factory.${job}.plist`),plist(jobEnvironment(home,bun,dir)));
- expect(checkInstalledEnvironments(agents,dir,which)).toHaveLength(scheduledJobs.length);
+ expect(checkInstalledEnvironments(agents,dir,which,job=>join(agents,`com.agent-factory.${job}.plist`))).toHaveLength(scheduledJobs.length);
  // Tuesday's PATH loses ~/bin: the CI check must identify aws and gh for
  // release AND the other independent schedules, without this shell's PATH.
  for(const job of scheduledJobs){
   const good=jobEnvironment(home,bun,dir),bad={...good,PATH:good.PATH.split(':').filter(p=>p!==home+'/bin').join(':')};
   expect(missingExecutables(plistEnvironment(plist(bad)).PATH,scheduledExecutables,which)).toEqual(expect.arrayContaining(['aws','gh']));
-  const file=join(agents,`com.agent-factory.${job}.plist`);writeFileSync(file,plist(bad));expect(()=>checkInstalledEnvironments(agents,dir,which)).toThrow(job);writeFileSync(file,plist(good));
+  const file=join(agents,`com.agent-factory.${job}.plist`);writeFileSync(file,plist(bad));expect(()=>checkInstalledEnvironments(agents,dir,which,job=>join(agents,`com.agent-factory.${job}.plist`))).toThrow(job);writeFileSync(file,plist(good));
  }
 });
 test('new or absent executables, relative PATH entries and ambiguous plist evidence fail closed',()=>{
@@ -44,3 +45,30 @@ test('executable inventory covers literal calls and every dynamic execution boun
  }
  expect(dynamic).toEqual(audit);
 });
+
+test('mixed documented installation locations use the private tick definition, not a stale Library copy',()=>{
+ const root=mkdtempSync(join(tmpdir(),'mixed-jobs-')),agents=join(root,'agents');mkdirSync(agents);
+ for(const job of scheduledJobs)writeFileSync(join(job==='tick'?root:agents,`com.agent-factory.${job}.plist`),plist(jobEnvironment(home,bun,root)));
+ writeFileSync(join(agents,'com.agent-factory.tick.plist'),plist({...jobEnvironment(home,bun,root),PATH:'/bin'}));
+ expect(checkInstalledEnvironments(agents,root,which)).toHaveLength(scheduledJobs.length);
+ writeFileSync(join(root,'com.agent-factory.tick.plist'),plist({...jobEnvironment(home,bun,root),PATH:'/bin'}));
+ expect(()=>checkInstalledEnvironments(agents,root,which)).toThrow('tick');
+});
+test('actual preparers emit resolvable scheduled plists even under a hostile invoking PATH',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'actual-job-preparers-')),fixtureHome=join(root,'home'),privateDir=join(root,'private'),shim=join(root,'commands');for(const p of [fixtureHome,privateDir,shim,join(fixtureHome,'bin')])mkdirSync(p,{recursive:true});
+ writeFileSync(join(privateDir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(privateDir,'repositories.json'),JSON.stringify({'fulmar-hq/agent-factory':repo}));
+ const env={HOME:fixtureHome,PATH:shim+':/usr/bin:/bin',FACTORY_PRIVATE_DIR:privateDir};
+ const run=async(script:string)=>{const p=Bun.spawn([process.execPath,join(repo,'scripts',script)],{env,stdout:'pipe',stderr:'pipe'});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);expect({code,err}).toEqual({code:0,err:''});return out;};
+ await run('prepare.ts');
+ // Stub only external installer read/lint operations. No launchd load, AWS,
+ // credential or model command is allowed by these executable fixtures.
+ for(const tool of scheduledExecutables)writeFileSync(join(fixtureHome,'bin',tool),'#!/bin/sh\nexit 91\n',{mode:0o700});
+ writeFileSync(join(shim,'readlink'),'#!/bin/sh\nprintf /usr/share/zoneinfo/America/Toronto\n',{mode:0o700});
+ writeFileSync(join(shim,'plutil'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+ writeFileSync(join(shim,'git'),'#!/bin/sh\ncase "$*" in "branch --show-current") printf main;; "status --porcelain") :;; "remote get-url origin") printf https://github.com/fulmar-hq/agent-factory.git;; *) exit 92;; esac\n',{mode:0o700});
+ await run('install-release.ts');
+ const available=new Set(Object.values(executableLocations).map(p=>p.replace('HOME',fixtureHome).replace('BUN',dirname(process.execPath))));
+ const resolve=(name:string,path:string)=>name.startsWith('/')?(available.has(name)?name:null):path.split(':').map(d=>d+'/'+name).find(p=>available.has(p))??null;
+ const actual=checkInstalledEnvironments(privateDir,privateDir,resolve,job=>join(privateDir,`com.agent-factory.${job}.plist`));expect(actual).toHaveLength(scheduledJobs.length);
+ for(const row of actual)expect(row.path).not.toBe(env.PATH);
+},20000);

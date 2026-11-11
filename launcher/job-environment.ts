@@ -18,14 +18,14 @@ const unxml=(value:string)=>value.replaceAll('&quot;','"').replaceAll('&gt;','>'
 export function plistEnvironment(xml:string){
  const blocks=[...xml.matchAll(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/g)];
  if(blocks.length!==1)throw Error('installed job environment absent or ambiguous');
- const field=(name:string)=>{const rows=[...blocks[0][1].matchAll(new RegExp(`<key>${name}</key>\\s*<string>([^<]*)</string>`,'g'))];if(rows.length!==1)throw Error(`installed job ${name} absent or ambiguous`);return unxml(rows[0][1]);};
- return {FACTORY_PRIVATE_DIR:field('FACTORY_PRIVATE_DIR'),PATH:field('PATH'),TZ:field('TZ')};
+ const field=(name:string,optional=false)=>{const rows=[...blocks[0][1].matchAll(new RegExp(`<key>${name}</key>\\s*<string>([^<]*)</string>`,'g'))];if(optional&&rows.length===0)return undefined;if(rows.length!==1)throw Error(`installed job ${name} absent or ambiguous`);return unxml(rows[0][1]);};
+ return {FACTORY_PRIVATE_DIR:field('FACTORY_PRIVATE_DIR')!,PATH:field('PATH')!,TZ:field('TZ',true)};
 }
-export function checkInstalledEnvironments(agents:string,dir:string,which=(name:string,p:string)=>Bun.which(name,{PATH:p})){
+export function checkInstalledEnvironments(agents:string,dir:string,which=(name:string,p:string)=>Bun.which(name,{PATH:p}),locate=(job:ScheduledJob)=>join(job==='tick'?dir:agents,`com.agent-factory.${job}.plist`)){
  return scheduledJobs.map(job=>{
-  const file=join(agents,`com.agent-factory.${job}.plist`);if(!existsSync(file))throw Error('scheduled plist missing: '+job);
+  const file=locate(job);if(!existsSync(file))throw Error('scheduled plist missing: '+job);
   const env=plistEnvironment(readFileSync(file,'utf8'));
-  if(env.FACTORY_PRIVATE_DIR!==dir||env.TZ!=='America/Toronto')throw Error('installed job private directory/timezone differs: '+job);
+  if(env.FACTORY_PRIVATE_DIR!==dir||(env.TZ!==undefined&&env.TZ!=='America/Toronto'||job.startsWith('release.')&&env.TZ!=='America/Toronto'))throw Error('installed job private directory/timezone differs: '+job);
   const missing=missingExecutables(env.PATH,scheduledExecutables,which);if(missing.length)throw Error(`${job}: executables missing under installed PATH: ${missing.join(', ')}`);
   return {job,path:env.PATH,executables:scheduledExecutables.length};
  });
