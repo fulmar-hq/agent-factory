@@ -62,7 +62,6 @@ test('actual preparers emit resolvable scheduled plists even under a hostile inv
  await run('prepare.ts');
  // Stub only external installer read/lint operations. No launchd load, AWS,
  // credential or model command is allowed by these executable fixtures.
- for(const tool of scheduledExecutables)writeFileSync(join(fixtureHome,'bin',tool),'#!/bin/sh\nexit 91\n',{mode:0o700});
  writeFileSync(join(shim,'readlink'),'#!/bin/sh\nprintf /usr/share/zoneinfo/America/Toronto\n',{mode:0o700});
  writeFileSync(join(shim,'plutil'),'#!/bin/sh\nexit 0\n',{mode:0o700});
  writeFileSync(join(shim,'git'),'#!/bin/sh\ncase "$*" in "branch --show-current") printf main;; "status --porcelain") :;; "remote get-url origin") printf https://github.com/fulmar-hq/agent-factory.git;; *) exit 92;; esac\n',{mode:0o700});
