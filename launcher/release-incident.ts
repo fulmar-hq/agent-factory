@@ -48,8 +48,16 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  const gaps:Gap[]=[];
  const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
  const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else if(!r.missing.some(g=>['release configuration','preflight checks'].includes(g.input)))first=undefined;}return first;};
- const knownPause=(until:number)=>{const row=s.db.query("SELECT at FROM events WHERE kind='pause' AND at<=? AND rowid>COALESCE((SELECT MAX(rowid) FROM events WHERE kind='resume' AND at<=?),0) ORDER BY rowid LIMIT 1").get(until,until) as {at:number}|null;return row?.at;};
- const knownInput=(input:string,reason:string,until:number)=>{const report=firstCurrentGap(input,until),pause=input==='factory state'&&/paused/i.test(reason)?knownPause(until):undefined;return Math.min(report??until,pause??until);};
+ const knownPause=(until:number)=>{
+  const resume=s.db.query("SELECT rowid,at FROM events WHERE kind='resume' AND at<=? ORDER BY rowid DESC LIMIT 1").get(until) as {rowid:number;at:number}|null;
+  const pause=s.db.query("SELECT at FROM events WHERE kind='pause' AND at<=? AND rowid>? ORDER BY rowid LIMIT 1").get(until,resume?.rowid??0) as {at:number}|null;
+  return {resumeAt:resume?.at,pauseAt:pause?.at};
+ };
+ const knownInput=(input:string,reason:string,until:number)=>{
+  let report=firstCurrentGap(input,until);
+  if(input==='factory state'&&/paused/i.test(reason)){const episode=knownPause(until);if(episode.resumeAt!==undefined&&report!==undefined&&report<=episode.resumeAt)report=undefined;return Math.min(report??until,episode.pauseAt??until);}
+  return report??until;
+ };
  for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}
  for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':/config/i.test(reason)?'release configuration':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});

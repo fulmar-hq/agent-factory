@@ -65,3 +65,7 @@ test('historical recovery and consecutive counting include admitted event-only C
 test('late setup failure retains its genuinely scheduled invocation time',()=>{
  const s=new Store(':memory:'),day='2026-11-11';try{s.event('executor-cli:'+day+':qa:late-config','release-executor-refusal',{stage:'qa',invokedAt:at(day,'20:00'),error:'synthetic config error'},'fixture',at(day,'20:02'));releaseIncident(s,day,at(day,'20:02'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps).toContainEqual({input:'release configuration',reason:'synthetic config error',knownBy:at(day,'20:02'),basis:'recorded observation'});}finally{s.close();}
 });
+
+test('a recorded resume separates afternoon pause knowledge from a new evening pause',()=>{
+ const s=new Store(':memory:'),day='2026-11-11';try{s.event('afternoon-pause','pause',{},'fixture',at(day,'13:00'));report(s,day,'14:00',[{input:'factory state',reason:'factory paused'}]);s.event('evening-resume','resume',{},'fixture',at(day,'18:00'));report(s,day,'19:00',[{input:'release configuration',reason:'configuration unknown'}],'release-readiness');s.event('new-evening-pause','pause',{},'fixture',at(day,'20:45'));s.event('evening-refusal','release-executor',{day,kind:'refused:factory paused',data:{reason:'factory paused'}},'fixture',at(day,'21:30'));releaseIncident(s,day,at(day,'21:31'),id=>({id,queued:true}));expect(s.get<any>('release-incident:'+day).gaps.find((g:any)=>g.input==='factory state').knownBy).toBe(at(day,'20:45'));}finally{s.close();}
+});
