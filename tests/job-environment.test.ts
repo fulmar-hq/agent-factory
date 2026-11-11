@@ -92,3 +92,12 @@ test('a new executable hidden behind dynamic command argv invalidates the review
  const digest=(s:string)=>/\b(?:command|execute|spawn|spawnSync|execFileSync|Popen|subprocess\.run)\(/.test(s)?createHash('sha256').update(s).digest('hex'):undefined;
  expect(audit[file]).toBeDefined();expect(digest(source)).toBe(audit[file]);expect(digest(mutated)).not.toBe(audit[file]);
 });
+
+test('the real installed checker rejects a missing loaded Bun even when another bun resolves on PATH',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'loaded-runtime-')),shim=join(root,'bin'),privateDir=join(root,'private');mkdirSync(shim);mkdirSync(privateDir);
+ const path=shim+':/usr/bin:/bin',environment={FACTORY_PRIVATE_DIR:privateDir,PATH:path,TZ:'America/Toronto'},file=join(privateDir,'tick.plist'),missing=join(root,'missing','bun');writeFileSync(file,plist(environment));
+ const raw=`\tpath = ${file}\n\tprogram = ${missing}\n\targuments = {\n\t\t${missing}\n\t\t/fictional/tick.ts\n\t}\n\tworking directory = ${root}\n\tenvironment = {\n${Object.entries(environment).map(([k,v])=>`\t\t${k} => ${v}\n`).join('')}\t}\n`;
+ const fixture=join(root,'loaded.txt');writeFileSync(fixture,raw);
+ writeFileSync(join(shim,'launchctl'),'#!/bin/sh\n/bin/cat "$LOADED_JOB_FIXTURE"\n',{mode:0o700});writeFileSync(join(shim,'bun'),'#!/bin/sh\nexit 91\n',{mode:0o700});expect(Bun.which('bun',{PATH:path})).not.toBeNull();
+ const p=Bun.spawn([process.execPath,join(repo,'scripts/check-job-environment.ts')],{env:{HOME:root,FACTORY_PRIVATE_DIR:privateDir,PATH:path,LOADED_JOB_FIXTURE:fixture},stdout:'pipe',stderr:'pipe'});const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);expect(code).toBe(1);expect(out).toBe('');expect(err).toContain('loaded runtime executable unavailable');
+});

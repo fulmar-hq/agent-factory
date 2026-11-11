@@ -40,3 +40,8 @@ export function validateLoadedEnvironment(xml:string,raw:string,dir:string,job:S
  if(actual.FACTORY_PRIVATE_DIR!==dir||actual.FACTORY_PRIVATE_DIR!==expected.FACTORY_PRIVATE_DIR||actual.PATH!==expected.PATH||actual.TZ!==expected.TZ)throw Error('loaded private directory, PATH or timezone differs from its plist: '+job);
  return actual;
 }
+
+export function validateLoadedRuntime(program:string,args:readonly string[],which=(name:string)=>Bun.which(name)){
+ if(!program.startsWith('/')||args[0]!==program||!which(program))throw Error('loaded runtime executable unavailable or ambiguous: '+program);
+ return program;
+}
