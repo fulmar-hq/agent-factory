@@ -17,3 +17,14 @@ AWS expiry uses only the existing non-secret original sign-in provenance file `r
 Bridge IDs are stable per condition, incident and destination. State is persisted before insertion. A successful insert means queued only. Vincent delivery needs the bridge's `telegram_messages` receipt; Coordinator delivery needs its recorded native wake. Notification retries reuse the same mail ID after crashes. Separate receipts prevent one destination hiding the other. Recovery requires newer positive evidence and two-hour opening/recovery rate limits remain in the evaluator.
 
 After installation, `bun scripts/factory-health-watch.ts --rehearse YYYY-MM-DD` exercises a synthetic disk incident in memory and inserts exactly one clearly labelled test through the actual bridge, solely to Vincent. Its fixed date ID makes retries idempotent. Run again only to read delivery; no other condition or Coordinator is sent by the rehearsal. Preserve the returned ID and actual Telegram receipt privately. This does not alter controller evidence or manufacture qualification. Full six-condition source tests and real monitoring operation are separate from the single authorized Telegram test.
+
+Product-only intake sees unapproved ready drafts and the open product backlog
+before review/building context; a ready label alone is never counted as runnable.
+Its context includes the reconciler's refusal and a bounded source excerpt.
+Incomplete existing drafts stay with their named owner for correction and normal
+content-bound approval on their original issue. Product reports the issue,
+refusal and next actor; it must not convert owner-only setup into coding work or
+create duplicates. Intake proposals only create genuine new product leaves.
+Existing-issue update fields are rejected before effects: the launcher has no
+proven compare-and-swap path for replacing an author's GitHub issue body.
+Review work remains on its original PR.
