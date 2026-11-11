@@ -17,7 +17,8 @@ import {processIdentity} from './process';
 import {qualificationEvidenceVerified} from './qualification-evidence';
 import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
-import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,type FactoryHealthSnapshot,type FactoryHealthState,type HealthDeliveryCommand} from './factory-health';
+import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,supersedeHealthDelivery,unconfirmedHealthDeliveries,type FactoryHealthSnapshot,type HealthCondition,type HealthRecipient} from './factory-health';
+import {ownerMessageId,SHARED_SUBJECTS,type HardStopKind} from './loop-contract';
 const failed=(at:number,reason:string)=>({state:'unavailable' as const,observedAt:at,reason});
 const ok=<T>(at:number,receipt:string,value:T)=>({state:'ok' as const,observedAt:at,receipt,value});
 function tail(path:string){const fd=openSync(path,'r');try{const stat=fstatSync(fd),n=Math.min(stat.size,65536),bytes=Buffer.alloc(n);readSync(fd,bytes,0,n,stat.size-n);return bytes.toString().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});}finally{closeSync(fd);}}
@@ -128,54 +129,144 @@ export async function collectFactoryHealth(dir:string,now:number,previousInactiv
  return {snapshot,inactive};
 }
 
+/** Go on protected_paths when this installs, with the value read back before and after. */
+export const HEALTH_PROTECTED_PATHS=['launcher/factory-health.ts','launcher/factory-health-runtime.ts'] as const;
+
+// Vincent's row for a hard stop carries the id the loop contract builds, so the
+// mail gate tiers it from its coded table and no other writer can lower it.
+export const HEALTH_HARD_STOPS={
+ disk:{kind:'disk',subject:SHARED_SUBJECTS.dataVolume},
+ aws:{kind:'human-step',subject:SHARED_SUBJECTS.awsSignIn},
+ tick:{kind:'factory-down',subject:SHARED_SUBJECTS.tickDead},
+} as const satisfies Partial<Record<HealthCondition,{kind:HardStopKind;subject:string}>>;
+export type HealthHardStop=keyof typeof HEALTH_HARD_STOPS;
+/** One id per condition and Toronto day, whoever raises it. */
+export function healthHardStopId(condition:HealthHardStop,at:number){
+ return ownerMessageId({tier:'hard-stop',...HEALTH_HARD_STOPS[condition],day:healthReleaseWindows(at)[0]!.day});
+}
+/** The contract id for a message, or null when it is not a hard stop for Vincent. */
+function hardStopId(m:{recipient:HealthRecipient;hardStop:boolean;condition:HealthCondition;createdAt:number}){
+ return m.recipient==='Vincent'&&m.hardStop&&m.condition in HEALTH_HARD_STOPS?healthHardStopId(m.condition as HealthHardStop,m.createdAt):null;
+}
+
+const torontoTime=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',dateStyle:'short',timeStyle:'short',hourCycle:'h23'});
+// What the mail gate may do with a row for Vincent instead of sending it. None
+// is a delivery. They are read from wake_state, where a sender that predates
+// the gate never looks for rows to send.
+const GATE_STATES=['held','folded','cancelled'] as const;
+export type BridgeStatus={state:'delivered';receipt:string}|{state:typeof GATE_STATES[number]|'queued'|'missing'};
 export function healthBridge(path:string){
  if(!existsSync(path))throw Error('existing Alido Mail bridge unavailable');
  const db=new Database(path,{readwrite:true,strict:true});db.exec('PRAGMA busy_timeout=1000');
- return {close:()=>db.close(),send:(id:string,recipient:'Vincent'|'Coordinator',message:string)=>{
+ // Vincent's row is delivered only when Alido Mail holds its Telegram sent time.
+ // The Coordinator's fyi is delivered when Alido Mail has put it in a wake
+ // ("digested") or it has been read. That leg is information only: it is never
+ // proof that anyone saw the alarm, and it never stands in for Vincent's leg.
+ const status=(id:string,recipient:HealthRecipient):BridgeStatus=>{
+  if(recipient==='Vincent'){const sent=db.query('SELECT message_id,sent_at FROM telegram_messages WHERE mail_id=?').get(id) as {message_id:number;sent_at:number}|null;if(sent)return {state:'delivered',receipt:`telegram:${sent.message_id}:${sent.sent_at}`};}
+  const row=db.query('SELECT state,wake_state,wake_id FROM messages WHERE id=?').get(id) as {state:string|null;wake_state:string|null;wake_id:string|null}|null;
+  if(!row)return {state:'missing'};
+  if(row.state==='superseded')return {state:'cancelled'};
+  if(recipient==='Coordinator'){
+   if(row.wake_state==='digested'&&row.wake_id)return {state:'delivered',receipt:`alido-mail:${id}:${row.wake_id}`};
+   return row.state==='read'||row.state==='acked'?{state:'delivered',receipt:`alido-mail:${id}:${row.state}`}:{state:'queued'};
+  }
+  const gate=GATE_STATES.find(g=>g===row.wake_state);
+  return {state:gate??'queued'};
+ };
+ return {close:()=>db.close(),status,
+ // `sameCondition`: a contract-built id is shared by every writer of one
+ // condition on one day, so an existing row may carry another writer's wording.
+ send:(id:string,recipient:HealthRecipient,message:string,sameCondition=false)=>{
   db.query(`INSERT OR IGNORE INTO messages(id,send_id,created_at,sender,sender_app,sender_ref,recipient,recipient_app,kind,reply,summary,body,thread_id,depth,hash,state,wake_state) VALUES(?,?,?,'Factory Desk','codex','factory-health',?,?,'fyi','none',?,'',?,0,?,'unread','pending')`).run(id,id,Date.now(),recipient,recipient==='Vincent'?'telegram':'claude',message,id,createHash('sha256').update(message).digest('hex'));
   const row=db.query('SELECT recipient,recipient_app,summary,hash FROM messages WHERE id=?').get(id) as {recipient:string;recipient_app:string;summary:string;hash:string}|null;
-  if(!row||row.recipient!==recipient||row.recipient_app!==(recipient==='Vincent'?'telegram':'claude')||row.summary!==message||row.hash!==createHash('sha256').update(message).digest('hex'))throw Error('bridge id belongs to different notification; retained for reconciliation');
- },delivered:(id:string,recipient:'Vincent'|'Coordinator')=>{
-  if(recipient==='Vincent'){const row=db.query('SELECT message_id,sent_at FROM telegram_messages WHERE mail_id=?').get(id) as {message_id:number;sent_at:number}|null;return row?`telegram:${row.message_id}:${row.sent_at}`:null;}
-  const row=db.query("SELECT state,wake_state,wake_id FROM messages WHERE id=?").get(id) as {state:string;wake_state:string;wake_id:string|null}|null;
-  return row?.wake_state==='woken'&&row.wake_id?`alido-mail:${id}:${row.wake_id}`:null;
- }};
+  if(!row||row.recipient!==recipient||row.recipient_app!==(recipient==='Vincent'?'telegram':'claude')||(!sameCondition&&(row.summary!==message||row.hash!==createHash('sha256').update(message).digest('hex'))))throw Error('bridge id belongs to different notification; retained for reconciliation');
+ },delivered:(id:string,recipient:HealthRecipient)=>{const s=status(id,recipient);return s.state==='delivered'?s.receipt:null;}};
 }
 export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports:{execute?:typeof command;identity?:typeof processIdentity}={}){
  const clock=at===undefined?Date.now:()=>at;let now=clock();
  mkdirSync(join(dir,'health'),{recursive:true,mode:0o700});const db=new Database(join(dir,'health','state.sqlite'),{create:true,strict:true});
- db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER); CREATE TABLE IF NOT EXISTS delivery_links(notification TEXT NOT NULL,recipient TEXT NOT NULL,bridge_id TEXT NOT NULL,PRIMARY KEY(notification,recipient)); CREATE TABLE IF NOT EXISTS delivery_failures(notification TEXT NOT NULL,recipient TEXT NOT NULL,at INTEGER NOT NULL,error TEXT NOT NULL);');
+ db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),json TEXT NOT NULL,inactive INTEGER); CREATE TABLE IF NOT EXISTS delivery_links(notification TEXT NOT NULL,recipient TEXT NOT NULL,bridge_id TEXT NOT NULL,PRIMARY KEY(notification,recipient)); CREATE TABLE IF NOT EXISTS delivery_failures(notification TEXT NOT NULL,recipient TEXT NOT NULL,at INTEGER NOT NULL,error TEXT NOT NULL); CREATE TABLE IF NOT EXISTS state_archive(id INTEGER PRIMARY KEY CHECK(id=1),at INTEGER NOT NULL,reason TEXT NOT NULL,json TEXT NOT NULL);');
  try{db.exec('BEGIN IMMEDIATE');const row=db.query('SELECT json,inactive FROM state WHERE id=1').get() as {json:string;inactive:number|null}|null;
-  const old=row?FactoryHealthStateSchema.parse(JSON.parse(row.json)):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null,ports.identity??processIdentity,ports.execute??command);
+  const stored=row?JSON.parse(row.json):null;
+  // The backlog is archived, never deleted: keep the last state written under
+  // the old ordering rules, once, before the first pass under the new ones.
+  if(row&&stored&&typeof stored==='object'&&!('recurrences' in stored))db.query('INSERT OR IGNORE INTO state_archive VALUES(1,?,?,?)').run(now,'state before the first current-state-wins pass',row.json);
+  const old=row?FactoryHealthStateSchema.parse(stored):initialFactoryHealthState(),collected=await collectFactoryHealth(dir,now,row?.inactive??null,ports.identity??processIdentity,ports.execute??command);
   const evaluated=clock();if(evaluated<now)throw Error("health collection clock regressed");now=evaluated;collected.snapshot.capturedAt=now;
-  let {state,evaluation}=transitionFactoryHealth(old,collected.snapshot,()=>now);
+  let {state,evaluation,archived}=transitionFactoryHealth(old,collected.snapshot,()=>now);
   const save=()=>db.query('INSERT INTO state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json,inactive=excluded.inactive').run(JSON.stringify(state),collected.inactive);
+  const reload=()=>{const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));};
   save();db.exec('COMMIT');
-  const bridge=healthBridge(mail);
-  try{for(const pending of pendingHealthDeliveries(state,()=>now)){
+  const bridge=healthBridge(mail);let unconfirmed:{notification:string;recipient:HealthRecipient;hardStop:boolean;reason:string;createdAt:number}[]=[];
+  // Two passes, so a recovery whose opening is confirmed in this run goes out in this run.
+  try{for(let pass=0;pass<2;pass++)for(const pending of pendingHealthDeliveries(state,()=>now)){
    try{
 
-   db.exec('BEGIN IMMEDIATE');const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));
+   db.exec('BEGIN IMMEDIATE');reload();
    const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;
-   const command=begun.command,id=command.idempotencyKey,condition=state.outbox.find(n=>n.id===command.notificationId)!.condition;
+   const command=begun.command,id=command.idempotencyKey;
    let link=db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(command.notificationId,command.recipient) as {bridge_id:string}|null;
-   if(!link){const related=command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(condition)?relatedFactoryAlarm(mail,condition as 'qualification'|'disk'|'release'|'work',now,id):null;link={bridge_id:related?.id??id};db.query('INSERT INTO delivery_links VALUES(?,?,?)').run(command.notificationId,command.recipient,link.bridge_id);}
+   if(!link){
+    // A hard stop takes the contract's id and never borrows another alarm's row,
+    // which could be held. The contract allows one such id per condition and day,
+    // so a later opening the same day keeps its own id rather than pass unsaid.
+    const stop=hardStopId(command),first=stop!==null&&!db.query('SELECT 1 FROM delivery_links WHERE bridge_id=?').get(stop);
+    // Another writer's alarm for the same condition still stands in for this one.
+    // An earlier health message does not (a reopened condition is said again),
+    // nor does a row Alido Mail folded or cancelled, which will never be sent.
+    const related=!first&&command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(command.condition)?relatedFactoryAlarm(mail,command.condition as 'qualification'|'disk'|'release'|'work',now,id):null;
+    const borrowed=related&&!related.id.startsWith('factory-health:')&&!['folded','cancelled'].includes(bridge.status(related.id,'Vincent').state)?related.id:null;
+    link={bridge_id:first?stop:borrowed??id};db.query('INSERT INTO delivery_links VALUES(?,?,?)').run(command.notificationId,command.recipient,link.bridge_id);
+   }
    save();db.exec('COMMIT');
-   if(link.bridge_id===id)bridge.send(id,command.recipient,command.message);
-   const receipt=bridge.delivered(link.bridge_id,command.recipient);
-   if(receipt){db.exec('BEGIN IMMEDIATE');const latest=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=acknowledgeHealthDelivery(FactoryHealthStateSchema.parse(JSON.parse(latest.json)),command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
+   const strict=link.bridge_id===hardStopId(command),cleared=state.episodes[command.condition].some(e=>e.openingId===command.notificationId&&e.clearedAt!==null);
+   // Current state wins here too: an opening that never reached Alido Mail is not written once its condition has cleared.
+   const stale=cleared&&bridge.status(link.bridge_id,command.recipient).state==='missing';
+   if(!stale&&(link.bridge_id===id||strict))bridge.send(link.bridge_id,command.recipient,command.message,strict);
+   const status=bridge.status(link.bridge_id,command.recipient);
+   // Alido Mail will never send a row it folded or cancelled, so that is archived
+   // too. A hard stop is the exception: the gate must not fold or cancel one, so
+   // it stays visible as unconfirmed for as long as its condition is open.
+   const reason=stale?'cleared before it was sent':(status.state==='folded'||status.state==='cancelled')&&(!strict||cleared)?`${status.state} by Alido Mail`:null;
+   if(status.state==='delivered'){db.exec('BEGIN IMMEDIATE');reload();state=acknowledgeHealthDelivery(state,command,{state:'delivered',receipt:status.receipt},()=>now);save();db.exec('COMMIT');}
+   else if(reason){db.exec('BEGIN IMMEDIATE');reload();state=supersedeHealthDelivery(state,command.notificationId,command.recipient,reason,()=>now);archived++;save();db.exec('COMMIT');}
    }catch(error){if(db.inTransaction)db.exec('ROLLBACK');db.query('INSERT INTO delivery_failures VALUES(?,?,?,?)').run(pending.notificationId,pending.recipient,now,String(error));}
-  }}finally{bridge.close();}
-  const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
-  return {at:now,findings:evaluation.findings,outbox:state.outbox.length};
+  }
+  // A message nobody confirmed after ten minutes is a fault of its own. A row
+  // the mail gate holds, folds or cancels is the gate doing its job, not a
+  // fault, except for a hard stop, which has no such exception.
+  reload();
+  for(const late of unconfirmedHealthDeliveries(state,()=>now)){
+   const link=db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(late.notificationId,late.recipient) as {bridge_id:string}|null,strict=link?.bridge_id===hardStopId(late);
+   let reason='not yet written to Alido Mail';
+   if(link){try{const s=bridge.status(link.bridge_id,late.recipient).state;
+    if(s==='delivered'||(!strict&&s!=='queued'&&s!=='missing'))continue;
+    reason=s==='queued'?'written to Alido Mail but not sent':s==='missing'?'its Alido Mail row is missing':`${s} by the mail gate`;
+   }catch(error){reason=`readback failed: ${String(error)}`;}}
+   unconfirmed.push({notification:late.notificationId,recipient:late.recipient,hardStop:strict,reason,createdAt:late.createdAt});
+  }
+  }finally{bridge.close();}
+  unconfirmed=[...unconfirmed.filter(u=>u.hardStop),...unconfirmed.filter(u=>!u.hardStop)];
+  const stops=unconfirmed.filter(u=>u.hardStop).length,worst=unconfirmed[0];
+  const deliveryAlarm=worst?`${unconfirmed.length} health message${unconfirmed.length>1?'s':''} unconfirmed after 10 minutes${stops?`, ${stops} of them a hard stop`:''}. First: ${worst.notification} for ${worst.recipient}, created ${torontoTime.format(worst.createdAt)} Toronto time, ${worst.reason}.`.slice(0,500):null;
+  // The shared heartbeat shape: a time, and a plain reason when someone must look.
+  const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now,...(deliveryAlarm&&{alarm:deliveryAlarm})}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
+  // This result is the job's log line, so the alarm and the archive count are kept there too.
+  return {at:now,findings:evaluation.findings,outbox:state.outbox.length,archived,deliveryAlarm,unconfirmed};
  }finally{if(db.inTransaction)db.exec('ROLLBACK');db.close();}
 }
 export function rehearseFactoryAlarm(mail:string,day:string,now=Date.now()){
  if(!/^\d{4}-\d{2}-\d{2}$/.test(day))throw Error('rehearsal date required');
  const result=transitionFactoryHealth(initialFactoryHealthState(),{version:1,capturedAt:now,disk:ok(now,'explicit synthetic alarm rehearsal',{usedFraction:0.9})},()=>now);
  if(!result.state.outbox.some(n=>n.condition==='disk'&&n.kind==='opening'))throw Error('alarm evaluator rehearsal failed');
- const bridge=healthBridge(mail),id=`factory-alarm-test:${day}`;
- try{bridge.send(id,'Vincent','This is a test of the new factory alarm. This message is a rehearsal, so no real factory fault is being reported.');return {id,queued:true,delivered:bridge.delivered(id,'Vincent')};}finally{bridge.close();}
+ // Both legs are rehearsed. The Coordinator leg once delivered nothing for a day and no rehearsal could have shown it.
+ const bridge=healthBridge(mail),id=`factory-alarm-test:${day}`,coordinator=`${id}:Coordinator`;
+ try{
+  bridge.send(id,'Vincent','This is a test of the new factory alarm. This message is a rehearsal, so no real factory fault is being reported.');
+  bridge.send(coordinator,'Coordinator','This is a test of the factory alarm for the Coordinator. This message is a rehearsal, so no real factory fault is being reported.');
+  return {id,queued:true,delivered:bridge.delivered(id,'Vincent'),coordinator:{id:coordinator,queued:true,delivered:bridge.delivered(coordinator,'Coordinator')}};
+ }finally{bridge.close();}
 }
 
 export {healthOwnsAlerts} from './alerts';

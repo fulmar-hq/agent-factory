@@ -10,8 +10,14 @@ export const HEALTH_TIMING = Object.freeze({
   preflightBefore: 60 * MINUTE,
   qualificationBefore: 3 * 60 * MINUTE,
   tickMaxAge: 10 * MINUTE,
-  notificationCooldown: 2 * 60 * MINUTE,
   deliveryLease: MINUTE,
+  // A message nobody confirmed after this long is a fault of its own.
+  unconfirmedAfter: 10 * MINUTE,
+  // This many openings inside the window become one "keeps recurring" message,
+  // which stays open until the condition has been quiet this long.
+  recurringOpenings: 3,
+  recurringWindow: 60 * MINUTE,
+  recurringQuiet: 30 * MINUTE,
 });
 const timestamp = z.number().int().min(0).max(8_640_000_000_000_000);
 const text = z.string().trim().min(1);
@@ -137,7 +143,8 @@ export type HealthClock = () => number;
 export const HEALTH_CONDITIONS = ["controller", "tick", "pause", "work", "release", "disk", "qualification", "aws"] as const;
 export type HealthCondition = typeof HEALTH_CONDITIONS[number];
 export type HealthStatus = "healthy" | "pending" | "incident" | "unknown";
-export type HealthFinding = { condition: HealthCondition; status: HealthStatus; message: string; reasons: string[]; evidenceAt: number | null };
+/** `hardStop` marks an incident Vincent must hear at once: disk over its limit, AWS access lost, tick not completing. */
+export type HealthFinding = { condition: HealthCondition; status: HealthStatus; message: string; reasons: string[]; evidenceAt: number | null; hardStop?: true };
 const windowSchema = z.object({
   id: text, day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   stage: z.enum(["qa", "production"]), startAt: timestamp, endAt: timestamp,
@@ -215,11 +222,14 @@ function live(p: z.infer<typeof HealthProcessSchema>, at: number, observedAt: nu
   return p.state === "running" && p.recordedIdentity === p.observedIdentity &&
     p.startedAt <= p.observedAt && p.observedAt <= observedAt && at - p.observedAt <= HEALTH_TIMING.evidenceMaxAge;
 }
-type Issue = { status: "incident" | "unknown"; reason: string };
+type Issue = { status: "incident" | "unknown"; reason: string; hardStop?: true };
 const issue = (reason: string, status: Issue["status"] = "incident"): Issue => ({ status, reason });
+const hardStop = (reason: string): Issue => ({ status: "incident", reason, hardStop: true });
 function finding(condition: HealthCondition, issues: Issue[], healthy: string, pending = false): HealthFinding {
   const status = issues.some(i => i.status === "unknown") ? "unknown" : issues.length ? "incident" : pending ? "pending" : "healthy";
-  return { condition, status, message: issues.length ? `${issues[0].reason}.` : healthy, reasons: issues.map(i => i.reason), evidenceAt: null };
+  const found: HealthFinding = { condition, status, message: issues.length ? `${issues[0].reason}.` : healthy, reasons: issues.map(i => i.reason), evidenceAt: null };
+  if (status === "incident" && issues.some(i => i.hardStop)) found.hardStop = true;
+  return found;
 }
 const unavailable = (source: string) => issue(`Factory ${source} evidence is unavailable or unreliable`, "unknown");
 
@@ -254,8 +264,8 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   const tickIssues: Issue[] = [];
   if (!tick.ok || tick.value.lastSuccessAt > tick.value.lastAttemptAt || tick.value.lastAttemptAt > tick.observedAt ||
     (tick.value.result === "success" && tick.value.lastSuccessAt !== tick.value.lastAttemptAt)) tickIssues.push(unavailable("tick"));
-  else if (tick.value.result === "failure") tickIssues.push(issue("Factory tick failed; the controller needs attention"));
-  else if (now - tick.value.lastSuccessAt > HEALTH_TIMING.tickMaxAge) tickIssues.push(issue("Factory has not completed a tick for over ten minutes"));
+  else if (tick.value.result === "failure") tickIssues.push(hardStop("Factory tick failed; the controller needs attention"));
+  else if (now - tick.value.lastSuccessAt > HEALTH_TIMING.tickMaxAge) tickIssues.push(hardStop("Factory has not completed a tick for over ten minutes"));
   findings.push(finding("tick", tickIssues, "Factory ticks are working again."));
 
   const renewalProcesses = qualifications.ok ? qualifications.value.records.flatMap(r => r.renewal ? [r.renewal.process] : []) : [];
@@ -283,7 +293,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
     } else workPending = true;
   }
   findings.push(finding("work", workIssues, workPending ? "Factory work is waiting." : "Factory work is moving again or the queue is empty.", workPending));
-  findings.push(finding("disk", !disk.ok ? [unavailable("disk")] : disk.value.usedFraction > 0.85 ? [issue("Factory disk use is above 85%; free space safely")] : [], "Factory disk use is back within its limit."));
+  findings.push(finding("disk", !disk.ok ? [unavailable("disk")] : disk.value.usedFraction > 0.85 ? [hardStop("Factory disk use is above 85%; free space safely")] : [], "Factory disk use is back within its limit."));
 
   function qualificationIssues(through?: number): Issue[] {
     if (!qualifications.ok || custodyConflict) return [unavailable("qualification")];
@@ -318,7 +328,7 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
   const tonight = healthReleaseWindows(now);
   const finalEnd = tonight[1].endAt;
   const awsIssues = !aws.ok || !aws.value.verified ? [unavailable("AWS access")] :
-    aws.value.expiresAt <= now ? [issue("Factory AWS access has expired; renew access")] :
+    aws.value.expiresAt <= now ? [hardStop("Factory AWS access has expired; renew access")] :
     aws.value.expiresAt < finalEnd ? [issue("Factory AWS access expires before tonight's final release window ends")] : [];
   findings.push(finding("aws", awsIssues, "Factory AWS access covers tonight's final release window."));
 
@@ -389,23 +399,34 @@ export function evaluateFactoryHealth(snapshot: FactoryHealthSnapshot, clock: He
 
 const recipientSchema = z.enum(["Vincent", "Coordinator"]);
 export type HealthRecipient = z.infer<typeof recipientSchema>;
+const RECIPIENTS = recipientSchema.options;
 const attemptSchema = z.object({
   id: text, at: timestamp, result: z.enum(["in-flight", "failed", "delivered"]),
   finishedAt: timestamp.nullable(), receipt: text.nullable(),
+  // The last retry of an attempt still in flight. `at` stays the first time it was handed over.
+  renewedAt: timestamp.optional(),
 });
-const deliverySchema = z.object({ attempts: z.array(attemptSchema) });
+const deliverySchema = z.object({
+  attempts: z.array(attemptSchema),
+  // Archived, never sent. The reason says what replaced it.
+  superseded: z.object({ at: timestamp, reason: text }).optional(),
+});
+// "recurring" is the one message for a condition that keeps opening; "settled" closes it.
 const notificationSchema = z.object({
-  id: text, incidentId: text, condition: z.enum(HEALTH_CONDITIONS), kind: z.enum(["opening", "recovery"]),
-  createdAt: timestamp, message: text,
+  id: text, incidentId: text, condition: z.enum(HEALTH_CONDITIONS), kind: z.enum(["opening", "recovery", "recurring", "settled"]),
+  createdAt: timestamp, message: text, hardStop: z.literal(true).optional(),
   deliveries: z.object({ Vincent: deliverySchema, Coordinator: deliverySchema }),
 });
 export type HealthNotification = z.infer<typeof notificationSchema>;
 const episodeSchema = z.object({
   id: text, openingId: text, recoveryId: text, openedAt: timestamp, lastActionableAt: timestamp, clearedAt: timestamp.nullable(),
 });
+const recurrenceSchema = z.object({ id: text, startedAt: timestamp, endedAt: timestamp.nullable() });
 const stateSchema = z.object({
   version: z.literal(1), lastAt: timestamp.nullable(), memory: HealthMemorySchema,
   episodes: z.record(z.enum(HEALTH_CONDITIONS), z.array(episodeSchema)),
+  // Absent in state stored before the flap rule existed.
+  recurrences: z.partialRecord(z.enum(HEALTH_CONDITIONS), z.array(recurrenceSchema)).default({}),
   outbox: z.array(notificationSchema),
 });
 function checkState(state: z.infer<typeof stateSchema>) {
@@ -413,9 +434,32 @@ function checkState(state: z.infer<typeof stateSchema>) {
   const within = (at: number) => state.lastAt !== null && at <= state.lastAt;
   if (Object.values(state.memory.observations).some(o => !within(o.observedAt))) fail();
   if (new Set(state.outbox.map(n => n.id)).size !== state.outbox.length) fail();
+  type Expected = { id: string; incidentId: string; kind: HealthNotification["kind"]; at: number };
+  // The stored messages of these kinds must be exactly the expected ones, in order.
+  const matches = (condition: HealthCondition, kinds: HealthNotification["kind"][], expected: Expected[]) => {
+    const actual = state.outbox.filter(n => n.condition === condition && kinds.includes(n.kind));
+    if (actual.length !== expected.length) fail();
+    actual.forEach((n, i) => {
+      const e = expected[i];
+      if (!e || n.id !== e.id || n.incidentId !== e.incidentId || n.kind !== e.kind || n.createdAt !== e.at ||
+        /[\r\n]/.test(n.message) || n.message.length > 180 || (n.hardStop && n.kind !== "opening")) fail();
+      for (const recipient of RECIPIENTS) {
+        const { attempts, superseded } = n.deliveries[recipient];
+        if (superseded && (superseded.at < n.createdAt || !within(superseded.at) || attempts.some(a => a.result !== "failed"))) fail();
+        attempts.forEach((a, j) => {
+          if (a.id !== `${n.id}:${recipient}:attempt:${j + 1}` || a.at < n.createdAt || !within(a.at) || (j > 0 && a.at < attempts[j - 1].at)) fail();
+          if (a.renewedAt !== undefined && (a.renewedAt < a.at || !within(a.renewedAt))) fail();
+          if (a.result === "in-flight") {
+            if (a.finishedAt !== null || a.receipt !== null) fail();
+          } else if (a.finishedAt === null || a.receipt === null || a.finishedAt < a.at || !within(a.finishedAt)) fail();
+        });
+      }
+    });
+    return expected.length;
+  };
   let expectedCount = 0;
   for (const condition of HEALTH_CONDITIONS) {
-    const expected: { id: string; incidentId: string; kind: "opening" | "recovery"; at: number }[] = [];
+    const expected: Expected[] = [];
     const episodes = state.episodes[condition];
     for (let i = 0; i < episodes.length; i++) {
       const e = episodes[i], previous = episodes[i - 1];
@@ -429,23 +473,19 @@ function checkState(state: z.infer<typeof stateSchema>) {
         expected.push({ id: e.recoveryId, incidentId: id, kind: "recovery", at: e.clearedAt });
       }
     }
-    const actual = state.outbox.filter(n => n.condition === condition);
-    if (actual.length !== expected.length) fail();
-    expectedCount += expected.length;
-    actual.forEach((n, i) => {
-      const e = expected[i];
-      if (!e || n.id !== e.id || n.incidentId !== e.incidentId || n.kind !== e.kind || n.createdAt !== e.at ||
-        /[\r\n]/.test(n.message) || n.message.length > 180) fail();
-      for (const recipient of ["Vincent", "Coordinator"] as const) {
-        const attempts = n.deliveries[recipient].attempts;
-        attempts.forEach((a, j) => {
-          if (a.id !== `${n.id}:${recipient}:attempt:${j + 1}` || a.at < n.createdAt || !within(a.at) || (j > 0 && a.at < attempts[j - 1].at)) fail();
-          if (a.result === "in-flight") {
-            if (a.finishedAt !== null || a.receipt !== null) fail();
-          } else if (a.finishedAt === null || a.receipt === null || a.finishedAt < a.at || !within(a.finishedAt)) fail();
-        });
+    expectedCount += matches(condition, ["opening", "recovery"], expected);
+    const recurring: Expected[] = [], spans = state.recurrences[condition] ?? [];
+    spans.forEach((r, i) => {
+      const previous = spans[i - 1];
+      if (r.id !== `factory-health:${condition}:recurring:${r.startedAt}` || !within(r.startedAt) ||
+        (previous && (previous.endedAt === null || r.startedAt < previous.endedAt))) fail();
+      recurring.push({ id: `${r.id}:opening`, incidentId: r.id, kind: "recurring", at: r.startedAt });
+      if (r.endedAt !== null) {
+        if (!within(r.endedAt) || r.endedAt < r.startedAt) fail();
+        recurring.push({ id: `${r.id}:recovery`, incidentId: r.id, kind: "settled", at: r.endedAt });
       }
     });
+    expectedCount += matches(condition, ["recurring", "settled"], recurring);
   }
   if (state.outbox.length !== expectedCount) fail();
 }
@@ -457,7 +497,7 @@ export type FactoryHealthState = z.infer<typeof FactoryHealthStateSchema>;
 
 export function initialFactoryHealthState(): FactoryHealthState {
   return {
-    version: 1, lastAt: null, memory: { releaseObligations: [], observations: {} }, outbox: [],
+    version: 1, lastAt: null, memory: { releaseObligations: [], observations: {} }, outbox: [], recurrences: {},
     episodes: { controller: [], tick: [], pause: [], work: [], release: [], disk: [], qualification: [], aws: [] },
   };
 }
@@ -469,36 +509,98 @@ function copyState(raw: FactoryHealthState, at: number): FactoryHealthState {
   return state;
 }
 
+function delivered(n: HealthNotification, recipient: HealthRecipient) {
+  return n.deliveries[recipient].attempts.find(a => a.result === "delivered");
+}
+/** The bad news a recovery or "settled" message follows. */
+function opener(state: FactoryHealthState, n: HealthNotification) {
+  const kind = n.kind === "recovery" ? "opening" : n.kind === "settled" ? "recurring" : null;
+  return kind && state.outbox.find(o => o.incidentId === n.incidentId && o.kind === kind);
+}
+/**
+ * Current state wins. A message that was never handed to the bridge is
+ * archived, not sent, once it no longer describes the condition: an opening
+ * whose episode has cleared goes with its recovery, a recovery goes when the
+ * condition has reopened, and both go while a "keeps recurring" message covers
+ * the condition. Nothing is deleted, and a "keeps recurring" message is never
+ * archived here. A message already handed over is left to its readback.
+ */
+function settle(state: FactoryHealthState, now: number): number {
+  let archived = 0;
+  const waiting = (n: HealthNotification, r: HealthRecipient) => !n.deliveries[r].superseded && n.deliveries[r].attempts.length === 0;
+  const archive = (n: HealthNotification, r: HealthRecipient, reason: string) => { n.deliveries[r].superseded = { at: now, reason }; archived++; };
+  const byId = new Map(state.outbox.map(n => [n.id, n]));
+  for (const condition of HEALTH_CONDITIONS) {
+    const episodes = state.episodes[condition], spans = state.recurrences[condition] ?? [];
+    const covered = (at: number) => spans.some(r => at >= r.startedAt && (r.endedAt === null || at <= r.endedAt));
+    episodes.forEach((e, i) => {
+      const opening = byId.get(e.openingId)!, recovery = e.clearedAt === null ? null : byId.get(e.recoveryId)!;
+      for (const r of RECIPIENTS) {
+        if (waiting(opening, r)) {
+          if (covered(e.openedAt)) archive(opening, r, "covered by the keeps-recurring message");
+          else if (e.clearedAt !== null) archive(opening, r, "cleared before it was sent");
+        }
+        if (!recovery || !waiting(recovery, r)) continue;
+        if (opening.deliveries[r].superseded) archive(recovery, r, "its opening was never sent");
+        else if (covered(e.clearedAt!)) archive(recovery, r, "covered by the keeps-recurring message");
+        else if (i < episodes.length - 1) archive(recovery, r, "the condition reopened before this was sent");
+      }
+    });
+    for (const span of spans) {
+      const notice = byId.get(`${span.id}:opening`)!, closing = span.endedAt === null ? null : byId.get(`${span.id}:recovery`)!;
+      for (const r of RECIPIENTS) if (closing && waiting(closing, r) && notice.deliveries[r].superseded) archive(closing, r, "its opening was never sent");
+    }
+  }
+  return archived;
+}
+/** The archive pass alone, for replaying a stored outbox without evaluating anything. */
+export function settleHealthOutbox(raw: FactoryHealthState, clock: HealthClock): { state: FactoryHealthState; archived: number } {
+  const now = time(clock), state = copyState(raw, now);
+  return { state, archived: settle(state, now) };
+}
+
+const clip = (message: string) => message.length > 180 ? `${message.slice(0, 179)}…` : message;
 /**
  * Serializable incident/outbox transition; no I/O. Every actionable condition opens
  * one episode; only fresh, positive healthy evidence clears it. Pending/unknown
  * never clears. Clearing evidence must be strictly newer than the last actionable
  * evaluation, including one with wholly missing inputs. Source watermarks and
  * contradiction latches survive restart. IDs are distinct after every reopen.
- * Opening and recovery intents are retained, ordered per condition and recipient.
- * Repeated openings AND repeated recoveries wait two hours after the preceding
- * same-kind delivery, including reopen. A recovery may follow its opening promptly.
- * Rapid flapping retains history; deferred messages are historical transition
- * receipts, not assertions about current state. There are no periodic reminders.
+ * Delivery follows the current state (see `settle`): there is no ordering queue
+ * and no waiting period, so one stuck message can never hold back a newer one.
+ * So that this cannot hide a fault that comes and goes, the third opening of a
+ * condition inside an hour also raises one "keeps recurring" message, which
+ * that rule never archives and which closes with one "stopped recurring" message
+ * after the condition has been quiet for thirty minutes. No periodic reminders.
  */
-export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: FactoryHealthSnapshot, clock: HealthClock): { state: FactoryHealthState; evaluation: HealthEvaluation } {
+export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: FactoryHealthSnapshot, clock: HealthClock): { state: FactoryHealthState; evaluation: HealthEvaluation; archived: number } {
   const now = time(clock), state = copyState(raw, now);
   const priorObligations = state.memory.releaseObligations;
   const evaluation = evaluateFactoryHealth(snapshot, () => now, state.memory);
   state.memory = evaluation.memory;
-  const enqueue = (condition: HealthCondition, episode: z.infer<typeof episodeSchema>, kind: "opening" | "recovery", message: string) => {
-    state.outbox.push({ id: kind === "opening" ? episode.openingId : episode.recoveryId, incidentId: episode.id, condition, kind, createdAt: now, message,
+  const enqueue = (condition: HealthCondition, incidentId: string, id: string, kind: HealthNotification["kind"], message: string, hardStop?: true) => {
+    state.outbox.push({ id, incidentId, condition, kind, createdAt: now, message, ...(hardStop && { hardStop }),
       deliveries: { Vincent: { attempts: [] }, Coordinator: { attempts: [] } } });
   };
   for (const f of evaluation.findings) {
     const episodes = state.episodes[f.condition], current = episodes.at(-1);
+    const spans = state.recurrences[f.condition] ?? [], recurring = spans.at(-1)?.endedAt === null ? spans.at(-1)! : null;
     if (f.status === "incident" || f.status === "unknown") {
       if (current?.clearedAt === null) { current.lastActionableAt = now; continue; }
       const id = `factory-health:${f.condition}:${episodes.length + 1}:${now}`;
       const episode = { id, openingId: `${id}:opening`, recoveryId: `${id}:recovery`, openedAt: now, lastActionableAt: now, clearedAt: null };
       episodes.push(episode);
-      enqueue(f.condition, episode, "opening", f.message);
-    } else if (f.status === "healthy" && current?.clearedAt === null) {
+      enqueue(f.condition, id, episode.openingId, "opening", f.message, f.hardStop);
+      // Count only openings since the last "keeps recurring" message closed.
+      const since = Math.max(now - HEALTH_TIMING.recurringWindow, spans.at(-1)?.endedAt ?? -1);
+      if (!recurring && episodes.filter(e => e.openedAt > since).length >= HEALTH_TIMING.recurringOpenings) {
+        const recurringId = `factory-health:${f.condition}:recurring:${now}`;
+        (state.recurrences[f.condition] ??= []).push({ id: recurringId, startedAt: now, endedAt: null });
+        enqueue(f.condition, recurringId, `${recurringId}:opening`, "recurring", clip(`Keeps recurring: ${f.message}`));
+      }
+      continue;
+    }
+    if (f.status === "healthy" && current?.clearedAt === null) {
       if (f.evidenceAt === null || f.evidenceAt <= current.lastActionableAt) {
         f.status = "unknown";
         f.message = "Factory recovery needs newer verified evidence.";
@@ -506,7 +608,11 @@ export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: Facto
         continue;
       }
       current.clearedAt = now;
-      enqueue(f.condition, current, "recovery", f.message);
+      enqueue(f.condition, current.id, current.recoveryId, "recovery", f.message);
+    }
+    if (recurring && current && current.clearedAt !== null && now - current.clearedAt >= HEALTH_TIMING.recurringQuiet) {
+      recurring.endedAt = now;
+      enqueue(f.condition, recurring.id, `${recurring.id}:recovery`, "settled", clip(`Stopped recurring: ${f.message}`));
     }
   }
   if (state.episodes.release.at(-1)?.clearedAt === null) {
@@ -515,51 +621,61 @@ export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: Facto
     // and let a later day's healthy readback clear a different historical failure.
     state.memory.releaseObligations = [...new Map([...priorObligations, ...state.memory.releaseObligations].map(w => [w.id, w])).values()];
   }
-  return { state, evaluation };
+  return { state, evaluation, archived: settle(state, now) };
 }
 
 export type HealthDeliveryCommand = {
   notificationId: string; recipient: HealthRecipient; idempotencyKey: string;
-  attemptId: string; message: string; kind: "opening" | "recovery"; createdAt: number;
+  attemptId: string; message: string; kind: HealthNotification["kind"]; createdAt: number;
+  condition: HealthCondition; hardStop: boolean;
 };
-function delivered(n: HealthNotification, recipient: HealthRecipient) {
-  return n.deliveries[recipient].attempts.find(a => a.result === "delivered");
-}
 function due(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient, now: number) {
-  const attempts = n.deliveries[recipient].attempts, last = attempts.at(-1);
-  if (delivered(n, recipient) || n.createdAt > now || (last && now - (last.finishedAt ?? last.at) < HEALTH_TIMING.deliveryLease)) return false;
-  // Preserve open/clear/reopen ordering even when one destination is unavailable.
-  for (const previous of state.outbox) {
-    if (previous.id === n.id) break;
-    if (previous.condition !== n.condition) continue;
-    const receipt = delivered(previous, recipient);
-    if (!receipt) return false;
-    if (previous.kind === n.kind && now - receipt.finishedAt! < HEALTH_TIMING.notificationCooldown) return false;
-  }
-  return true;
+  const { attempts, superseded } = n.deliveries[recipient], last = attempts.at(-1);
+  if (superseded || delivered(n, recipient) || n.createdAt > now || (last && now - (last.finishedAt ?? last.renewedAt ?? last.at) < HEALTH_TIMING.deliveryLease)) return false;
+  // Good news follows only bad news this recipient actually received.
+  const first = opener(state, n);
+  return first ? Boolean(delivered(first, recipient)) : true;
 }
 
 /** Eligible intents only. Begin and persist the attempt before handing it to a bridge. */
 export function pendingHealthDeliveries(raw: FactoryHealthState, clock: HealthClock): { notificationId: string; recipient: HealthRecipient }[] {
   const now = time(clock), state = copyState(raw, now);
-  return state.outbox.flatMap(n => (["Vincent", "Coordinator"] as const)
-    .filter(r => due(state, n, r, now)).map(recipient => ({ notificationId: n.id, recipient })));
+  return state.outbox.flatMap(n => RECIPIENTS.filter(r => due(state, n, r, now)).map(recipient => ({ notificationId: n.id, recipient })));
+}
+
+/**
+ * Messages nobody has confirmed more than ten minutes after they were first
+ * handed over (or created, if they never were). A recovery still waiting for
+ * its opening is not listed; its opening is. The caller asks the bridge why
+ * each one is unconfirmed before calling it a fault.
+ */
+export function unconfirmedHealthDeliveries(raw: FactoryHealthState, clock: HealthClock): { notificationId: string; recipient: HealthRecipient; condition: HealthCondition; kind: HealthNotification["kind"]; hardStop: boolean; createdAt: number }[] {
+  const now = time(clock), state = copyState(raw, now);
+  return state.outbox.flatMap(n => RECIPIENTS.filter(r => {
+    const { attempts, superseded } = n.deliveries[r];
+    if (superseded || delivered(n, r) || now - (attempts[0]?.at ?? n.createdAt) <= HEALTH_TIMING.unconfirmedAfter) return false;
+    const first = opener(state, n);
+    return first ? Boolean(delivered(first, r)) : true;
+  }).map(recipient => ({ notificationId: n.id, recipient, condition: n.condition, kind: n.kind, hardStop: n.hardStop === true, createdAt: n.createdAt })));
 }
 
 /**
  * Lease is durable, not proof of delivery. After a crash retry the SAME bridge
  * idempotencyKey. Part 2 must provide idempotent insertion/readback per destination;
  * this helper cannot guarantee exactly-once transport with a non-idempotent sender.
- * A bridge-queued receipt alone must not be acknowledged as delivered.
+ * A bridge-queued receipt alone must not be acknowledged as delivered. A retry
+ * renews the attempt still in flight, so a long wait does not grow the state.
  */
 export function beginHealthDelivery(raw: FactoryHealthState, notificationId: string, recipient: HealthRecipient, clock: HealthClock): { state: FactoryHealthState; command: HealthDeliveryCommand } {
   const now = time(clock), state = copyState(raw, now);
   recipientSchema.parse(recipient);
   const n = state.outbox.find(n => n.id === notificationId);
   if (!n || !due(state, n, recipient, now)) throw Error("Health delivery is not due");
-  const attempts = n.deliveries[recipient].attempts, attemptId = `${n.id}:${recipient}:attempt:${attempts.length + 1}`;
-  attempts.push({ id: attemptId, at: now, result: "in-flight", finishedAt: null, receipt: null });
-  return { state, command: { notificationId, recipient, idempotencyKey: `${n.id}:${recipient}`, attemptId, message: n.message, kind: n.kind, createdAt: n.createdAt } };
+  const attempts = n.deliveries[recipient].attempts;
+  let attempt = attempts.at(-1);
+  if (attempt?.result === "in-flight") attempt.renewedAt = now;
+  else attempts.push(attempt = { id: `${n.id}:${recipient}:attempt:${attempts.length + 1}`, at: now, result: "in-flight", finishedAt: null, receipt: null });
+  return { state, command: { notificationId, recipient, idempotencyKey: `${n.id}:${recipient}`, attemptId: attempt.id, message: n.message, kind: n.kind, createdAt: n.createdAt, condition: n.condition, hardStop: n.hardStop === true } };
 }
 
 /** Exact attempt acknowledgement. Separate receipts; failure is retained and retryable. */
@@ -582,5 +698,23 @@ export function acknowledgeHealthDelivery(raw: FactoryHealthState, command: Heal
   attempt.result = result.state;
   attempt.finishedAt = now;
   attempt.receipt = result.receipt;
+  return state;
+}
+
+/**
+ * Archives one handed-over message that Alido Mail says it will never send on
+ * its own: a row it cancelled, or folded into another message. Its recovery is
+ * archived by the next transition. A delivered message is never archived.
+ */
+export function supersedeHealthDelivery(raw: FactoryHealthState, notificationId: string, recipient: HealthRecipient, reason: string, clock: HealthClock): FactoryHealthState {
+  const now = time(clock), state = copyState(raw, now);
+  recipientSchema.parse(recipient);
+  text.parse(reason);
+  const n = state.outbox.find(n => n.id === notificationId);
+  if (!n || delivered(n, recipient)) throw Error("Health delivery cannot be superseded");
+  const delivery = n.deliveries[recipient];
+  if (delivery.superseded) return state;
+  for (const a of delivery.attempts) if (a.result === "in-flight") Object.assign(a, { result: "failed", finishedAt: now, receipt: reason });
+  delivery.superseded = { at: now, reason };
   return state;
 }

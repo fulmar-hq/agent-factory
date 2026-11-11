@@ -463,7 +463,9 @@ describe("durable incident and notification transitions", () => {
     state = advance(state, fixture(AT + 6 * M + 1));
     expect(state.outbox.filter(n => n.condition === "work").map(n => n.kind)).toEqual(["opening", "recovery"]);
   });
-  test("rapid flapping retains unique incidents but no repeat opening or recovery delivery within two hours", () => {
+  // Replaces "no repeat opening or recovery delivery within two hours": the wait
+  // is gone, because it queued real alarms behind stale ones for up to a day.
+  test("a reopened condition is told at once, and an opening that cleared unsent is archived with its recovery", () => {
     const bad = fixture(); bad.disk.value.usedFraction = 0.9;
     let state = advance(initialFactoryHealthState(), bad);
     const first = state.outbox[0];
@@ -478,16 +480,16 @@ describe("durable incident and notification transitions", () => {
     const second = state.outbox.at(-1)!;
     expect(second.id).not.toBe(first.id);
     expect(second.incidentId).not.toBe(first.incidentId);
+    expect(pendingHealthDeliveries(roundtrip(state), () => AT + 2 * M).map(n => n.notificationId)).toEqual([second.id, second.id]);
+    state = deliver(state, second.id, "Vincent", AT + 2 * M);
     state = advance(state, fixture(AT + 3 * M));
-    expect(pendingHealthDeliveries(roundtrip(state), () => AT + 2 * H - 1).filter(n => n.notificationId === second.id)).toEqual([]);
-    expect(() => beginHealthDelivery(state, second.id, "Vincent", () => AT + 2 * H - 1)).toThrow("not due");
-    expect(pendingHealthDeliveries(state, () => AT + 2 * H).map(n => n.notificationId)).toEqual([second.id, second.id]);
-    state = deliver(state, second.id, "Vincent", AT + 2 * H);
-    state = deliver(state, second.id, "Coordinator", AT + 2 * H);
-    expect(pendingHealthDeliveries(state, () => AT + 2 * H + M - 1)).toEqual([]);
     const secondClear = state.outbox.at(-1)!;
-    state = deliver(state, secondClear.id, "Vincent", AT + 2 * H + M);
-    state = deliver(state, secondClear.id, "Coordinator", AT + 2 * H + M);
+    // Vincent heard the reopening, so he hears its recovery. The Coordinator never did.
+    expect(pendingHealthDeliveries(state, () => AT + 3 * M)).toEqual([{ notificationId: secondClear.id, recipient: "Vincent" }]);
+    expect(() => beginHealthDelivery(state, second.id, "Coordinator", () => AT + 3 * M)).toThrow("not due");
+    expect(state.outbox.at(-2)!.deliveries.Coordinator.superseded).toEqual({ at: AT + 3 * M, reason: "cleared before it was sent" });
+    expect(secondClear.deliveries.Coordinator.superseded).toEqual({ at: AT + 3 * M, reason: "its opening was never sent" });
+    state = deliver(state, secondClear.id, "Vincent", AT + 3 * M);
     expect(pendingHealthDeliveries(state, () => AT + 4 * H)).toEqual([]);
     expect(state.outbox.filter(n => n.condition === "disk").map(n => n.kind)).toEqual(["opening", "recovery", "opening", "recovery"]);
   });
@@ -521,21 +523,25 @@ describe("durable incident and notification transitions", () => {
     expect(bridge.size).toBe(1);
     expect(pendingHealthDeliveries(state, () => AT + 4 * H).some(n => n.recipient === "Vincent")).toBe(false);
   });
-  test("one destination progresses through recovery while the other retains an undelivered opening", () => {
+  // Replaces "the other retains an undelivered opening": strict order let one
+  // destination's unconfirmed opening block everything behind it for good.
+  test("one destination progresses through recovery; the other's handed-over opening keeps its own readback", () => {
     const s = fixture(); s.disk.value.usedFraction = 0.9;
     let state = advance(initialFactoryHealthState(), s);
     const id = state.outbox[0].id;
     state = deliver(state, id, "Vincent", AT);
-    state = advance(state, fixture(AT + 1));
+    const handed = beginHealthDelivery(state, id, "Coordinator", () => AT); state = handed.state;
+    state = advance(state, fixture(AT + M));
     const recovery = state.outbox.at(-1)!;
-    expect(pendingHealthDeliveries(state, () => AT + 1)).toEqual([
+    expect(pendingHealthDeliveries(state, () => AT + M)).toEqual([
       { notificationId: id, recipient: "Coordinator" }, { notificationId: recovery.id, recipient: "Vincent" },
     ]);
-    expect(() => beginHealthDelivery(state, recovery.id, "Coordinator", () => AT + 1)).toThrow();
-    state = deliver(state, recovery.id, "Vincent", AT + 1);
-    state = deliver(state, id, "Coordinator", AT + 2);
-    state = deliver(state, recovery.id, "Coordinator", AT + 2);
-    expect(pendingHealthDeliveries(state, () => AT + 3)).toEqual([]);
+    expect(() => beginHealthDelivery(state, recovery.id, "Coordinator", () => AT + M)).toThrow();
+    state = deliver(state, recovery.id, "Vincent", AT + M);
+    state = acknowledgeHealthDelivery(state, handed.command, { state: "delivered", receipt: "fictional-late-readback" }, () => AT + M + 1);
+    expect(state.outbox[0].deliveries.Coordinator.attempts).toHaveLength(1);
+    state = deliver(state, recovery.id, "Coordinator", AT + M + 2);
+    expect(pendingHealthDeliveries(state, () => AT + 2 * M)).toEqual([]);
   });
   test("bad state, clock rollback, duplicate ack conflict and wrong custody are rejected without mutation", () => {
     const s = fixture(); s.disk.value.usedFraction = 0.9;
