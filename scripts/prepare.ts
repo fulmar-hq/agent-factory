@@ -1,3 +1,4 @@
+import {jobEnvironment} from '../launcher/job-environment';
 import { join, resolve } from "node:path";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { root, configAt } from "../launcher/config";
@@ -25,7 +26,7 @@ const xml = (x: string) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 const repo = resolve(import.meta.dir, "..");
-const env = `<key>EnvironmentVariables</key><dict><key>FACTORY_PRIVATE_DIR</key><string>${xml(root)}</string><key>PATH</key><string>${xml(process.env.PATH ?? "/usr/bin:/bin")}</string></dict>`;
+const env = `<key>EnvironmentVariables</key><dict>${Object.entries(jobEnvironment(process.env.HOME!,process.execPath,root)).map(([k,v])=>`<key>${k}</key><string>${xml(v)}</string>`).join('')}</dict>`;
 for (const [name, args, extra] of [
   [
     "tick",

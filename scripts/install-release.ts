@@ -1,3 +1,4 @@
+import {jobEnvironment,missingExecutables} from '../launcher/job-environment';
 import {mkdirSync,existsSync,copyFileSync,writeFileSync,renameSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {realpathSync} from 'node:fs';
@@ -14,8 +15,8 @@ const install=process.argv.includes('--install');
 const repositories=await Bun.file(join(root,'repositories.json')).json();
 const repo=realpathSync(repositories['fulmar-hq/agent-factory']);
 if((await command(['git','branch','--show-current'],repo)).trim()!=='main'||(await command(['git','status','--porcelain'],repo)).trim()||!(await command(['git','remote','get-url','origin'],repo)).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('clean registered factory main required');
-const pathEnv=releasePath(homedir(),process.execPath);
-const missing=releaseTools.filter(tool=>!Bun.which(tool,{PATH:pathEnv}));if(missing.length)throw Error(`release tools missing from scheduled PATH: ${missing.join(', ')}`);
+const environment=jobEnvironment(homedir(),process.execPath,root),pathEnv=environment.PATH;
+const missing=missingExecutables(pathEnv);if(missing.length)throw Error(`release tools missing from scheduled PATH: ${missing.join(', ')}`);
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null],['rehearsal-early',14,0],['rehearsal-late',17,40]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
