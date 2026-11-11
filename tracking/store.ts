@@ -9,7 +9,7 @@ export class Store {
     this.db = new Database(path, { create: true, strict: true });
     if (path !== ":memory:") chmodSync(path, 0o600);
     this.db
-      .exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON;
+      .exec(`PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       INSERT OR IGNORE INTO kv VALUES('paused','true');
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,kind TEXT NOT NULL,at INTEGER NOT NULL,data TEXT NOT NULL,undo TEXT NOT NULL);
@@ -90,7 +90,17 @@ export class Store {
     );
   }
   atomic<T>(fn: () => T): T {
-    return this.db.transaction(fn).immediate();
+    // Retry only acquisition. Never replay a callback: it may have spawned a
+    // supervisor or made another irreversible effect before throwing.
+    for (let attempt = 0; ; attempt++) {
+      let entered = false;
+      try { return this.db.transaction(() => { entered = true; return fn(); }).immediate(); }
+      catch (error) {
+        const code = (error as {code?: string}).code;
+        if (entered || !["SQLITE_BUSY", "SQLITE_LOCKED"].includes(code ?? "") || attempt >= 2) throw error;
+        Bun.sleepSync(100 * (attempt + 1));
+      }
+    }
   }
   rows(table: string) {
     if (
