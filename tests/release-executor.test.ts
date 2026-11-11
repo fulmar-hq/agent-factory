@@ -19,6 +19,21 @@ test('calendar night runs without chat, promotes same accepted tree with differe
 test('duplicate launch and restart do not replay effects',async()=>{
  const r=rig();await qa(r);await r.executor.run('qa');const restarted=new ReleaseExecutor(r.s,r.executor.port,async()=>null,r.now);await restarted.run('qa');expect(r.calls).toEqual(['preflight','qa']);r.s.close();
 });
+test('squashed carrier binds Quality and Production to the actual merged QA revision',async()=>{
+ const r=rig(),merged='f'.repeat(40),batch={version:1 as const,day:'2026-11-09',base:'c'.repeat(40),revision,tree,pr:7,ref:'feat/fixture-batch',holdId:'fixture-hold',sources:[{number:8,head:revision,ref:'feat/source',title:'Fictional change'}],overlaps:[],review:'fictional independent review'};
+ let current=revision;
+ const snapshot=r.executor.port.snapshot;
+ r.executor.port.snapshot=async()=>({...await snapshot(),revision:current});
+ r.executor.port.observe=async(step)=>({state:'success',evidence:{artifact,completedAt:r.now(),holdId:'fixture-hold',revision,tree,...(step==='qa'?{qaRevision:merged}:{})}});
+ const executor=new ReleaseExecutor(r.s,r.executor.port,async()=>null,r.now,()=>{},batch);
+ await executor.run('preflight');r.set('20:00');await executor.run('qa');
+ expect(executor.effect(batch.day,'qa')?.context.revision).toBe(merged);
+ expect(()=>recordAcceptance(r.s,`qa-deployed:${batch.day}:${tree}`,'native',{day:batch.day,revision,tree,artifact,verdict:'ACCEPT',evidence:'fictional'})).toThrow();
+ recordAcceptance(r.s,`qa-deployed:${batch.day}:${tree}`,'native',{day:batch.day,revision:merged,tree,artifact,verdict:'ACCEPT',evidence:'fictional'},r.now());
+ current=merged;r.set('21:30');await executor.run('production');
+ expect(executor.effect(batch.day,'promote')?.context.revision).toBe(merged);
+ expect(r.calls).toEqual(['preflight','qa','promote','readback']);r.s.close();
+});
 test('deliberate check failure refuses and wakes diagnosis without a hang',async()=>{
  const r=rig();r.failed.add('preflight');await r.executor.run('preflight');r.set('20:00');expect((await r.executor.run('qa')).state).toBe('refused');expect(r.calls).toEqual(['preflight']);expect(r.s.get('owner-wake:release-failed:2026-11-09:preflight')).toBeTruthy();r.s.close();
 });
@@ -36,7 +51,8 @@ test('hold epoch change refuses QA and Quality artifact mismatch refuses accepta
  const a=rig();await qa(a);expect(()=>accept(a,{artifact:'other-artifact'})).toThrow();a.s.close();
 });
 test('deadline release events run before old CI wakes and expired acceptance never starts',async()=>{
- const {queueWake,pendingWakes,dispatchWake}=await import('../launcher/wake');
+ const {queueWake,pendingWakes}=await import('../launcher/wake');
+ const {testDispatchWake:dispatchWake}=await import('./fixtures');
  const {mkdtempSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
  const s=new Store(':memory:');s.set('owner-runtime:quality',{workspace:mkdtempSync(join(tmpdir(),'quality-deadline-'))});
  queueWake(s,{id:'old-ci',owner:'quality',kind:'ci-finished',payload:{}});
@@ -45,4 +61,16 @@ test('deadline release events run before old CI wakes and expired acceptance nev
  expect(pendingWakes(s)[0].id).toBe('accept-now');let starts=0;
  expect(dispatchWake(s,pendingWakes(s).find(w=>w.id==='accept-expired')!,()=>{starts++;})).toBe(false);
  expect(starts).toBe(0);expect(s.get<{state:string}>('owner-wake:accept-expired')?.state).toBe('expired');s.close();
+});
+
+test('latched scheduled windows record skip without snapshots, debits or deploys',async()=>{
+ const r=rig();r.brake('AWS stop latched');
+ r.executor.port.snapshot=async()=>{throw Error('remote snapshot must not run');};
+ for(const [clock,stage] of [['19:00','preflight'],['20:00','qa'],['21:30','production']] as const){
+  r.set(clock);expect(await r.executor.run(stage)).toEqual({state:'skipped',reason:'QA deploy skipped: AWS stop latched'});
+  expect(r.s.get(`executor:2026-11-09:${stage}`)).toBeNull();
+ }
+ expect(r.calls).toEqual([]);
+ expect((r.s.db.query('SELECT COUNT(*) AS n FROM debits').get() as {n:number}).n).toBe(0);
+ r.s.close();
 });

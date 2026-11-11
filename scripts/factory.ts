@@ -38,7 +38,7 @@ export async function addProject(repo: string, options: {
     await reconcile(preview, { ...config, projects: { [key]: entry } }, Date.now(), options.execute ?? command);
     const source = preview.get<{ error: string | null; count: number; truncated: boolean }>(`github:${entry.repo}`);
     if (!source || source.error) throw Error(source?.error ?? "Backfill failed");
-    if (source.truncated) throw Error("Backfill reached 1000 issues; enrollment refused");
+    if (source.truncated) throw Error("Backfill incomplete; enrollment refused");
     if (!options.dryRun) {
       // Cooperating enrollments only: unrelated policy editors must still be excluded.
       // Never reclaim interrupted custody, even if its recorded PID is no longer live.
