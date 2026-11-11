@@ -272,3 +272,89 @@ Inspect the heartbeat, source error, backoff and counters before resuming. Allow
 Owner inspections use read-only SQLite with a one-second timeout, bounded reads and prompt close (see AGENTS.md); mutations use authenticated controls. The writer's ten-second busy timeout is installed before WAL setup. Immediate transactions retry lock acquisition twice with bounded backoff; callbacks and complete ticks are never replayed, preserving exactly-once reservation/spawn and external effects. Persistent contention still fails visibly rather than bypassing custody.
 
 The CLI tick queues a Coordinator **action** on the first error of an episode, without opening the controller database. A successful tick rearms the next error episode. The independent health job retries retained messages before reading the controller and also alerts for a pause lasting five minutes with recently observed ready tasks and no starting/running builders. This closes #188's intentional empty-queue/unpaused-only coverage gap; neither usage availability nor an empty-queue observation is needed for the pause alarm. The read-only controller snapshot closes before mail work. Private `health/controller-alerts.sqlite` retains incidents, stable mail IDs and actual wake receipts; queued is not woken. Bridge outages retain incidents for retry. No alarm clears a pause, starts work or alters admission/release policy. Undo through a reviewed signed revert; archive and retain all state and receipts.
+
+## Daily release rehearsal
+
+Release readiness is collected at **14:00** and **17:40 America/Toronto**, using
+`scripts/release.ts rehearsal 14:00|17:40` from the registered installed checkout.
+The rehearsal plists use the release preflight's executable, WorkingDirectory,
+PATH, private directory and timezone. Rehearsals cannot run the release executor,
+reserve release funds, dispatch acceptance, merge, deploy or observe servers.
+They use the same independent readiness collector and the existing read-only
+AWS Budgets DescribeBudget path. The 14:00 collection imports a fresh billing
+receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
+never manufactures freshness. No Cost Explorer, model or resource calls occur.
+
+Every missing input queues one Alido Mail action per day/input to Release,
+Quality or Platform. Owner-only decisions, including AWS sign-in and latched
+spending stops, plus usage decisions and pauses go to Coordinator.
+Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
+preflight. Repeated observations reuse the immutable action payload and mail ID;
+clean collections are retained as `release-rehearsal` events and are not mailed.
+Factory-native owners also receive the same action through their normal guarded
+owner wake, because an owner need not have an open app chat. Queued mail/wakes
+are not claimed as delivery or completed work.
+The 17:40 collection confirms readiness after source integration freezes.
+Rehearsals grant no exception to gates, holds, spending or release times.
+Install both rehearsal jobs after review, archive prior plists and read back
+loaded arguments/environment. Undo with reviewed source and archived plists;
+retain reports, billing imports and outbox receipts.
+
+### Pauses during the release window
+
+On a day with a valid accepted current-day batch, any pause active or set during
+**17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
+and the accountable pausing role. The authenticated pause control sends directly;
+the 30-second release reconciler catches an earlier pause at freeze start and
+retries retained episode IDs after mail failures. Each real resume-to-pause transition can alert again; repeated pause requests
+retain the same episode. Pending per-recipient actions retry independently even
+after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
+lifts a pause automatically or permits a late release.
+
+`control.ts pause Platform|Release|Quality|Product|Coordinator` and the authenticated
+board's optional `owner` field record the accountable role. Generic and legacy
+owner-token controls belong to Coordinator for escalation; their actual caller
+is explicitly unrecorded and is never represented as a verified human identity.
+A missing owner does not prevent the safety pause. Coordinator identifies and
+contacts the original pausing owner when legacy provenance is incomplete.
+
+### Release usage headroom
+
+The **14:00** rehearsal projects Release and the effective Quality acceptance
+profile's usage at **18:30 Eastern** using the last 15–60 minutes of comparable
+native observations. Every exposed window must project below **0.70**. A
+projection at/above the gate, stale or absent usage, missing burn history,
+changed window/reset identity or decreasing counters is a Coordinator gap.
+The ordinary tick retains at most 72 native metadata observations/provider over
+six hours, normally at five-minute spacing, with intervening discontinuities
+retained immediately, without another model or paid API call. At least 15 minutes
+of continuous comparable evidence is required after the latest discontinuity.
+
+The report retains baseline, current usage, measured hourly burn and target for
+every window. A scheduled reset is labelled a forecast assumption; it never
+creates fresh native zero usage or supplies runtime admission. Coordinator can
+decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
+fresh-read checks remain unchanged. PR #190 is not required or installed.
+
+### Refused and missed nights
+
+The 30-second release reconciler retains one plain incident summary per night
+after a refused window, failed release effect, or a scheduled job absent after
+its fixed minute. It names the input and the earliest recorded time it was
+knowable, using retained 14:00/17:40/19:00 observations, the scheduled 20:00 QA readiness refusal
+causes, and admitted pause events. With no earlier evidence,
+it explicitly uses the first recorded refusal or the missed-minute boundary;
+it never invents an earlier observation. Full reasons remain in the incident.
+
+One immutable Alido Mail action/night goes to Coordinator. Later windows update
+the retained incident, and delivery failures retry that original action ID and
+payload. Existing historical release evidence lets a restarted reconciler
+recover the last two nights, including admitted scheduled refusals that failed
+before a night/report record existed. Pending action retries are independent of
+that discovery horizon and continue after longer outbox outages. CLI errors from
+off-schedule attempts are excluded; original invocation time distinguishes a
+scheduled job whose setup failed later. A prior unshipped night increments the consecutive
+miss count and flags the second consecutive missed night. A later proven ship
+is retained as recovery. Incidents, original messages and old release records
+are archived/retained, never erased. Notification failure cannot suppress other
+release observers or authorize a replay, catch-up or off-schedule release.

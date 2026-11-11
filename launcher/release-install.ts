@@ -27,7 +27,7 @@ export async function rebindReleaseJob(label:string,path:string,uid:number,expec
  try{loaded=await execute(['launchctl','print',service]);}catch(error){if(!/Could not find (?:service|specified service)/i.test(String(error)))throw error;}
  if(loaded){
   const old=loadedReleaseJob(loaded),states=[...loaded.matchAll(/^\tstate = (.+)$/gm)],counts=[...loaded.matchAll(/^\tactive count = (\d+)$/gm)];
-  if(old.program!==expected.program||old.args.length!==3||old.args[2]!==expected.args[2]||!old.args[1].endsWith('/scripts/release.ts'))throw Error('loaded release job identity is unknown; retain custody');
+  if(old.program!==expected.program||JSON.stringify(old.args.slice(2))!==JSON.stringify(expected.args.slice(2))||!old.args[1].endsWith('/scripts/release.ts'))throw Error('loaded release job identity is unknown; retain custody');
   const idle=states.length===1&&states[0][1]==='not running'&&counts.length===1&&counts[0][1]==='0'&&!/^\tpid = /m.test(loaded);
   if(!idle&&expected.args[2]!=='reconcile')throw Error(`${label} calendar process is active or unknown; retain it`);
   // Recheck synchronously immediately before bootout after all async reads.
