@@ -4,6 +4,7 @@ import {writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {IDLE_RULES,advanceIdleQueue,observeIdleQueue,openIdleState,pausedWithReadyActionId,replayIdleObservations,watchIdleQueue,type IdleQueueObservation} from '../launcher/idle-queue';
 import {parseOwnerMessageId} from '../launcher/loop-contract';
+import {pendingWakes} from '../launcher/wake';
 import {readyForTopUp} from '../scripts/product-top-up';
 import {HOUR,MINUTE,idleFixture} from './helpers/idle-queue-fixture';
 
@@ -147,25 +148,127 @@ test('a 16.5-hour empty queue: first alarm, a repeat at about an hour, then two-
  expect(done.every(r=>r.dispatchedAt-r.firstAlarmAt>0&&Number.isSafeInteger(r.settled))).toBe(true);
 }finally{f.close();}});
 
-test('a repeat wake reuses the newest ordinary intake view of the backlog only while it is under two hours old',()=>{for(const age of [30*MINUTE,3*HOUR]){const f=idleFixture(THURSDAY);try{
- const at=f.now+HOUR;
- f.s.set('intake-round',{id:'r1',at:at-age,attempt:1,wake:'intake:r1:1'});
- f.s.set('owner-wake:intake:r1:1',{id:'intake:r1:1',owner:'product',kind:'product-intake',payload:{round:'r1',ready:2,target:9,brief:'Product tasks only.',existing:[{id:'example/demo#7'}],occupied:[{id:'x'}]},state:'done',cleanupVerified:true});
- watchIdleQueue(f.dir,f.mail,f.now);f.tick(at);
- expect(watchIdleQueue(f.dir,f.mail,at).repeat).toMatchObject({step:1,wake:`intake:idle-repeat:${f.now-21*MINUTE}:1`});
- const payload=repeatWakes(f)[0]!.payload;
- expect(payload).toMatchObject({round:`idle-repeat:${f.now-21*MINUTE}:1`,ready:0,occupied:[]});
- if(age<2*HOUR)expect(payload).toMatchObject({target:9,brief:'Product tasks only.',existing:[{id:'example/demo#7'}],idleRepeat:{context:{from:'intake:r1:1',at:at-age}}});
- else{expect(payload.existing).toBeUndefined();expect(payload.idleRepeat.context).toBeNull();}
-}finally{f.close();}}});
+// An ordinary intake wake as the supply loop leaves it, in the state given.
+const ordinaryIntake=(f:Fixture,at:number,state:string,id='intake:r1:1')=>{
+ f.s.set('intake-round',{id:id.split(':')[1],at,attempt:1,wake:id});
+ f.s.set(`owner-wake:${id}`,{id,owner:'product',kind:'product-intake',payload:{round:id.split(':')[1],ready:2,target:9,brief:'Product tasks only.',existing:[{id:'example/demo#7'}],occupied:[{id:'x'}]},state,at,...(state==='done'?{cleanupVerified:true}:{})});
+};
+test('a repeat wake reuses the newest ordinary intake view only when that intake finished under two hours ago and nothing was proposed from it',()=>{
+ const cases:{age:number;after?:(f:Fixture)=>void;reused:boolean}[]=[
+  {age:30*MINUTE,after:f=>f.s.set('owner-result:intake:r1:1',{at:f.now,applied:true,mix:{product:0,other:0}}),reused:true},
+  {age:3*HOUR,after:f=>f.s.set('owner-result:intake:r1:1',{at:f.now,applied:true}),reused:false},
+  // Its result has not been applied yet: what it proposed is not known.
+  {age:30*MINUTE,reused:false},
+  // It proposed a task. The view was built before that task existed and would not show it.
+  {age:30*MINUTE,after:f=>{f.s.set('owner-result:intake:r1:1',{at:f.now,applied:true,mix:{product:1,other:0}});f.s.set('proposal:intake:r1:1:0',12);},reused:false},
+ ];
+ for(const {age,after,reused} of cases){const f=idleFixture(THURSDAY);try{
+  const at=f.now+HOUR;
+  ordinaryIntake(f,at-age,'done');after?.(f);
+  watchIdleQueue(f.dir,f.mail,f.now);f.tick(at);
+  expect(watchIdleQueue(f.dir,f.mail,at).repeat).toMatchObject({step:1,wake:`intake:idle-repeat:${f.now-21*MINUTE}:1`});
+  const payload=repeatWakes(f)[0]!.payload;
+  expect(payload).toMatchObject({round:`idle-repeat:${f.now-21*MINUTE}:1`,ready:0,occupied:[]});
+  if(reused){
+   expect(payload).toMatchObject({target:9,brief:'Product tasks only.',existing:[{id:'example/demo#7'}],idleRepeat:{context:{from:'intake:r1:1',at:at-age}}});
+   expect(payload.idleRepeat.note).not.toContain('No view of the backlog');
+  }else{
+   expect(payload.existing).toBeUndefined();expect(payload.idleRepeat.context).toBeNull();
+   expect(payload.idleRepeat.note).toContain('No view of the backlog is attached: read the current open issues first');
+  }
+ }finally{f.close();}}
+});
 
-test('an earlier repeat wake that has not run is not stacked: the step is recorded with the reason and no second wake',()=>{const f=idleFixture(THURSDAY);try{
- const seen:(string|null)[]=[];
- for(let at=f.now;at<=f.now+3*HOUR;at+=5*MINUTE){f.tick(at);const r=watchIdleQueue(f.dir,f.mail,at);if(r.repeat)seen.push(r.repeat.note??r.repeat.wake);}
- expect(seen).toEqual([`intake:idle-repeat:${f.now-21*MINUTE}:1`,'the earlier repeat wake is still queued']);
- expect(repeatWakes(f)).toHaveLength(1);
- expect(records(f,'repeat').map(r=>r.wake)).toEqual([`intake:idle-repeat:${f.now-21*MINUTE}:1`,null]);
+// One intake at a time. On the recorded night the first repeat fell due while an ordinary intake
+// was running; queuing beside it would have run two intakes back to back on one view of the backlog.
+for(const state of ['queued','starting','running'])test(`a repeat is not queued beside an ordinary intake that is ${state}; it is asked again and queued once that intake has finished`,()=>{const f=idleFixture(THURSDAY);try{
+ const due=f.now+HOUR;
+ watchIdleQueue(f.dir,f.mail,f.now);
+ ordinaryIntake(f,due-MINUTE,state);
+ for(const at of [due,due+5*MINUTE]){
+  f.tick(at);
+  expect(watchIdleQueue(f.dir,f.mail,at)).toMatchObject({eligible:true,repeat:null,repeatWaiting:`intake wake intake:r1:1 is still ${state}`});
+ }
+ expect(repeatWakes(f)).toEqual([]);expect(records(f,'repeat')).toEqual([]);
+ expect(f.s.db.query("SELECT COUNT(*) AS n FROM events WHERE kind='owner-wake-queued'").get()).toEqual({n:0});
+ // The ordinary intake finishes with nothing proposed: the repeat is queued at the next run.
+ ordinaryIntake(f,due-MINUTE,'done');f.s.set('owner-result:intake:r1:1',{at:due+6*MINUTE,applied:true,mix:{product:0,other:0}});
+ f.tick(due+10*MINUTE);
+ const r=watchIdleQueue(f.dir,f.mail,due+10*MINUTE);
+ expect(r.repeat).toMatchObject({step:1,wake:`intake:idle-repeat:${f.now-21*MINUTE}:1`});expect(r).not.toHaveProperty('repeatWaiting');
+ expect(repeatWakes(f).map(w=>w.state)).toEqual(['queued']);
 }finally{f.close();}});
+
+test('an intake that stays in flight for 30 minutes past a due repeat: the step is recorded with the reason and no wake',()=>{const f=idleFixture(THURSDAY);try{
+ const due=f.now+HOUR,recorded:number[]=[];
+ watchIdleQueue(f.dir,f.mail,f.now);ordinaryIntake(f,due-MINUTE,'running');
+ for(let at=due;at<=due+45*MINUTE;at+=5*MINUTE){f.tick(at);if(watchIdleQueue(f.dir,f.mail,at).repeat)recorded.push((at-due)/MINUTE);}
+ expect(recorded).toEqual([30]);
+ expect(records(f,'repeat')).toMatchObject([{step:1,wake:null,note:'intake wake intake:r1:1 is still running'}]);
+ expect(repeatWakes(f)).toEqual([]);
+}finally{f.close();}});
+
+test('a repeat wake that is not dispatched within 30 minutes is withdrawn, and the next repeat queues a new one',()=>{const f=idleFixture(THURSDAY);try{
+ const idleSince=f.now-21*MINUTE,wake=(step:number)=>`intake:idle-repeat:${idleSince}:${step}`,queued:number[]=[],withdrawn:[number,string[]][]=[];
+ for(let at=f.now;at<=f.now+3*HOUR;at+=5*MINUTE){
+  f.tick(at);const r=watchIdleQueue(f.dir,f.mail,at);
+  if(r.repeat?.wake)queued.push((at-f.now)/MINUTE);
+  if(r.withdrawn.length)withdrawn.push([(at-f.now)/MINUTE,r.withdrawn]);
+ }
+ expect(queued).toEqual([60,180]);expect(withdrawn).toEqual([[90,[wake(1)]]]);
+ expect(repeatWakes(f).map(w=>[w.id,w.state])).toEqual([[wake(1),'expired'],[wake(2),'queued']]);
+ // Only the second is left for the tick to dispatch; the first is on record as withdrawn, with why.
+ expect(pendingWakes(f.s).map(w=>w.id)).toEqual([wake(2)]);
+ expect(records(f,'repeat')).toMatchObject([{wake:wake(1),wakeState:'expired',withdrawn:'not dispatched within 30 minutes',settled:f.now+90*MINUTE,dispatchedAt:null},{wake:wake(2),previousWake:wake(1)}]);
+ expect(f.s.db.query("SELECT id,json_extract(data,'$.why') AS why FROM events WHERE kind='idle-repeat-wake-withdrawn'").all()).toEqual([{id:`idle-repeat-withdrawn:${wake(1)}`,why:'not dispatched within 30 minutes'}]);
+}finally{f.close();}});
+
+// The wake says "the queue has been empty". It may start only while that is still what a run finds.
+describe('a repeat wake that has not started is withdrawn when the idle it was queued for ends',()=>{
+ const stopped=(at:number)=>[{used:.93,resetsAt:at+86400000},{used:.4,resetsAt:at+3*86400000}];
+ const queuedRepeat=()=>{const f=idleFixture(THURSDAY),at=f.now+HOUR;watchIdleQueue(f.dir,f.mail,f.now);f.tick(at);const wake=watchIdleQueue(f.dir,f.mail,at).repeat!.wake!;expect(pendingWakes(f.s).map(w=>w.id)).toEqual([wake]);return {f,at,wake};};
+ test('paused for four hours and resumed with ready work: nothing is left for the tick to dispatch',()=>{const {f,at,wake}=queuedRepeat();try{
+  f.s.set('paused',true);f.s.event('pause-1','pause',{},'Set pause to false',at+2*MINUTE);
+  f.tick(at+5*MINUTE,{ready:0,claimed:0,paused:true});
+  expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE)).toMatchObject({reason:'paused',withdrawn:[wake],repeat:null});
+  for(let t=at+10*MINUTE;t<=at+4*HOUR;t+=5*MINUTE){f.tick(t,{ready:0,claimed:0,paused:true});expect(watchIdleQueue(f.dir,f.mail,t).withdrawn).toEqual([]);}
+  f.s.set('paused',false);f.s.event('resume-1','resume',{},'Set pause to true',at+4*HOUR+MINUTE);
+  expect(pendingWakes(f.s)).toEqual([]);
+  f.tick(at+4*HOUR+5*MINUTE,{ready:5,claimed:0});watchIdleQueue(f.dir,f.mail,at+4*HOUR+5*MINUTE);
+  expect(pendingWakes(f.s)).toEqual([]);expect(repeatWakes(f).map(w=>w.state)).toEqual(['expired']);
+  expect(records(f,'repeat')).toMatchObject([{wake,wakeState:'expired',withdrawn:'the idle it was queued for no longer holds: paused',settled:at+5*MINUTE}]);
+ }finally{f.close();}});
+ test('a usage stop that begins before the wake is dispatched',()=>{const {f,at,wake}=queuedRepeat();try{
+  f.tick(at+5*MINUTE,{ready:0,claimed:0},stopped(at));
+  expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE)).toMatchObject({reason:'usage does not allow work',withdrawn:[wake]});
+  expect(pendingWakes(f.s)).toEqual([]);
+  expect(records(f,'repeat')).toMatchObject([{withdrawn:'the idle it was queued for no longer holds: usage does not allow work'}]);
+ }finally{f.close();}});
+ test('ready work, a builder that ran in between, or queue evidence that can no longer be read',()=>{
+  for(const [change,reason] of [
+   [(f:Fixture,t:number)=>f.tick(t,{ready:5,claimed:0}),'queue has ready work'],
+   [(f:Fixture,t:number)=>{f.tick(t);f.s.event('later-builder','worker-cleanup',{verified:true},'retain',t-MINUTE);},'a builder has run since'],
+   [(f:Fixture,t:number)=>f.s.set('heartbeat',{at:t-6*MINUTE,status:'ok',ready:0}),'queue not freshly confirmed empty'],
+  ] as const){const {f,at,wake}=queuedRepeat();try{
+   change(f,at+5*MINUTE);
+   expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE).withdrawn).toEqual([wake]);
+   expect(records(f,'repeat')).toMatchObject([{withdrawn:`the idle it was queued for no longer holds: ${reason}`}]);
+  }finally{f.close();}}
+ });
+ test('an ordinary intake queued beside it: the repeat gives way',()=>{const {f,at,wake}=queuedRepeat();try{
+  ordinaryIntake(f,at+2*MINUTE,'queued','intake:r2:1');f.tick(at+5*MINUTE);
+  expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE).withdrawn).toEqual([wake]);
+  expect(pendingWakes(f.s).map(w=>w.id)).toEqual(['intake:r2:1']);
+  expect(records(f,'repeat')).toMatchObject([{withdrawn:'ordinary intake wake intake:r2:1 is in flight'}]);
+ }finally{f.close();}});
+ test('a wake the tick has already claimed is left alone',()=>{const {f,at,wake}=queuedRepeat();try{
+  f.s.set(`owner-wake:${wake}`,{...f.s.get<object>(`owner-wake:${wake}`),state:'starting'});f.s.set('paused',true);
+  f.tick(at+5*MINUTE,{ready:0,claimed:0,paused:true});
+  expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE).withdrawn).toEqual([]);
+  expect(repeatWakes(f).map(w=>w.state)).toEqual(['starting']);
+  expect(f.s.db.query("SELECT COUNT(*) AS n FROM events WHERE kind='idle-repeat-wake-withdrawn'").get()).toEqual({n:0});
+ }finally{f.close();}});
+});
 
 test('repeats stop at twelve in any 24 hours across episodes, and a failed queue attempt is asked again',()=>{const state=openIdleState(':memory:');try{
  const empty=(at:number,lastActivity:number):IdleQueueObservation=>({at,eligible:true,reason:'empty queue and stopped builders; high-benefit usage allowed',lastActivity,heartbeatAt:at,ready:0});
@@ -248,13 +351,119 @@ test('a pause is not an idle while a builder runs, asks nothing with no ready wo
  const at=f.now+45*MINUTE;f.tick(at,{ready:4,claimed:0,paused:true});
  f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('busy','example/demo#1','product','codex','running','{}');
  expect(observeIdleQueue(f.s.db,f.c,at)).toMatchObject({reason:'paused',ready:4});expect(observeIdleQueue(f.s.db,f.c,at).limit).toBeUndefined();
- f.s.db.query("UPDATE sessions SET status='finished' WHERE id='busy'").run();
+ f.s.db.query("UPDATE sessions SET status='finished' WHERE id='busy'").run();f.s.set('cleanup-evidence:busy',{verified:true});
  expect(observeIdleQueue(f.s.db,f.c,at).limit).toEqual({kind:'paused',since:f.now});
  f.tick(at,{ready:0,claimed:0,paused:true});
  const r=watchIdleQueue(f.dir,f.mail,at);
  expect(r.notices).toEqual([]);expect(r.idleByLimit).toBe(`idle-by-limit:paused:${f.now}`);
  expect(records(f,'idle-by-limit')).toMatchObject([{setBy:'not recorded',ready:0}]);expect(mailRows(f)).toEqual([]);
 }finally{f.close();}});
+
+// "Nothing running" is decided on the same proof as the empty-queue alarm: every builder at rest,
+// no process, cleanup verified. A status alone is not that proof.
+test('the pause question and the idle-by-limit record need every builder positively stopped, not only none marked running',()=>{const f=idleFixture(THURSDAY);try{
+ const paused=f.now,at=paused+45*MINUTE;
+ f.s.set('paused',true);f.s.event('pause-1','pause',{owner:'Release',ownerSupplied:true},'Set pause to false',paused);
+ f.tick(at,{ready:31,claimed:0,paused:true});
+ f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('builder','example/demo#1','product','codex','unknown','{}');
+ const builder=(status:string,pid:number|null)=>{f.s.db.query('UPDATE sessions SET status=?,pid=? WHERE id=?').run(status,pid,'builder');return observeIdleQueue(f.s.db,f.c,at);};
+ // A live process, or a slot about to start, whatever the status says: this is not an idle at all.
+ for(const [status,pid] of [['unknown',4242],['paused',4242],['finished',4242],['reserved',null],['starting',null],['running',null]] as const){
+  const o=builder(status,pid);
+  expect(o).toMatchObject({reason:'paused',ready:31});expect(o.limit).toBeUndefined();expect(o.idleSince).toBeUndefined();expect(o.otherCause).toBeUndefined();
+ }
+ // No process, but nothing proves the builder stopped: timed, and said to be unconfirmed. Nobody is told "nothing running".
+ for(const status of ['unknown','finished']){
+  const o=builder(status,null);
+  expect(o.limit).toBeUndefined();expect(o).toMatchObject({idleSince:paused-21*MINUTE,otherCause:'paused with 31 ready; builder custody not confirmed'});
+ }
+ const unproven=watchIdleQueue(f.dir,f.mail,at);
+ expect(unproven.notices).toEqual([]);expect(unproven.idleByLimit).toBeNull();expect(mailRows(f)).toEqual([]);
+ // Cleanup verified: now the pause explains the idle, and Platform is asked.
+ f.s.set('cleanup-evidence:builder',{verified:true});f.tick(at+5*MINUTE,{ready:31,claimed:0,paused:true});
+ expect(watchIdleQueue(f.dir,f.mail,at+5*MINUTE)).toMatchObject({limit:{kind:'paused',since:paused,setBy:'Release'},notices:[pausedWithReadyActionId(paused)]});
+}finally{f.close();}});
+
+// ------------------------------------------------- idle with no limit behind it
+test('ready work that nothing claims for a reason that is not a limit is still timed: one line for Vincent, no repeat, no wake, no limit record',()=>{const f=idleFixture(THURSDAY);try{
+ const lines:number[]=[],refusals=[1,2,3].map(n=>({ticket:`example/demo#${n}`,reason:'Error: repository workspace not configured'}));
+ for(let at=f.now;at<=f.now+6*HOUR;at+=5*MINUTE){
+  f.tick(at,{ready:3,claimed:0,refusals});
+  const r=watchIdleQueue(f.dir,f.mail,at);
+  expect(r).toMatchObject({eligible:false,reason:'queue has ready work',repeat:null,idleByLimit:null,idleSince:f.now-21*MINUTE,otherCause:'3 ready and none claimed: repository workspace not configured'});
+  if(r.notices.length)lines.push((at-f.now)/MINUTE);
+ }
+ // Two hours after the last builder activity, plus the half hour an unexplained idle waits for a cause.
+ expect(lines).toEqual([130]);
+ expect(mailRows(f)).toEqual([{id:'loop:routine:idle:not-explained:2026-11-12',recipient:'Vincent',recipient_app:'telegram',kind:'fyi',summary:'Idle 2 h: 3 ready and none claimed: repository workspace not configured.'}]);
+ expect(repeatWakes(f)).toEqual([]);expect(records(f,'repeat')).toEqual([]);expect(records(f,'idle-by-limit')).toEqual([]);
+}finally{f.close();}});
+
+test('an idle is timed through unreadable queue evidence, unknown usage and mixed refusals, and never while a builder may be running',()=>{const f=idleFixture(THURSDAY);try{
+ const at=f.now+3*HOUR,since=f.now-21*MINUTE;
+ // The tick stopped writing a fresh heartbeat three hours ago.
+ f.s.set('heartbeat',{at:at-6*MINUTE,status:'ok',ready:0});
+ expect(observeIdleQueue(f.s.db,f.c,at)).toMatchObject({observationUnavailable:true,reason:'queue not freshly confirmed empty',idleSince:since,otherCause:'queue reading unavailable'});
+ f.tick(at);f.s.set(`github:${Object.values(f.c.projects)[0]!.repo}`,{observedAt:at,count:0,truncated:true,error:null});
+ expect(observeIdleQueue(f.s.db,f.c,at)).toMatchObject({observationUnavailable:true,idleSince:since,otherCause:'issue inventory unavailable'});
+ f.tick(at);f.s.set('readings',{codex:{observedAt:at-16*MINUTE,source:'native fixture',windows:[{used:.5,resetsAt:at+86400000},{used:.5,resetsAt:at+86400000}]}});
+ expect(observeIdleQueue(f.s.db,f.c,at)).toMatchObject({reason:'usage does not allow work',idleSince:since,otherCause:'queue empty, usage reading stale or unknown'});
+ f.tick(at,{ready:3,claimed:0,refusals:[{reason:'Error: slots full'},{reason:'Error: slots full'},{reason:'Error: worker unqualified'}]});
+ expect(observeIdleQueue(f.s.db,f.c,at)).toMatchObject({idleSince:since,otherCause:'3 ready and none claimed: slots full and 1 other reason'});
+ // The watcher writes the line with the cause as far as it is known.
+ f.s.set('heartbeat',{at:at-6*MINUTE,status:'ok',ready:0});
+ expect(watchIdleQueue(f.dir,f.mail,at).notices).toEqual(['loop:routine:idle:not-explained:2026-11-12']);
+ expect(mailRows(f).filter(r=>r.recipient==='Vincent').map(r=>r.summary)).toEqual(['Idle 3 h: queue reading unavailable.']);
+ // A builder that may be running: the same unreadable evidence is not an idle.
+ f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('busy','example/demo#1','product','codex','running','{}');
+ const busy=observeIdleQueue(f.s.db,f.c,at);
+ expect(busy.observationUnavailable).toBe(true);expect(busy.idleSince).toBeUndefined();expect(busy.otherCause).toBeUndefined();
+}finally{f.close();}});
+
+// ------------------------------------------------- Vincent's line is bounded here
+describe("Vincent's idle line is bounded by the watcher itself",()=>{
+ const base=(at:number)=>({at,eligible:false,reason:'fixture',lastActivity:at,heartbeatAt:at});
+ const lineIds=(state:Database)=>(state.query("SELECT id FROM notices WHERE recipient='Vincent' ORDER BY at").all() as {id:string}[]).map(n=>n.id.split(':')[3]);
+ const held=(state:Database)=>(state.query("SELECT json FROM records WHERE kind='idle-line-held' ORDER BY at").all() as {json:string}[]).map(r=>JSON.parse(r.json) as {line:string;because:string});
+ test('seven causes in one day are two lines, and the other five are on record as held',()=>{const state=openIdleState(':memory:');try{
+  const day=Date.parse('2026-11-12T01:00:00-05:00'),kinds=['paused','usage-stop','disk-refused','worker-unqualified','usage-window-missing','wallet-stop'] as const;
+  const steps=kinds.map((kind,n)=>advanceIdleQueue(state,{...base(day+n*3*HOUR),ready:2,limit:{kind,since:day-3*HOUR},idleSince:day-3*HOUR},SETTINGS));
+  steps.push(advanceIdleQueue(state,{at:day+18*HOUR,eligible:true,reason:'empty queue and stopped builders; high-benefit usage allowed',lastActivity:day-3*HOUR,heartbeatAt:day+18*HOUR,ready:0},SETTINGS));
+  expect(lineIds(state)).toEqual(['paused','usage-stop']);
+  expect(steps.map(s=>s.lineHeld)).toEqual([null,null,...Array(5).fill('2 idle lines were written in the last 24 hours')]);
+  expect(held(state).map(h=>h.line)).toEqual(['Idle 9 h: disk admission refused, 2 ready.','Idle 12 h: worker unqualified, 2 ready.','Idle 15 h: usage window missing, 2 ready.','Idle 18 h: wallet stop, 2 ready.','Idle 21 h: queue empty.']);
+  // A day after the first line there is room again.
+  expect(advanceIdleQueue(state,{...base(day+24*HOUR+MINUTE),ready:2,limit:{kind:'disk-refused',since:day-3*HOUR},idleSince:day-3*HOUR},SETTINGS).notices).toEqual(['loop:routine:idle:disk-refused:2026-11-13']);
+ }finally{state.close();}});
+ test('an idle with no established cause waits half an hour for one, and is never a second line',()=>{const state=openIdleState(':memory:');try{
+  const since=THURSDAY,unknown=(at:number):IdleQueueObservation=>({...base(at),observationUnavailable:true,idleSince:since,otherCause:'queue reading unavailable'});
+  const empty=(at:number):IdleQueueObservation=>({at,eligible:true,reason:'empty queue and stopped builders; high-benefit usage allowed',lastActivity:since,heartbeatAt:at,ready:0,intake:'returned no tasks'});
+  // Unreadable at the two-hour mark, readable five minutes later: the line names the cause.
+  expect(advanceIdleQueue(state,unknown(since+2*HOUR),SETTINGS)).toMatchObject({notices:[],lineHeld:null});
+  expect(advanceIdleQueue(state,empty(since+2*HOUR+5*MINUTE),SETTINGS).notices).toEqual(['loop:routine:idle:queue-empty:2026-11-12']);
+  // Unreadable again later: no second line for the same idle.
+  expect(advanceIdleQueue(state,unknown(since+3*HOUR),SETTINGS)).toMatchObject({notices:[],lineHeld:'an idle line was written in the last 24 hours and no new cause is established'});
+  expect(lineIds(state)).toEqual(['queue-empty']);expect(held(state)).toEqual([{line:'Idle 3 h: queue reading unavailable.',because:'an idle line was written in the last 24 hours and no new cause is established'}]);
+ }finally{state.close();}});
+ test("when the launcher's own two-hour line already went to Vincent for this idle, the watcher adds no second one until a day later",()=>{const f=idleFixture(THURSDAY);try{
+  const vincent=()=>mailRows(f).filter(r=>r.recipient==='Vincent').map(r=>r.summary);
+  // What launcher/supply-idle.ts records when it queues "nothing claimable for 2 hours".
+  const told=f.now+95*MINUTE;f.s.event('supply-idle-alert:episode','supply-idle-alert',{id:'episode',since:told-2*HOUR},'retain',told);
+  for(let at=f.now;at<=f.now+3*HOUR;at+=5*MINUTE){
+   f.tick(at);const r=watchIdleQueue(f.dir,f.mail,at);
+   if(at-f.now>=100*MINUTE)expect(r).toMatchObject({launcherLineAt:told,lineHeld:`the launcher's own two-hour line was queued at ${new Date(told).toISOString()}`,notices:[]});
+  }
+  expect(vincent()).toEqual([]);
+  expect(records(f,'idle-line-held')).toEqual([{id:'idle-line-held:loop:routine:idle:queue-empty:2026-11-12',line:'Idle 2 h: queue empty, intake has not finished a run.',because:`the launcher's own two-hour line was queued at ${new Date(told).toISOString()}`}]);
+  // A limit is a different cause and is still named.
+  const reset=Date.parse('2026-11-13T03:00:00-05:00');f.tick(f.now+3*HOUR+5*MINUTE,{ready:0,claimed:0},[{used:.93,resetsAt:reset},{used:.4,resetsAt:reset}]);
+  expect(watchIdleQueue(f.dir,f.mail,f.now+3*HOUR+5*MINUTE).notices).toEqual(['loop:routine:idle:usage-stop:2026-11-12']);
+  // A day after the launcher's line the idle is named again, by the watcher.
+  const later=told+24*HOUR+5*MINUTE;f.tick(later);
+  expect(watchIdleQueue(f.dir,f.mail,later).notices).toEqual(['loop:routine:idle:queue-empty:2026-11-13']);
+  expect(vincent()).toEqual(['Idle 3 h: usage stop until Friday 03:00.','Idle 26 h: queue empty, intake has not finished a run.']);
+ }finally{f.close();}});
+});
 
 test('ready work that no builder took is idle by limit only when every refusal was a limit',()=>{const f=idleFixture(THURSDAY);try{
  const refused=(...reasons:string[])=>{f.tick(f.now,{ready:reasons.length,claimed:0,refusals:reasons.map((reason,n)=>({ticket:`example/demo#${n}`,reason}))});return observeIdleQueue(f.s.db,f.c,f.now);};
@@ -377,13 +586,34 @@ describe('changed observation-gap rule',()=>{
    if(flags!==undefined)writeFileSync(join(f.dir,'loop-flags.json'),flags);
    f.s.set('heartbeat',{at:f.now-6*MINUTE,status:'ok',ready:0});
    const results=[0,5,10].map(m=>watchIdleQueue(f.dir,f.mail,f.now+m*MINUTE));
-   return {results,mail:mailRows(f).map(r=>[r.recipient,r.kind,r.id])};
+   return {results,mail:mailRows(f).map(r=>[r.recipient,r.kind,r.id]),summaries:mailRows(f).map(r=>r.summary)};
   }finally{f.close();}};
   const off=run();
   expect(off.results.map(r=>r.gapRule)).toEqual([null,null,'3 readings in a row']);expect(off.mail).toEqual([]);expect(off.results[2]).not.toHaveProperty('switchAlarm');
   const on=run(JSON.stringify({version:1,switches:{'idle-observation-gap':{mode:'acting',actor:'operator (test)',at:THURSDAY,parityReport:'/tmp/gap-replay.json',parityReportSha256:'0'.repeat(64)}}}));
   expect(on.mail).toEqual([['Coordinator','action',`factory-queue-observation:${THURSDAY}`]]);
+  // Sent at ten minutes on three readings: the mail must not say "over 20 minutes".
+  expect(on.summaries).toEqual(['Factory queue observation has been unavailable for 3 readings in a row. Supply and builder activity need checking.']);
   const broken=run('{"version":1,"switches":{"idle-observation-gap":{"mode":"acting"}}}');
   expect(broken.mail).toEqual([]);expect(broken.results[2]!.switchAlarm).toContain('loop switch file rejected');
  });
+ test('acting adds the changed rule to the twenty-minute rule: a job that runs every 40 minutes still alarms at its second unavailable reading',()=>{for(const acting of [false,true]){const state=openIdleState(':memory:');try{
+  const rules=[0,40,80,120].map(m=>advanceIdleQueue(state,unknown(THURSDAY+m*MINUTE),{...SETTINGS,gapRuleActs:acting}).gapRule);
+  // Too sparse for 20 counted minutes in an hour, but three in a row is three in a row at any spacing.
+  expect(rules).toEqual([null,null,'3 readings in a row','3 readings in a row']);
+  // Today's rule sends at 40 minutes whether or not the switch is acting, and it stays one incident.
+  expect(gapAlarms(state)).toEqual([40]);
+  expect(state.query('SELECT since,rule FROM gap_rule').all()).toEqual([{since:THURSDAY,rule:'3 readings in a row'}]);
+ }finally{state.close();}}});
+ test('the mail for an on-and-off loss says 20 minutes within an hour, and keeps that text on every later run',()=>{const f=idleFixture(THURSDAY);try{
+  writeFileSync(join(f.dir,'loop-flags.json'),JSON.stringify({version:1,switches:{'idle-observation-gap':{mode:'acting',actor:'operator (test)',at:THURSDAY,parityReport:'/tmp/gap-replay.json',parityReportSha256:'0'.repeat(64)}}}));
+  const gapMail=()=>mailRows(f).filter(r=>r.id.startsWith('factory-queue-observation:')).map(r=>r.summary);
+  for(let n=0;n<=9;n++){
+   const at=f.now+n*5*MINUTE;
+   // Odd runs read a busy queue; even runs find the heartbeat stale.
+   if(n%2)f.tick(at,{ready:2,claimed:1});else f.s.set('heartbeat',{at:at-6*MINUTE,status:'ok',ready:0});
+   watchIdleQueue(f.dir,f.mail,at);
+   expect(gapMail()).toEqual(n<7?[]:['Factory queue observation has been unavailable for 20 minutes within an hour. Supply and builder activity need checking.']);
+  }
+ }finally{f.close();}});
 });
