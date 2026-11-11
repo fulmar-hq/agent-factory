@@ -25,7 +25,7 @@ function releaseRefusals(s:Store,day:string){
  if(rows.length>1000)throw Error('release refusal inventory exceeds incident bound');
  return rows.filter(r=>r.kind!=='release-executor-refusal'||scheduledCli(day,r.at,JSON.parse(r.data)));
 }
-function knownNight(s:Store,day:string){return !!(s.get(`release-incident:${day}`)||s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-qa-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
+function knownNight(s:Store,day:string){return !!(s.get(`release-incident:${day}`)||s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-qa-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length||reports(s,day).length);}
 function missedNight(s:Store,day:string){
  const result=s.get<{shipped:boolean}>(`release-window-result:${day}`);
  if(result?.shipped===true||s.get<{shipped?:boolean}>(`release-incident:${day}`)?.shipped===true)return false;
