@@ -1,7 +1,6 @@
 import { pullState, type BoardPull, type PullSnapshot } from "./pulls";
 import { usageTone, spendTone, timingTone, type Tone } from "./tones";
 import { questionFields } from "./questions";
-import { slotLimit } from "../launcher/capacity";
 import type { BoardEvidence } from "./runtime";
 import { issueTicket, type Issue } from "../adapters/github";
 import type { Engine, Session } from "../launcher/engine";
@@ -392,13 +391,13 @@ export function boardModel(
   const idleSeconds = idleSince ? Math.max(0, (now - idleSince) / 1000) : null;
   const heartbeat = s.get<{ at: number; status: string }>("heartbeat");
   const delayed =
-    !heartbeat || now - heartbeat.at > 180000 || heartbeat.status === "error";
+    !heartbeat || now - heartbeat.at > 180000 || ["error","degraded"].includes(heartbeat.status);
   const sourceError = Object.values(e.c.projects).some((p) => {
     const source = s.get<{ error?: string; truncated?: boolean }>(
       `github:${p.repo}`,
     );
     const pulls=inventories.get(p.repo);
-    return !source || !!source.error || !!source.truncated || !!pulls?.error || !!(pulls && (pulls.at>now || now-pulls.at>180000));
+    return !source || !!source.error || !!source.truncated || !!pulls?.error || !!(pulls && (pulls.at>now || now-pulls.at>600000));
   });
   let status = running.length
     ? `${t.working} — ${t.running(running.length)}, ${t.queue(upNext.length)}`
@@ -490,13 +489,15 @@ export function boardModel(
   const durations = done.map(x=>x.seconds).filter((n): n is number=>n !== null).sort((a,b)=>a-b);
   const mid = Math.floor(durations.length/2);
   const medianSeconds = durations.length ? durations.length % 2 ? durations[mid]! : (durations[mid-1]!+durations[mid]!)/2 : null;
-  const freeCapacity = e.active().length < slotLimit(s,e.c);
+  const slots=e.slots();
+  const freeCapacity = slots.free > 0;
   const mode = s.get("paused") === true ? "paused" : questions.length ? "needs" : running.length ? "working" : freeCapacity ? "idle" : "paused";
   const hero = {mode,title:mode === "paused" ? (lang === "fr" ? "En pause" : "Paused") : mode === "needs" ? (lang === "fr" ? "Besoin de vous" : "Needs you") : mode === "working" ? (lang === "fr" ? "En marche" : "Working") : (lang === "fr" ? "Inactif" : "Idle"),
     soft:mode === "paused" ? (s.get("paused") === true ? (lang === "fr" ? "à votre demande" : "by you") : (lang === "fr" ? "en attente d’une place" : "waiting for a free slot")) : mode === "needs" ? `${questions.length} question${questions.length === 1 ? "" : "s"}` : mode === "working" ? t.running(running.length) : idleSeconds === null ? "" : (lang === "fr" ? "depuis " : "for ")+humanTime(idleSeconds,lang),
     lede:lang === "fr" ? `${running.length} tâches continuent pendant que vous décidez.` : `The ${running.length} running tasks carry on while you decide.`};
   return {
     now,
+    slots:{used:slots.used,max:slots.max,free:slots.free},
     hero,
     completed:{count:done.length,medianSeconds,over:done.filter(x=>x.seconds !== null && x.estimateSeconds !== null && x.seconds>x.estimateSeconds).length},
     nextLiveAt:deadlineAt(now,minute < 1290 ? 1290 : 1290+1440),
