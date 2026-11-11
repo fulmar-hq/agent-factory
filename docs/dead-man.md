@@ -40,7 +40,11 @@ Every 30 minutes (minutes 13 and 43) the workflow reads the variable and judges 
 
 A job that has never reported (today: the ledger job and the sender, until they are installed) is listed as "not reporting yet". It is not judged and not shown as healthy. From its first report on, it is watched.
 
-A problem **opens** after two bad checks in a row and **recovers** after two clean checks in a row. So one late push or one slow run is ridden out, and a value that flips between good and bad cannot produce a stream of notices. Two checks less than 10 minutes apart count as one look, so a run started by hand right after a scheduled one can neither open nor clear a problem.
+A problem **opens** after two bad checks in a row and **recovers** after two clean checks in a row. So one late push or one slow run is ridden out, and a value that flips between good and bad on every check never opens anything. Two checks less than 10 minutes apart count as one look, so a run started by hand right after a scheduled one can neither open nor clear a problem.
+
+**Something else goes wrong while a problem is open.** One open problem covers the Mac and all four jobs, so a small alarm that has been open since the morning must not hide a Mac that dies in the afternoon. The check remembers what its notices have already named in this problem: the Mac's push, the pushed value, or one of the four jobs. Anything not yet named is named in one more notice, after two bad checks in a row for it, the same rule as an opening. Each is named at most once per problem, so a job that keeps flipping inside an open problem adds nothing. A dead Mac behind an open alarm is therefore said in the same 75 to 105 minutes as a dead Mac on a quiet day.
+
+**A problem that comes back.** A problem that opens within 24 hours of a recovery gets its notice, which says it is back. From then on it counts as recovered only after 12 clean checks in a row (six hours on the 30-minute schedule), not two. So a fault that comes and goes every hour or two gives two openings and one recovery, and after that only the daily reminder, not an opening and a recovery every two hours. The most any fault can produce is five openings in 24 hours, and that needs a fault that stays clean for six hours each time before it comes back. While such a problem is held open the owner has been told it is open and has not been told it recovered; the issue text shows how many clean checks it has.
 
 **How long it takes.** With checks on time, a Mac that stops is noticed 75 to 105 minutes after its last push. GitHub often starts scheduled runs late, which adds to that. This is a coarse backstop, not a pager. A stop that ends just under the 105 minutes can go unnoticed.
 
@@ -48,10 +52,10 @@ A problem **opens** after two bad checks in a row and **recovers** after two cle
 
 The check keeps one standing issue. It rewrites the issue's text on every run (status, last check, one row per watched job), and its own memory lives in a hidden line at the bottom of that text. Editing an issue's text notifies nobody.
 
-It adds exactly one comment naming the owner when a problem opens, and one when it recovers. While a problem stays open it says so again once a day, at the first check from 09:00 Toronto time. That is the rule planned for the Mac's own hard stops too.
+It adds exactly one comment naming the owner when a problem opens, and one when it recovers. In between it comments only for the two cases above: once for each further thing that goes wrong, and once a day while the problem stays open, at the first check from 09:00 Toronto time. The daily repeat is the rule planned for the Mac's own hard stops too.
 
 - Without the Telegram secret, each of those comments mentions the owner's GitHub login, so GitHub notifies him. Whether that reaches him depends on his own GitHub notification settings.
-- With the Telegram secret, the workflow sends one plain line from GitHub when the problem opens (and the daily reminder). The comment is still written, without the mention. If Telegram cannot send, the mention is used instead. The recovery is a comment only.
+- With the Telegram secret, the workflow sends one plain line from GitHub for each of those comments except the recovery. The comment is still written, without the mention. If Telegram cannot send, the mention is used instead. The recovery is a comment only.
 
 A notice is saved before it is sent. If a run dies in between, the next run sends it first. The cost is that a notice can, rarely, be repeated; it is never lost.
 
@@ -84,26 +88,39 @@ The new job is not in `scripts/check-job-environment.ts`'s list of scheduled job
 
 ## Drills
 
-A drill uses its own variable (`FACTORY_HEARTBEAT_DRILL`, the only other name the workflow accepts) and the drill issue. It never touches the real tick, the real variable or the standing issue, and it can notify nobody: the check only mentions the owner or uses Telegram when it writes to the standing issue, the standing issue only accepts the real variable, and the pusher refuses to write the real variable from a drill folder. Run drills outside 17:30 to 22:35.
+A drill uses its own variable, `FACTORY_HEARTBEAT_DRILL`, and the drill issue. Those are the only two variable names the pusher, the check and the workflow accept: the check's own settings (`FACTORY_HEARTBEAT_ISSUE`, `FACTORY_HEARTBEAT_OWNER`) start with the same words, and a heartbeat written over one of them would switch the watch off. A drill never touches the real tick, the real variable or the standing issue, and it can notify nobody: the check only mentions the owner or uses Telegram when it writes to the standing issue, the standing issue only accepts the real variable, and the pusher refuses to write the real variable from a drill folder. Run drills outside 17:30 to 22:35.
 
-Set up a drill folder with a tick time you control:
+Set these up once, in a shell in the installed checkout:
 
 ```
-D=$(mktemp -d); mkdir -p "$D/factory/health" "$D/mail"
-sqlite3 "$D/factory/controller.sqlite" "create table kv(key text primary key,value text not null); insert into kv values('last-successful-heartbeat', json_object('at', (strftime('%s','now')-3600)*1000, 'status','ok'));"
-push()  { bun scripts/push-heartbeat.ts push --repo fulmar-hq/agent-factory --variable FACTORY_HEARTBEAT_DRILL --dir "$D/factory" --mail-dir "$D/mail"; }
-check() { gh workflow run dead-man.yml --repo fulmar-hq/agent-factory -f variable=FACTORY_HEARTBEAT_DRILL -f issue=<drill issue number>; }
+R=fulmar-hq/agent-factory; DRILL_ISSUE=<drill issue number>
+tick()   { sqlite3 "$D/factory/controller.sqlite" "update kv set value=json_object('at',(strftime('%s','now')-$1*60)*1000,'status','ok') where key='last-successful-heartbeat';"; }
+sender() { echo "{\"at\": $(($(date +%s)*1000))$1}" > "$D/mail/sender-heartbeat.json"; }
+ledger() { echo "{\"at\": $(($(date +%s)*1000))$1}" > "$D/factory/health/ledger-heartbeat.json"; }
+push()   { bun scripts/push-heartbeat.ts push --repo "$R" --variable FACTORY_HEARTBEAT_DRILL --dir "$D/factory" --mail-dir "$D/mail"; }
+check()  { gh workflow run dead-man.yml --repo "$R" -f variable=FACTORY_HEARTBEAT_DRILL -f issue="$DRILL_ISSUE"; }
+reset()  {
+  D=$(mktemp -d); mkdir -p "$D/factory/health" "$D/mail"
+  sqlite3 "$D/factory/controller.sqlite" "create table kv(key text primary key,value text not null); insert into kv values('last-successful-heartbeat','{}');"
+  tick 0
+  gh issue edit "$DRILL_ISSUE" --repo "$R" --body "<!-- factory-heartbeat-state -->"
+}
 ```
 
-Each `push` goes through the real GitHub budget. Leave at least 10 minutes between two checks, or the second does not count. To make an entry healthy again, write a current time into it (for the tick, update the row's `at`).
+- `tick 0` makes the drill's tick current; `tick 60` makes it an hour old.
+- `sender` and `ledger` write that job's heartbeat file with the current time. Their one argument adds a field, for example `sender ', "behindMs": 1500000'`.
+- `reset` gives a new, empty drill folder with a current tick and no sender or ledger file, and wipes the drill issue's memory. **Every drill starts with it.** The check remembers an open problem, which jobs have reported, and when it last recovered. Without a reset a drill inherits all three from the one before: a problem that is already open gets no opening comment, a file left in the folder goes stale, a file deleted reads as "stopped writing", and anything within 24 hours of the last recovery is treated as a problem that came back. Let the last check finish before a reset.
+- A **round** is: write the files the drill names (so their times are current), then `push; check`, then wait 15 minutes. Two checks less than 10 minutes apart count as one. Each `push` goes through the real GitHub budget.
 
-1. **Stale tick.** The row above is an hour old. `push; check`, wait 15 minutes, `push; check`. Expected: one comment on the drill issue after the second check, naming the tick. Then make the tick current and do two more rounds: one recovery comment.
-2. **Held hard stop.** `echo "{\"at\": $(($(date +%s)*1000)), \"behindMs\": 1500000}" > "$D/mail/sender-heartbeat.json"`, then two rounds of `push; check` (rewrite the file before each push so its time stays current). Expected: one comment naming the Telegram sender and 25 minutes. Remove `behindMs`, two rounds: one recovery comment.
-3. **Ledger alarm.** `echo "{\"at\": $(($(date +%s)*1000)), \"alarm\": \"canary words\"}" > "$D/factory/health/ledger-heartbeat.json"`, two rounds. Expected: one comment naming the ledger job. The words "canary words" must not appear in the variable, the issue or the run log.
-4. **Pusher stopped for 100 minutes.** `push` once at a time T and then do not push. `check` at T+50 and T+80. Expected: one comment at T+80, "no heartbeat from the Mac for 80 minutes". `push` at T+100, `check` at T+105 and T+120. Expected: one recovery comment.
-5. **Flapping.** Alternate a round with an old tick and a round with a current tick, six times. Expected: no comment at all, and the issue text reads "watching" after each bad round.
+1. **Stale tick.** `reset`. Two rounds of `tick 60; push; check`. Expected: one comment on the drill issue after the second check, naming the tick. Then two rounds of `tick 0; push; check`: one recovery comment.
+2. **Held hard stop.** `reset`. Two rounds of `tick 0; sender ', "behindMs": 1500000'; push; check`. Expected: one comment naming the Telegram sender and 25 minutes. Then two rounds of `tick 0; sender; push; check` (the file stays, with a current time and no `behindMs`): one recovery comment.
+3. **Ledger alarm.** `reset`. Two rounds of `tick 0; ledger ', "alarm": "canary words"'; push; check`. Expected: one comment naming the ledger job. The words "canary words" must not appear in the variable, the issue or the run log. Then two rounds of `tick 0; ledger; push; check` (the file stays, current and without the alarm): one recovery comment.
+4. **Pusher stopped for 100 minutes.** `reset`. `push` once at a time T and then do not push. `check` at T+50 and T+80. Expected: one comment at T+80, "no heartbeat from the Mac for 80 minutes". At T+100 `tick 0; push`, then `check` at T+105 and T+120. Expected: one recovery comment.
+5. **Flapping.** `reset`. Six rounds, alternating `tick 60; push; check` and `tick 0; push; check`. Expected: no comment at all, and the issue text reads "watching" after each bad round.
+6. **A worse problem behind an open one.** `reset`. Two rounds of `tick 0; ledger ', "alarm": "canary words"'; push; check`: one comment naming the ledger job, as in drill 3. Then do not push. `check` 50 and 80 minutes after the last push. Expected: a second comment after the second of those checks, "Another problem", naming "no heartbeat from the Mac for 80 minutes". Then two rounds of `tick 0; ledger; push; check`: one recovery comment.
+7. **A problem that comes back.** `reset`. Drill 1 in full, without another reset: one comment and one recovery. Then two rounds of `tick 60; push; check`. Expected: one comment, "Problem, back within 24 hours of a recovery". Then two rounds of `tick 0; push; check`. Expected: no recovery comment, and the issue text reads "12 clean checks in a row; 2 so far". Finish with `reset`.
 
-Attach each result (the comment links and the run links) to the "off-machine-heartbeat-drills" proof.
+Drills 1 to 4 are the ones the plan asks for. Attach each result (the comment links and the run links) to the "off-machine-heartbeat-drills" proof.
 
 ## Cost
 
@@ -114,6 +131,7 @@ Attach each result (the comment links and the run links) to the "off-machine-hea
 
 - If GitHub is down, or its scheduler is late or switched off, nothing fires. GitHub switches scheduled workflows off in a public repository after 60 days without activity in the repository.
 - Deleting the `FACTORY_HEARTBEAT_ISSUE` variable turns the check off silently. Only someone with write access to the repository can do that.
+- Inside one open problem each thing is named once. If the Mac's heartbeat was already named and the Mac then stops for good, or a problem that came back is being held open while it flips, nothing more is said until the daily reminder at 09:00. The owner has been told the problem is open and has not been told it recovered.
 - The notice says that a job reports an alarm, not why. The reason is in that job's heartbeat file on the Mac.
 - The loop contract does not name the field in which the sender reports the age of its oldest unsent hard stop. This check reads the shared "how far behind" field (`behindMs`). If the sender uses another field, the held-hard-stop rule needs a one-line contract amendment and a matching change here. A gate error still arrives as the sender's alarm reason.
 - The Mac does not check that the GitHub side is alive. The standing issue's "Last check" line shows it to a person who looks.

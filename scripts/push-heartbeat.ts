@@ -8,7 +8,8 @@
 //   bun scripts/push-heartbeat.ts check
 //     Runs on a GitHub runner every 30 minutes (.github/workflows/dead-man.yml).
 //     Reads that variable, keeps one standing issue up to date and adds one
-//     comment when a problem opens and one when it recovers.
+//     comment when a problem opens, one if something else goes wrong while it
+//     is open, and one when it recovers.
 //
 // Both halves share the value format below, which is why they share a file.
 // Static imports are Node built-ins only, so `check` runs on a bare runner
@@ -24,12 +25,22 @@ const MINUTE = 60_000;
 const ZONE = "America/Toronto";
 
 // ------------------------------------------------------------------ value
-/** The real variable. Any other name is a drill and can never notify anyone. */
+/** The real variable. */
 export const HEARTBEAT_VARIABLE = "FACTORY_HEARTBEAT";
-const VARIABLE_NAME = /^FACTORY_HEARTBEAT(?:_[A-Z0-9]+)*$/;
+/** The drill's variable. A check of it can never notify anyone. */
+export const DRILL_VARIABLE = `${HEARTBEAT_VARIABLE}_DRILL`;
+/**
+ * Only these two names are ever read or written. The check's own settings
+ * (FACTORY_HEARTBEAT_ISSUE, FACTORY_HEARTBEAT_OWNER) share the prefix, and a
+ * heartbeat written over one of them would switch the watch off.
+ */
+const isHeartbeatVariable = (name: string) => name === HEARTBEAT_VARIABLE || name === DRILL_VARIABLE;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+$/;
 export const WATCHED = ["tick", "health", "ledger", "sender"] as const;
 export type Watched = (typeof WATCHED)[number];
+/** What a problem is about: the Mac's own push, the pushed value, or one watched job. */
+export const SUBJECTS = ["mac", "value", ...WATCHED] as const;
+export type Subject = (typeof SUBJECTS)[number];
 const NAMES: Record<Watched, string> = { tick: "the tick", health: "the health job", ledger: "the ledger job", sender: "the Telegram sender" };
 /**
  * What one watched job's heartbeat says, from the loop contract's shape: its
@@ -109,7 +120,7 @@ export type PushResult = { pushed: true; value: HeartbeatValue } | { pushed: fal
  */
 export async function pushHeartbeat(o: PushOptions): Promise<PushResult> {
   if (!REPOSITORY.test(o.repo)) throw Error("push needs --repo <owner/name>");
-  if (!VARIABLE_NAME.test(o.variable)) throw Error(`push needs --variable ${HEARTBEAT_VARIABLE}, or ${HEARTBEAT_VARIABLE}_<NAME> for a drill`);
+  if (!isHeartbeatVariable(o.variable)) throw Error(`push needs --variable ${HEARTBEAT_VARIABLE}, or ${DRILL_VARIABLE} for a drill`);
   const { root } = await import("../launcher/config");
   const { mailPath } = await import("../launcher/alerts");
   const { command } = await import("../adapters/github");
@@ -147,6 +158,14 @@ export const HARD_STOP_UNSENT_MS = 15 * MINUTE;
 /** A problem opens after this many bad checks in a row, and recovers after as many clean ones. */
 export const CHECKS_TO_OPEN = 2;
 export const CHECKS_TO_RECOVER = 2;
+/**
+ * A problem that opens this soon after a recovery has come back. It is said
+ * once, and then needs this many clean checks in a row before it is called
+ * recovered again, so a fault that comes and goes cannot send a stream of
+ * openings and recoveries.
+ */
+export const RETURN_WINDOW_MS = 24 * 60 * MINUTE;
+export const CHECKS_TO_RECOVER_AFTER_RETURN = 12;
 /** A check this soon after the last one is the same look twice, so it is not counted. */
 export const MIN_CHECK_GAP_MS = 10 * MINUTE;
 const CLOCK_SLACK_MS = 10 * MINUTE;
@@ -174,8 +193,11 @@ export function parseHeartbeatValue(raw: string): HeartbeatValue | null {
   return { version: 1, at: v.at, jobs };
 }
 
-/** One look: the problems in plain words, one row per watched job, and which jobs have ever reported. */
-export type Reading = { problems: string[]; rows: [string, string][]; seen: Watched[]; pushedAt: number | null };
+/**
+ * One look: the problems in plain words, what each is about (`subjects[i]` for
+ * `problems[i]`), one row per watched job, and which jobs have ever reported.
+ */
+export type Reading = { problems: string[]; subjects: Subject[]; rows: [string, string][]; seen: Watched[]; pushedAt: number | null };
 
 /**
  * One look at the value. `seenBefore` is every job that has reported at least
@@ -184,16 +206,18 @@ export type Reading = { problems: string[]; rows: [string, string][]; seen: Watc
  */
 export function judgeHeartbeat(raw: string | undefined, now: number, seenBefore: readonly Watched[] = []): Reading {
   const blocked = "(Mac down, or its GitHub access blocked)";
-  const only = (text: string, pushedAt: number | null = null): Reading => ({ problems: [text], rows: [], seen: [...seenBefore], pushedAt });
-  if (!raw?.trim()) return only(`no heartbeat from the Mac yet ${blocked}`);
+  const only = (subject: Subject, text: string, pushedAt: number | null = null): Reading => ({ problems: [text], subjects: [subject], rows: [], seen: [...seenBefore], pushedAt });
+  if (!raw?.trim()) return only("mac", `no heartbeat from the Mac yet ${blocked}`);
   const value = parseHeartbeatValue(raw);
-  if (!value) return only("the pushed heartbeat cannot be read");
-  if (value.at > now + CLOCK_SLACK_MS) return only("the Mac's heartbeat is dated in the future", value.at);
+  if (!value) return only("value", "the pushed heartbeat cannot be read");
+  if (value.at > now + CLOCK_SLACK_MS) return only("value", "the Mac's heartbeat is dated in the future", value.at);
   // An old value says nothing about the jobs, so only the Mac itself is named.
-  if (now - value.at > STALE_MS) return only(`no heartbeat from the Mac for ${minutes(now - value.at)} minutes ${blocked}`, value.at);
+  if (now - value.at > STALE_MS) return only("mac", `no heartbeat from the Mac for ${minutes(now - value.at)} minutes ${blocked}`, value.at);
   const problems: string[] = [],
+    subjects: Subject[] = [],
     rows: [string, string][] = [],
     seen: Watched[] = [];
+  const problem = (job: Watched, text: string) => void (problems.push(text), subjects.push(job));
   for (const job of WATCHED) {
     const beat = value.jobs[job],
       name = NAMES[job];
@@ -204,13 +228,13 @@ export function judgeHeartbeat(raw: string | undefined, now: number, seenBefore:
         continue;
       }
       seen.push(job);
-      problems.push(`${name} has stopped writing its heartbeat`);
+      problem(job, `${name} has stopped writing its heartbeat`);
       rows.push([name, "heartbeat missing (it reported before)"]);
       continue;
     }
     seen.push(job);
     if (beat.state === "unreadable") {
-      problems.push(`${name}'s heartbeat cannot be read`);
+      problem(job, `${name}'s heartbeat cannot be read`);
       rows.push([name, "heartbeat cannot be read"]);
       continue;
     }
@@ -221,14 +245,34 @@ export function judgeHeartbeat(raw: string | undefined, now: number, seenBefore:
     else if (age > STALE_MS) found.push(last);
     if (beat.alarm) found.push("reports an alarm (its reason is in its heartbeat file on the Mac)");
     if (job === "sender" && (beat.behindMs ?? 0) > HARD_STOP_UNSENT_MS) found.push(`has held a hard stop unsent for ${minutes(beat.behindMs!)} minutes`);
-    problems.push(...found.map((text) => `${name} ${text}`));
+    for (const text of found) problem(job, `${name} ${text}`);
     rows.push([name, found.length ? found.join("; ") : last]);
   }
-  return { problems, rows, seen, pushedAt: value.at };
+  return { problems, subjects, rows, seen, pushedAt: value.at };
 }
 
 // ----------------------------------------------------------- episodes
-export type Notice = { kind: "open" | "remind" | "recover"; problems: string[]; since: number };
+/**
+ * "open": a problem opened. "reopen": it opened within 24 hours of a recovery.
+ * "worse": something not yet named joined an open problem. "remind": the daily
+ * repeat. "recover": it is over (`clean` is how many clean checks that took).
+ */
+export type Notice = { kind: "open" | "reopen" | "worse" | "remind" | "recover"; problems: string[]; since: number; clean?: number };
+const NOTICE_KINDS: readonly string[] = ["open", "reopen", "worse", "remind", "recover"];
+/** One open problem, from its opening notice to its recovery. */
+export type Episode = {
+  since: number;
+  /** The opening or the last daily reminder; the next reminder is counted from it. */
+  noticeAt: number;
+  /** The problems at the last bad check. */
+  problems: string[];
+  /** What a notice in this episode has already named. Each is named at most once per episode. */
+  told: Subject[];
+  /** What was first seen bad at the last check and is not named yet. It is named if the next check is bad for it too. */
+  rising: Subject[];
+  /** It opened within 24 hours of a recovery, so it needs more clean checks to recover. */
+  returned: boolean;
+};
 /** Kept between checks in the standing issue's own text. */
 export type CheckState = {
   version: 1;
@@ -239,41 +283,58 @@ export type CheckState = {
   bad: number;
   /** Clean checks in a row while a problem is open. */
   good: number;
-  open: { since: number; noticeAt: number; problems: string[] } | null;
+  open: Episode | null;
+  /** The last recovery; 0 when there has been none. */
+  recoveredAt: number;
   seen: Watched[];
   /** A notice decided but not yet confirmed delivered. A later run sends it first. */
   pending: Notice | null;
 };
-export const initialCheckState = (variable: string): CheckState => ({ version: 1, variable, checkedAt: 0, bad: 0, good: 0, open: null, seen: [], pending: null });
+export const initialCheckState = (variable: string): CheckState => ({ version: 1, variable, checkedAt: 0, bad: 0, good: 0, open: null, recoveredAt: 0, seen: [], pending: null });
 
 const zoned = (at: number, options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, hourCycle: "h23", ...options }).format(at);
 const day = (at: number) => zoned(at, { year: "numeric", month: "2-digit", day: "2-digit" });
 const clock = (at: number) => `${day(at)} ${zoned(at, { hour: "2-digit", minute: "2-digit" })}`;
 /** An open problem is said again once a day, at the first check from 09:00 Toronto on a later day. */
 const reminderDue = (noticeAt: number, now: number) => day(now) > day(noticeAt) && Number(zoned(now, { hour: "2-digit" })) >= 9;
+/** Each subject once, in the fixed order. */
+const subjectsIn = (found: unknown): Subject[] => SUBJECTS.filter((subject) => Array.isArray(found) && found.includes(subject));
+const cleanChecksNeeded = (episode: Episode) => (episode.returned ? CHECKS_TO_RECOVER_AFTER_RETURN : CHECKS_TO_RECOVER);
 
 /** Advances the state by one check. At most one notice comes out of it. */
 export function stepCheck(prior: CheckState, reading: Reading, now: number): CheckState {
   if (now >= prior.checkedAt && now - prior.checkedAt < MIN_CHECK_GAP_MS) return { ...prior, pending: null };
   const texts = reading.problems,
+    about = subjectsIn(reading.subjects),
     isBad = texts.length > 0;
   const next: CheckState = { ...prior, checkedAt: now, seen: reading.seen, bad: isBad ? prior.bad + 1 : 0, good: !isBad && prior.open ? prior.good + 1 : 0, pending: null };
   if (!prior.open) {
     if (next.bad >= CHECKS_TO_OPEN) {
-      next.open = { since: now, noticeAt: now, problems: texts };
-      next.pending = { kind: "open", problems: texts, since: now };
+      const returned = prior.recoveredAt > 0 && now - prior.recoveredAt < RETURN_WINDOW_MS;
+      next.open = { since: now, noticeAt: now, problems: texts, told: about, rising: [], returned };
+      next.pending = { kind: returned ? "reopen" : "open", problems: texts, since: now };
     }
   } else if (isBad) {
-    next.open = { ...prior.open, problems: texts };
+    // A smaller alarm that is already open must not hide a dead Mac. Anything
+    // not yet named in this episode is named once, after two bad checks in a
+    // row for it, exactly as a problem opens.
+    const { told, rising, since } = prior.open,
+      unnamed = about.filter((subject) => !told.includes(subject)),
+      confirmed = unnamed.filter((subject) => rising.includes(subject));
     if (reminderDue(prior.open.noticeAt, now)) {
-      next.open.noticeAt = now;
-      next.pending = { kind: "remind", problems: texts, since: prior.open.since };
+      // The reminder lists everything current, so all of it has now been named.
+      next.open = { ...prior.open, problems: texts, noticeAt: now, told: subjectsIn([...told, ...about]), rising: [] };
+      next.pending = { kind: "remind", problems: texts, since };
+    } else {
+      next.open = { ...prior.open, problems: texts, told: subjectsIn([...told, ...confirmed]), rising: unnamed.filter((subject) => !confirmed.includes(subject)) };
+      if (confirmed.length) next.pending = { kind: "worse", problems: texts.filter((_, i) => confirmed.includes(reading.subjects[i]!)), since };
     }
-  } else if (next.good >= CHECKS_TO_RECOVER) {
+  } else if (next.good >= cleanChecksNeeded(prior.open)) {
     next.open = null;
     next.good = 0;
-    next.pending = { kind: "recover", problems: prior.open.problems, since: prior.open.since };
-  }
+    next.recoveredAt = now;
+    next.pending = { kind: "recover", problems: prior.open.problems, since: prior.open.since, clean: cleanChecksNeeded(prior.open) };
+  } else next.open = { ...prior.open, rising: [] };
   return next;
 }
 
@@ -290,9 +351,11 @@ export function readCheckState(body: string): CheckState | null | "no-marker" {
   try {
     const s = JSON.parse(block[1] ?? "null") as CheckState | null;
     const openOk = s?.open === null || (!!s?.open && isCount(s.open.since) && isCount(s.open.noticeAt) && isTexts(s.open.problems));
-    const pendingOk = s?.pending === null || (!!s?.pending && ["open", "remind", "recover"].includes(s.pending.kind) && isCount(s.pending.since) && isTexts(s.pending.problems));
+    const pendingOk = s?.pending === null || (!!s?.pending && NOTICE_KINDS.includes(s.pending.kind) && isCount(s.pending.since) && isTexts(s.pending.problems) && (s.pending.clean === undefined || isCount(s.pending.clean)));
     if (s?.version !== 1 || typeof s.variable !== "string" || !isCount(s.checkedAt) || !isCount(s.bad) || !isCount(s.good) || !openOk || !pendingOk || !isTexts(s.seen)) return null;
-    return { ...s, seen: WATCHED.filter((job) => s.seen.includes(job)) };
+    // An episode's memory of what it has named is rebuilt from known words only; anything else reads as "not named yet".
+    const open = s.open && { ...s.open, told: subjectsIn(s.open.told), rising: subjectsIn(s.open.rising), returned: s.open.returned === true };
+    return { ...s, open, recoveredAt: isCount(s.recoveredAt) ? s.recoveredAt : 0, seen: WATCHED.filter((job) => s.seen.includes(job)) };
   } catch {
     return null;
   }
@@ -302,7 +365,13 @@ const list = (texts: string[]) => texts.map((t) => `- ${t}`).join("\n");
 
 export function renderIssue(state: CheckState, reading: Reading, now: number): string {
   const status = state.open
-    ? `**Status: PROBLEM since ${clock(state.open.since)}.**${state.good ? " One clean check so far; it counts as recovered if the next check is clean too." : ""}`
+    ? `**Status: PROBLEM since ${clock(state.open.since)}.**${
+        state.open.returned
+          ? ` It came back within 24 hours of a recovery, so it counts as recovered after ${CHECKS_TO_RECOVER_AFTER_RETURN} clean checks in a row; ${state.good} so far.`
+          : state.good
+            ? " One clean check so far; it counts as recovered if the next check is clean too."
+            : ""
+      }`
     : state.bad
       ? "**Status: watching.** One bad check; a notice goes out if the next check is bad too."
       : "**Status: OK.**";
@@ -314,21 +383,36 @@ export function renderIssue(state: CheckState, reading: Reading, now: number): s
 
 Last check: ${clock(now)} (${ZONE}). Variable \`${state.variable}\`. ${pushed}${table}${problems}
 
-This issue is the standing record of the off-machine heartbeat check (\`docs/dead-man.md\`). The check rewrites this text every time it runs, and comments once when a problem opens and once when it recovers. Times are Toronto time. Do not edit the line below.
+This issue is the standing record of the off-machine heartbeat check (\`docs/dead-man.md\`). The check rewrites this text every time it runs, and comments once when a problem opens, once if something else goes wrong while it is open, and once when it recovers. Times are Toronto time. Do not edit the line below.
 
 <!-- ${MARKER} ${JSON.stringify(state).replaceAll(">", "\\u003e")} -->
 `;
 }
 
 export function noticeComment(notice: Notice, owner: string, now: number): string {
-  if (notice.kind === "recover") return `**Recovered.** The heartbeat was clean on ${CHECKS_TO_RECOVER} checks in a row. The problem was open for about ${minutes(now - notice.since)} minutes (since ${clock(notice.since)}).\n\n${owner}`;
-  const lead = notice.kind === "open" ? `**Problem.** The off-machine check saw this on ${CHECKS_TO_OPEN} checks in a row:` : `**Still a problem** (since ${clock(notice.since)}):`;
-  return `${lead}\n\n${list(notice.problems)}\n\n${owner}\n\nOne more comment follows when it recovers.`;
+  if (notice.kind === "recover")
+    return `**Recovered.** The heartbeat was clean on ${notice.clean ?? CHECKS_TO_RECOVER} checks in a row. The problem was open for about ${minutes(now - notice.since)} minutes (since ${clock(notice.since)}).\n\n${owner}`;
+  const twice = `The off-machine check saw this on ${CHECKS_TO_OPEN} checks in a row:`;
+  const lead = {
+    open: `**Problem.** ${twice}`,
+    reopen: `**Problem, back within 24 hours of a recovery.** ${twice}`,
+    worse: `**Another problem**, on top of the one open since ${clock(notice.since)}. ${twice}`,
+    remind: `**Still a problem** (since ${clock(notice.since)}):`,
+  }[notice.kind];
+  const after = notice.kind === "reopen" ? `Because it came back, it counts as recovered only after ${CHECKS_TO_RECOVER_AFTER_RETURN} clean checks in a row, not ${CHECKS_TO_RECOVER}. One more comment follows then.` : "One more comment follows when it recovers.";
+  return `${lead}\n\n${list(notice.problems)}\n\n${owner}\n\n${after}`;
 }
 
-/** The one plain line for Telegram. */
+/** The one plain line for Telegram. A recovery is never sent there. */
 export function telegramLine(notice: Notice): string {
-  return `${notice.kind === "open" ? "The factory needs a look" : `The factory still needs a look, since ${clock(notice.since)}`}: ${notice.problems.join("; ")}. This comes from GitHub, not from the Mac.`;
+  const lead = {
+    open: "The factory needs a look",
+    reopen: "The factory needs a look again",
+    worse: `The factory has another problem, on top of the one open since ${clock(notice.since)}`,
+    remind: `The factory still needs a look, since ${clock(notice.since)}`,
+    recover: "The factory's heartbeat has recovered",
+  }[notice.kind];
+  return `${lead}: ${notice.problems.join("; ")}. This comes from GitHub, not from the Mac.`;
 }
 
 // ------------------------------------------------------------ the check
@@ -353,7 +437,7 @@ export type CheckIo = {
 };
 
 export async function runCheck(input: CheckInput, io: CheckIo): Promise<{ state: CheckState; reading: Reading; sent: Notice[] }> {
-  if (!VARIABLE_NAME.test(input.variable)) throw Error(`refused: the variable must be ${HEARTBEAT_VARIABLE} or ${HEARTBEAT_VARIABLE}_<NAME>`);
+  if (!isHeartbeatVariable(input.variable)) throw Error(`refused: the variable must be ${HEARTBEAT_VARIABLE} or ${DRILL_VARIABLE}`);
   // A drill can never write to the real issue, so it can neither raise nor clear a real problem.
   const real = input.issue === input.standingIssue;
   if (real && input.variable !== HEARTBEAT_VARIABLE) throw Error("refused: the standing issue only takes the real variable; a drill needs its own issue");
@@ -365,7 +449,7 @@ export async function runCheck(input: CheckInput, io: CheckIo): Promise<{ state:
   const owner = input.owner && /^[A-Za-z0-9-]{1,39}$/.test(input.owner) ? input.owner : null,
     sent: Notice[] = [];
   const deliver = async (notice: Notice) => {
-    // Telegram carries the opening and the daily reminder. With it, GitHub
+    // Telegram carries every notice except the recovery. With it, GitHub
     // mentions the owner only when Telegram could not send.
     const told = real && io.telegram && notice.kind !== "recover" ? await io.telegram(telegramLine(notice)) : false;
     const who = !real

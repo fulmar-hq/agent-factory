@@ -47,7 +47,7 @@ export function heartbeatPlist(o: { bun: string; repo: string; dir: string; envi
  */
 export function oweProofs(dir: string, now: number): string[] {
   const owed = [
-    { proofId: "off-machine-heartbeat-drills", role: "Quality", dueAt: now + 3 * DAY, what: "Run the three drills in docs/dead-man.md on the drill variable and the drill issue, outside 17:30-22:35, and attach each result." },
+    { proofId: "off-machine-heartbeat-drills", role: "Quality", dueAt: now + 3 * DAY, what: "Run the drills in docs/dead-man.md on the drill variable and the drill issue, outside 17:30-22:35, and attach each result." },
     { proofId: "off-machine-check-actions-minutes", role: "Platform", dueAt: now + 7 * DAY, what: "Measure the Actions minutes the off-machine heartbeat check used in 7 days. If the monthly projection passes a quarter of the allowance, move the check to hourly and restate the detection time in docs/dead-man.md." },
   ];
   const inbox = join(dir, LOOP_FILES.ledgerInbox);

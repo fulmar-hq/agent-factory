@@ -166,6 +166,16 @@ describe("the pusher (on the Mac)", () => {
     await expect(pushHeartbeat({ ...f, repo: "fixture-owner/fixture-repo/../x", variable: DRILL, run: gh.run })).rejects.toThrow("--repo");
     expect(gh.calls).toEqual([]);
   });
+
+  test("only the real variable and the drill variable are ever written: the check's own settings share the prefix and are refused", async () => {
+    const f = folders({ tickAt: T0 });
+    const gh = recorder();
+    // Writing heartbeat JSON over one of these would switch the watch off or silence its notices.
+    for (const setting of [`${HEARTBEAT_VARIABLE}_OWNER`, `${HEARTBEAT_VARIABLE}_ISSUE`, `${HEARTBEAT_VARIABLE}_TELEGRAM`, `${HEARTBEAT_VARIABLE}_DRILL_2`, `${HEARTBEAT_VARIABLE}_`])
+      await expect(pushHeartbeat({ ...f, repo: "fixture-owner/fixture-repo", variable: setting, run: gh.run })).rejects.toThrow("--variable");
+    expect(gh.calls).toEqual([]);
+    expect((await pushHeartbeat({ ...f, repo: "fixture-owner/fixture-repo", variable: DRILL, run: gh.run })).pushed).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------- judge
@@ -286,9 +296,101 @@ describe("episodes: one notice when a problem opens, one when it recovers", () =
     expect(pattern(repeat([true, false], 12))).toEqual([]);
     // One clean check does not end an episode, so it is one notice and no flapping recoveries.
     expect(pattern(repeat([true, true, false], 8))).toEqual(["open"]);
-    // Two clean checks end it; the next one is a new episode with its own single notice.
-    expect(pattern(repeat([true, true, false, false], 3))).toEqual(["open", "recover", "open", "recover", "open", "recover"]);
+    // Two clean checks end it. Coming back within 24 hours is said once, and after that it is one continuing problem.
+    expect(pattern(repeat([true, true, false, false], 3))).toEqual(["open", "recover", "reopen"]);
     expect(pattern(repeat([true], 30))).toEqual(["open"]);
+  });
+
+  test("a fault that comes and goes is bounded: one return is said, then it stays one open problem until 12 clean checks in a row", () => {
+    const stale = (now: number) => JSON.stringify({ version: 1, at: now - 60 * MINUTE, jobs: {} });
+    const rhythm = (bad: number, clean: number, checks: number, start = initialCheckState(DRILL), from = T0) =>
+      watch(every30(from, checks), (now) => (((now - from) / (30 * MINUTE)) % (bad + clean) < bad ? stale(now) : fresh(now)), start);
+    // The reviewer's case: down an hour, up an hour, for 24 hours. It was 12 openings and 12 recoveries.
+    const day = rhythm(2, 2, 48);
+    expect(day.kinds).toEqual(["open", "recover", "reopen"]);
+    expect(day.state.open).toMatchObject({ returned: true });
+    // The days after: the daily 09:00 reminder and nothing else.
+    expect(rhythm(2, 2, 3 * 48).kinds).toEqual(["open", "recover", "reopen", "remind", "remind"]);
+    // The worst any fault can do: go bad the moment it is declared recovered, and clean the moment it is declared open.
+    let state = initialCheckState(DRILL);
+    const opened: number[] = [];
+    for (const now of every30(T0, 4 * 48)) {
+      state = stepCheck(state, judgeHeartbeat(state.open ? fresh(now) : stale(now), now, state.seen), now);
+      if (state.pending?.kind === "open" || state.pending?.kind === "reopen") opened.push(now);
+    }
+    const within24h = opened.map((at) => opened.filter((other) => other >= at && other - at < 24 * 60 * MINUTE).length);
+    expect(Math.max(...within24h)).toBe(5);
+    expect(within24h.slice(1).every((count) => count <= 4)).toBe(true);
+    // A returned problem does recover: 11 clean checks are not enough, 12 are.
+    const back = rhythm(2, 2, 6).state;
+    expect(back.open).toMatchObject({ returned: true });
+    const clean = (count: number) => watch(every30(T0 + 6 * 30 * MINUTE, count), (now) => fresh(now), back);
+    expect(clean(11).kinds).toEqual([]);
+    expect(clean(11).state.open).not.toBeNull();
+    expect(clean(12).kinds).toEqual(["recover"]);
+    // More than 24 hours after a recovery a problem is an ordinary one again, with the ordinary two clean checks.
+    const later = rhythm(2, 2, 4, clean(12).state, T0 + 18 * 30 * MINUTE + 25 * 60 * MINUTE);
+    expect(later.kinds).toEqual(["open", "recover"]);
+  });
+
+  test("a worse problem inside an open one is said: the Mac dying behind a ledger alarm gets one more notice in the usual 75 to 105 minutes", () => {
+    // The ledger job carries an alarm all day (a rule that threw). The Mac's last push is four hours in.
+    const stop = T0 + 4 * 60 * MINUTE;
+    const until = (stop: number) => (now: number) => {
+      const last = Math.min(stop, T0 + Math.floor((now - T0) / (15 * MINUTE)) * 15 * MINUTE);
+      return JSON.stringify({ version: 1, at: last, jobs: { tick: { state: "ok", at: last }, ledger: { state: "ok", at: last, alarm: true } } });
+    };
+    const value = until(stop);
+    const delays: number[] = [];
+    for (let phase = 0; phase < 30; phase++) {
+      // Through 08:30 the next morning: the opening, one more notice for the Mac, and nothing else.
+      const run = watch(every30(T0 + phase * MINUTE, 45), value);
+      expect(run.kinds).toEqual(["open", "worse"]);
+      expect(run.notices[0]!.problems).toEqual(["the ledger job reports an alarm (its reason is in its heartbeat file on the Mac)"]);
+      expect(run.notices[1]!.problems).toHaveLength(1);
+      expect(run.notices[1]!.problems[0]).toMatch(/^no heartbeat from the Mac for \d+ minutes \(Mac down, or its GitHub access blocked\)$/);
+      expect(run.notices[1]!.since).toBe(run.notices[0]!.at);
+      delays.push((run.notices[1]!.at - stop) / MINUTE);
+    }
+    expect(Math.min(...delays)).toBeGreaterThanOrEqual(75);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(105);
+    // The daily reminder still comes at 09:00, and carries the current problem.
+    const longer = watch(every30(T0, 48), value);
+    expect(longer.kinds).toEqual(["open", "worse", "remind"]);
+    expect(new Date(longer.notices[2]!.at).toISOString()).toBe("2026-11-12T14:00:00.000Z");
+    // If the Mac is first seen gone at the 09:00 check, the reminder names it, and it is not said again as "another problem".
+    const atReminder = watch(every30(T0, 60), until(T0 + 23 * 60 * MINUTE - 50 * MINUTE));
+    expect(atReminder.kinds).toEqual(["open", "remind"]);
+    expect(atReminder.notices[1]!.problems).toEqual(["no heartbeat from the Mac for 50 minutes (Mac down, or its GitHub access blocked)"]);
+  });
+
+  test("inside an open problem each watched thing is named at most once, and only after two bad checks in a row", () => {
+    const held = { sender: { state: "ok", at: 0, behindMs: 25 * MINUTE } } as const;
+    const tickOld = { tick: { state: "ok", at: T0 - 90 * MINUTE } } as const;
+    const value = (plan: string) => (now: number) => {
+      const step = plan[(now - T0) / (30 * MINUTE)]!;
+      const sender = step === "c" ? { state: "ok", at: now - MINUTE } as const : { ...held.sender, at: now - MINUTE };
+      return fresh(now, { sender, ...(step === "t" || step === "b" ? tickOld : {}), ...(step === "l" || step === "b" ? { ledger: { state: "ok", at: now - MINUTE, alarm: true } } : {}) });
+    };
+    const run = (plan: string) => watch(every30(T0, plan.length), value(plan));
+    // "." the held hard stop alone, "t" a stale tick as well, "l" a ledger alarm as well, "b" both, "c" a clean check.
+    expect(run("....").kinds).toEqual(["open"]);
+    // A tick that is stale on every other check never has two bad checks in a row, so it adds nothing.
+    expect(run("..t.t.t.t.").kinds).toEqual(["open"]);
+    // Nor does one with a wholly clean check in between.
+    expect(run("..tctctc").kinds).toEqual(["open"]);
+    // Two in a row: one more notice, naming only the tick. Going on, or coming back later, adds nothing.
+    const tick = run("..tttt..tttt");
+    expect(tick.kinds).toEqual(["open", "worse"]);
+    expect(tick.notices[1]!.at).toBe(T0 + 3 * 30 * MINUTE);
+    expect(tick.notices[1]!.problems).toEqual([expect.stringMatching(/^the tick last succeeded \d+ minutes ago$/)]);
+    // A third thing later is said once too; two new things on the same checks share one notice.
+    expect(run("..ttttllll").kinds).toEqual(["open", "worse", "worse"]);
+    const both = run("..bbbb");
+    expect(both.kinds).toEqual(["open", "worse"]);
+    expect(both.notices[1]!.problems).toHaveLength(2);
+    // What the opening already named is never repeated as "another problem".
+    expect(watch(every30(T0, 8), value("bbbbbbbb")).kinds).toEqual(["open"]);
   });
 
   test("two checks close together are one look: a second run minutes later can neither open nor clear a problem", () => {
@@ -383,6 +485,42 @@ describe("the check (on the runner)", () => {
     expect(target.issue.comments.join("\n")).not.toContain("@");
   });
 
+  test("a dead Mac behind an alarm that was already open reaches the owner the same day: a second line and a second comment", async () => {
+    const alarm = (now: number) => fresh(now, { ledger: { state: "ok", at: now - MINUTE, alarm: true } });
+    const target = fakeIssue({ telegram: true });
+    await checks(target, standing, [alarm, alarm, alarm, alarm, stale, stale, stale, stale]);
+    expect(target.issue.telegrams).toEqual([
+      "The factory needs a look: the ledger job reports an alarm (its reason is in its heartbeat file on the Mac). This comes from GitHub, not from the Mac.",
+      "The factory has another problem, on top of the one open since 2026-11-11 10:30: no heartbeat from the Mac for 60 minutes (Mac down, or its GitHub access blocked). This comes from GitHub, not from the Mac.",
+    ]);
+    expect(target.issue.comments).toHaveLength(2);
+    expect(target.issue.comments[1]).toContain("**Another problem**, on top of the one open since 2026-11-11 10:30.");
+    expect(target.issue.comments[1]).toContain("- no heartbeat from the Mac for 60 minutes");
+    expect(target.issue.comments[1]).toContain("Owner: fixture-owner (told on Telegram).");
+    // Without Telegram the second comment mentions the owner, like the first.
+    const plain = fakeIssue();
+    await checks(plain, standing, [alarm, alarm, stale, stale]);
+    expect(plain.issue.comments).toHaveLength(2);
+    expect(plain.issue.comments[1]).toContain("Owner: @fixture-owner");
+    expect(readCheckState(plain.issue.body)).toMatchObject({ open: { told: ["mac", "ledger"], rising: [] } });
+  });
+
+  test("a problem that comes back within 24 hours says so, in the comment, the Telegram line and the issue text", async () => {
+    const target = fakeIssue({ telegram: true });
+    await checks(target, standing, [stale, stale, fresh, fresh, stale, stale, fresh, fresh]);
+    expect(target.issue.telegrams).toHaveLength(2);
+    expect(target.issue.telegrams[1]).toStartWith("The factory needs a look again: no heartbeat from the Mac for 60 minutes");
+    expect(target.issue.comments).toHaveLength(3);
+    expect(target.issue.comments[1]).toContain("clean on 2 checks in a row");
+    expect(target.issue.comments[2]).toContain("**Problem, back within 24 hours of a recovery.**");
+    expect(target.issue.comments[2]).toContain("counts as recovered only after 12 clean checks in a row");
+    expect(target.issue.body).toContain("**Status: PROBLEM since 2026-11-11 12:30.** It came back within 24 hours of a recovery, so it counts as recovered after 12 clean checks in a row; 2 so far.");
+    await checks(target, standing, Array.from({ length: 10 }, () => fresh));
+    expect(target.issue.comments).toHaveLength(4);
+    expect(target.issue.comments[3]).toContain("**Recovered.** The heartbeat was clean on 12 checks in a row.");
+    expect(target.issue.body).toContain("**Status: OK.**");
+  });
+
   test("if Telegram cannot send, the owner is mentioned on GitHub instead, so the notice is never lost", async () => {
     const target = fakeIssue({ telegram: "fails" });
     await checks(target, standing, [stale, stale]);
@@ -404,7 +542,9 @@ describe("the check (on the runner)", () => {
     await expect(runCheck({ ...standing, variable: DRILL, value: fresh(T0) }, real.io)).rejects.toThrow("only takes the real variable");
     const bound = fakeIssue();
     await runCheck({ ...drill, value: fresh(T0) }, bound.io);
-    await expect(runCheck({ ...drill, variable: `${HEARTBEAT_VARIABLE}_OTHER`, value: fresh(T0) }, bound.io)).rejects.toThrow(`follows ${DRILL}`);
+    await expect(runCheck({ ...drill, variable: HEARTBEAT_VARIABLE, value: fresh(T0) }, bound.io)).rejects.toThrow(`follows ${DRILL}`);
+    // The check's own settings share the prefix; they are never read as a heartbeat.
+    for (const setting of [`${HEARTBEAT_VARIABLE}_OWNER`, `${HEARTBEAT_VARIABLE}_ISSUE`, `${HEARTBEAT_VARIABLE}_OTHER`]) await expect(runCheck({ ...drill, variable: setting, value: fresh(T0) }, fakeIssue().io)).rejects.toThrow("refused: the variable must be");
     const ordinary = fakeIssue({ body: "A product ticket somebody cares about." });
     await expect(runCheck({ ...drill, value: stale(T0) }, ordinary.io)).rejects.toThrow("not a heartbeat issue");
     await expect(runCheck({ ...drill, variable: "OTHER_SETTING", value: stale(T0) }, ordinary.io)).rejects.toThrow("refused");
@@ -434,13 +574,150 @@ describe("the check (on the runner)", () => {
   });
 
   test("the state line survives a round trip and cannot be closed early by its own content", () => {
-    const state: CheckState = { ...initialCheckState(DRILL), checkedAt: T0, bad: 3, open: { since: T0, noticeAt: T0, problems: ["a --> b"] }, seen: ["tick"] };
+    const state: CheckState = { ...initialCheckState(DRILL), checkedAt: T0, bad: 3, recoveredAt: T0 - MINUTE, open: { since: T0, noticeAt: T0, problems: ["a --> b"], told: ["mac", "tick"], rising: ["sender"], returned: true }, seen: ["tick"] };
     const body = renderIssue(state, judgeHeartbeat(fresh(T0), T0), T0);
     expect(body.match(/-->/g)).toHaveLength(1);
     expect(readCheckState(body)).toEqual(state);
     expect(readCheckState("no marker here")).toBe("no-marker");
     expect(readCheckState(marker)).toBeNull();
     expect(readCheckState('<!-- factory-heartbeat-state {"version":1} -->')).toBeNull();
+  });
+});
+
+// ------------------------------------------------ the drills as written
+describe("the drills in docs/dead-man.md, run in the written order on one drill issue", () => {
+  const doc = readFileSync(join(repo, "docs/dead-man.md"), "utf8");
+  const drills = [...doc.matchAll(/^\d+\. \*\*(.+?)\*\* (.*)$/gm)].filter((m) => doc.indexOf(m[0]) > doc.indexOf("## Drills"));
+
+  /** The doc's shell helpers, against a fixture folder and a stand-in issue. */
+  function bench() {
+    const target = fakeIssue();
+    let f = folders({ tickAt: T0 }),
+      pushed: string | undefined;
+    const at = () => target.issue.now;
+    const file = (path: () => string) => (extra: object = {}) => writeFileSync(path(), JSON.stringify({ at: at(), ...extra }));
+    const b = {
+      target,
+      comments: () => target.issue.comments.length,
+      wait: (minutes: number) => void (target.issue.now += minutes * MINUTE),
+      tick(minutesAgo: number) {
+        const db = new Database(join(f.dir, "controller.sqlite"), { strict: true });
+        db.query("UPDATE kv SET value=? WHERE key='last-successful-heartbeat'").run(JSON.stringify({ at: at() - minutesAgo * MINUTE, status: "ok" }));
+        db.close();
+      },
+      /** A new, empty drill folder with a current tick, and a drill issue with no memory. */
+      reset() {
+        f = folders({ tickAt: at() });
+        target.issue.body = marker;
+      },
+      sender: file(() => join(f.mailDir, SENDER_HEARTBEAT_FILE)),
+      ledger: file(() => join(f.dir, LOOP_FILES.ledgerHeartbeat)),
+      push: async () => void (pushed = JSON.stringify(await collectHeartbeat(f.dir, f.mailDir, at()))),
+      check: () => runCheck({ variable: DRILL, issue: 8, standingIssue: 7, owner: "fixture-owner", value: pushed }, target.io),
+      /** One round: the files the drill names with current times, push, check, then 15 minutes. */
+      async rounds(count: number, files: (round: number) => void) {
+        for (let round = 0; round < count; round++) {
+          files(round);
+          await b.push();
+          await b.check();
+          b.wait(15);
+        }
+      },
+    };
+    return b;
+  }
+
+  test("every drill starts from a reset, so no drill inherits an open problem, a remembered job or a recent recovery", () => {
+    expect(drills.map((m) => m[1])).toEqual(["Stale tick.", "Held hard stop.", "Ledger alarm.", "Pusher stopped for 100 minutes.", "Flapping.", "A worse problem behind an open one.", "A problem that comes back."]);
+    for (const m of drills) expect(m[2]).toStartWith("`reset`.");
+    expect(doc).toContain('gh issue edit "$DRILL_ISSUE" --repo "$R" --body "<!-- factory-heartbeat-state -->"');
+  });
+
+  test("all seven give their stated comments, one after the other", async () => {
+    const b = bench(),
+      last = () => b.target.issue.comments.at(-1)!;
+    // 1. Stale tick.
+    b.reset();
+    await b.rounds(2, () => b.tick(60));
+    expect(b.comments()).toBe(1);
+    expect(last()).toContain("- the tick last succeeded 60 minutes ago");
+    await b.rounds(2, () => b.tick(0));
+    expect(b.comments()).toBe(2);
+    expect(last()).toContain("**Recovered.**");
+    // 2. Held hard stop.
+    b.reset();
+    await b.rounds(2, () => (b.tick(0), b.sender({ behindMs: 1_500_000 })));
+    expect(b.comments()).toBe(3);
+    expect(last()).toContain("**Problem.**");
+    expect(last()).toContain("- the Telegram sender has held a hard stop unsent for 25 minutes");
+    await b.rounds(2, () => (b.tick(0), b.sender()));
+    expect(b.comments()).toBe(4);
+    expect(last()).toContain("**Recovered.**");
+    // 3. Ledger alarm.
+    b.reset();
+    await b.rounds(2, () => (b.tick(0), b.ledger({ alarm: "canary words" })));
+    expect(b.comments()).toBe(5);
+    expect(last()).toContain("**Problem.**");
+    expect(last()).toContain("- the ledger job reports an alarm");
+    expect(b.target.issue.body + b.target.issue.comments.join()).not.toContain("canary");
+    await b.rounds(2, () => (b.tick(0), b.ledger()));
+    expect(b.comments()).toBe(6);
+    expect(last()).toContain("**Recovered.**");
+    // 4. Pusher stopped for 100 minutes: push at T, checks at T+50 and T+80, push at T+100, checks at T+105 and T+120.
+    b.reset();
+    await b.push();
+    b.wait(50);
+    await b.check();
+    expect(b.comments()).toBe(6);
+    b.wait(30);
+    await b.check();
+    expect(b.comments()).toBe(7);
+    expect(last()).toContain("**Problem.**");
+    expect(last()).toContain("- no heartbeat from the Mac for 80 minutes");
+    b.wait(20);
+    b.tick(0);
+    await b.push();
+    b.wait(5);
+    await b.check();
+    b.wait(15);
+    await b.check();
+    expect(b.comments()).toBe(8);
+    expect(last()).toContain("**Recovered.**");
+    // 5. Flapping: no comment at all, and "watching" after each bad round.
+    b.reset();
+    for (let round = 0; round < 6; round++) {
+      await b.rounds(1, () => b.tick(round % 2 ? 0 : 60));
+      expect(b.target.issue.body).toContain(round % 2 ? "**Status: OK.**" : "**Status: watching.**");
+    }
+    expect(b.comments()).toBe(8);
+    // 6. A worse problem behind an open one: checks 50 and 80 minutes after the last push.
+    b.reset();
+    await b.rounds(2, () => (b.tick(0), b.ledger({ alarm: "canary words" })));
+    expect(b.comments()).toBe(9);
+    b.wait(35);
+    await b.check();
+    b.wait(30);
+    await b.check();
+    expect(b.comments()).toBe(10);
+    expect(last()).toContain("**Another problem**");
+    expect(last()).toContain("- no heartbeat from the Mac for 80 minutes");
+    b.wait(15);
+    await b.rounds(2, () => (b.tick(0), b.ledger()));
+    expect(b.comments()).toBe(11);
+    expect(last()).toContain("**Recovered.**");
+    // 7. A problem that comes back: drill 1 in full, then the stale tick again.
+    b.reset();
+    await b.rounds(2, () => b.tick(60));
+    await b.rounds(2, () => b.tick(0));
+    expect(b.comments()).toBe(13);
+    await b.rounds(2, () => b.tick(60));
+    expect(b.comments()).toBe(14);
+    expect(last()).toContain("**Problem, back within 24 hours of a recovery.**");
+    await b.rounds(2, () => b.tick(0));
+    expect(b.comments()).toBe(14);
+    expect(b.target.issue.body).toContain("12 clean checks in a row; 2 so far.");
+    // Nobody was notified by any of it.
+    expect(b.target.issue.comments.join("\n")).not.toContain("@");
   });
 });
 
