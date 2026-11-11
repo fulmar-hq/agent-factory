@@ -58,7 +58,8 @@ export async function collectUsageProjection(s:Store,c:Config,dir:string,r:Relea
   try{
    const role=owner==='quality'?(await acceptanceProfile(c,dir,r.day,r.validThrough,readJSON)).role:c.owners.release;
    if(!role)throw Error('release owner configuration unavailable');
-   const projection=projectUsage(readings[role.harness],s.get<Meter[]>(historyKey(role.harness))??[],role.harness,r.at,target,c.usage_gates.admit_below);
+   const history=s.get<Meter[]>(historyKey(role.harness))??[],latest=s.get<Meter>(`release-usage-last-native:${role.harness}`);
+   const projection=projectUsage(readings[role.harness],latest?[...history,latest]:history,role.harness,r.at,target,c.usage_gates.admit_below);
    evidence[owner]=projection;
    if(!projection.underGate)r.missing.push({input:`${owner} usage projection`,reason:`At the current native burn rate, ${owner} is projected at ${projection.windows.map(w=>`${w.name}: ${(w.projectedUsed*100).toFixed(1)}%`).join(', ')} at 18:30 Eastern; every window must be below ${(c.usage_gates.admit_below*100).toFixed(0)}%. Coordinator must decide early; gates remain 0.70/0.90.`});
   }catch(error){r.missing.push({input:`${owner} usage projection`,reason:String(error)});}

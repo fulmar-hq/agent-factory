@@ -49,3 +49,8 @@ test('a sub-five-minute peak/drop is retained and restarts the comparable eviden
 test('a newer trusted native history observation cannot be hidden by an older low collection',()=>{
  const p=projectUsage(meter(now-60000,.4),[meter(now-60*60000,.4),meter(now,.65)],'codex',now,target,.7);expect(p.windows[0].used).toBe(.65);expect(p.underGate).toBe(false);
 });
+
+test('role collection includes the newest unsampled native observation during overlapping collections',async()=>{
+ const s=new Store(':memory:'),c=config();c.owners={release:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'},quality:{harness:'codex',model:'gpt-6.1-sol',effort:'medium'}};
+ try{for(const m of [meter(now-30*60000,.4),meter(now-4*60000,.4),meter(now-60000,.65)])observeReleaseUsage(s,{codex:m},m.observedAt);const r={day:'2026-11-11',at:now,validThrough:target+4*3600000,ready:true,missing:[] as {input:string;reason:string}[],evidence:{}};await collectUsageProjection(s,c,'/fictional',r,{codex:meter(now-2*60000,.4)},async()=>null);expect(r.ready).toBe(false);expect(r.missing.map(m=>m.input)).toEqual(['release usage projection','quality usage projection']);expect((r.evidence as any)['18:30 usage projection'].release.windows[0].used).toBe(.65);}finally{s.close();}
+});
