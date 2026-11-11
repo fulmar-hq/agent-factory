@@ -74,9 +74,13 @@ try {
   readiness=await collectReleaseReadiness({dir:root,config:c,store:s,brake:rehearsal?(s.get('aws-stop-latched')===true?'AWS stop latched':s.get('paused')!==false?'factory paused':null):await brake(),carrier:batch,billingRefusal,billingEvidence:admittedBilling,factorySource,readings});
   if(rehearsal&&rehearsalSlot==='14:00')await collectUsageProjection(s,c,root,readiness,readings);
   if(rehearsal){recordRehearsal(s,readiness,rehearsalSlot as '14:00'|'17:40');console.log(JSON.stringify({effects:false,slot:rehearsalSlot,readiness}));}
-  if(stage==='preflight')readiness.at=invokedAt;
+  if(stage==='preflight'||stage==='qa')readiness.at=invokedAt;
+  if(stage==='qa'){
+   s.event(`release-readiness:${readiness.day}:qa`,'release-readiness',{...readiness,stage:'qa'},'Retain the scheduled QA readiness observation and its actual refusal inputs');
+   s.set(`release-qa-report:${readiness.day}`,readiness);
+  }
   if(stage==='preflight'){
-   s.event(`release-readiness:${readiness.day}`,'release-readiness',readiness,'Retain the preflight report; correct missing inputs before the next fixed window');
+   s.event(`release-readiness:${readiness.day}`,'release-readiness',{...readiness,stage:'preflight'},'Retain the preflight report; correct missing inputs before the next fixed window');
    s.set(`release-preflight-report:${readiness.day}`,readiness);
    releasePreflightAlert(s,readiness);
   }

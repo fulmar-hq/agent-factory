@@ -1,3 +1,8 @@
+import {Database} from 'bun:sqlite';
+import {mkdtempSync,mkdirSync,writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {config} from './fixtures';
 import {test,expect} from 'bun:test';
 import {Store} from '../tracking/store';
 import {releaseIncident,reconcileReleaseIncidents} from '../launcher/release-incident';
@@ -76,3 +81,12 @@ test('retained fully missed nights count even when every job and the daily-resul
 test('a retained proven recovery is not counted as another missed night',()=>{
  const s=new Store(':memory:');try{s.set('release-incident:2026-11-09',{day:'2026-11-09',firstObservedAt:at('2026-11-09','22:30'),shipped:true,windows:[],mail:{summary:'Recovered',body:'Synthetic retained proven recovery'}});releaseIncident(s,'2026-11-10',at('2026-11-10','22:30'),id=>({id,queued:true}));expect(s.get<any>('release-incident:2026-11-10').consecutiveMisses).toBe(1);}finally{s.close();}
 });
+
+test('real scheduled QA readiness refusals retain their causes for the incident observer',async()=>{
+ const day='2026-11-11',dir=mkdtempSync(join(tmpdir(),'qa-refusal-')),bin=join(dir,'bin'),path=join(dir,'controller.sqlite');mkdirSync(bin);writeFileSync(join(dir,'config.yaml'),JSON.stringify(config()));
+ const store=new Store(path);store.set('paused',false);report(store,day,'19:00',[],'release-readiness');store.set('executor:'+day+':preflight',{state:'success'});store.close();
+ writeFileSync(join(bin,'gh'),'#!/bin/sh\nprintf "{}"\n',{mode:0o700});writeFileSync(join(bin,'aws'),'#!/bin/sh\nexit 91\n',{mode:0o700});
+ const wrapper=join(dir,'qa.ts');writeFileSync(wrapper,`Date.now=()=>${at(day,'20:00')};process.argv=[process.argv[0],'release.ts','qa'];await import(${JSON.stringify(new URL('../scripts/release.ts',import.meta.url).pathname)});`);
+ const child=Bun.spawn([process.execPath,wrapper],{env:{HOME:dir,FACTORY_PRIVATE_DIR:dir,FACTORY_MAIL_DB:join(dir,'absent-mail.sqlite'),PATH:bin+':/usr/bin:/bin'},stdout:'pipe',stderr:'pipe'});const [out,err,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);expect(code).toBe(1);expect(err).toBe('');expect(JSON.parse(out).state).toBe('refused');
+ const s=new Store(path);try{const qa=s.get<any>('release-qa-report:'+day);expect(qa.ready).toBe(false);expect(qa.missing.some((m:any)=>m.input==='fresh billing')).toBe(true);releaseIncident(s,day,at(day,'20:01'),id=>({id,queued:true}));const incident=s.get<any>('release-incident:'+day);expect(incident.windows.find((w:any)=>w.name==='QA').state).toBe('refused');expect(incident.gaps.find((g:any)=>g.input==='fresh billing').knownBy).toBe(at(day,'20:00'));expect(s.get('executor:'+day+':qa')).toBeNull();expect(s.db.query('SELECT count(*) AS n FROM debits').get()).toEqual({n:0});}finally{s.close();}
+},15000);

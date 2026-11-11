@@ -8,10 +8,10 @@ type Gap={input:string;reason:string;knownBy:number;basis:'recorded observation'
 const previousDay=(day:string)=>new Date(Date.parse(day+'T12:00:00Z')-86400000).toISOString().slice(0,10);
 const clock=(at:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',hour:'numeric',minute:'2-digit',hourCycle:'h23'}).format(at);
 function reports(s:Store,day:string){
- const rows=s.db.query("SELECT data FROM events WHERE kind IN ('release-rehearsal','release-readiness') AND json_extract(data,'$.day')=? ORDER BY at LIMIT 1001").all(day) as {data:string}[];
+ const rows=s.db.query("SELECT kind,data FROM events WHERE kind IN ('release-rehearsal','release-readiness') AND json_extract(data,'$.day')=? ORDER BY at LIMIT 1001").all(day) as {kind:string;data:string}[];
  if(rows.length>1000)throw Error('release observation inventory exceeds incident bound');
- const result=rows.map(r=>JSON.parse(r.data) as ReleaseReadiness),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`);
- if(preflight)result.push(preflight);return result.sort((a,b)=>a.at-b.at);
+ const result=rows.map(r=>{const data=JSON.parse(r.data);return {...data,stage:data.stage??(r.kind==='release-readiness'?'preflight':undefined)} as ReleaseReadiness&{stage?:string};}),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`),qa=s.get<ReleaseReadiness>(`release-qa-report:${day}`);
+ if(preflight)result.push({...preflight,stage:'preflight'});if(qa)result.push({...qa,stage:'qa'});return result.sort((a,b)=>a.at-b.at);
 }
 type Refusal={kind:string;at:number;data:string};
 function scheduledCli(day:string,at:number,data:{stage?:string;invokedAt?:number}){
@@ -25,7 +25,7 @@ function releaseRefusals(s:Store,day:string){
  if(rows.length>1000)throw Error('release refusal inventory exceeds incident bound');
  return rows.filter(r=>r.kind!=='release-executor-refusal'||scheduledCli(day,r.at,JSON.parse(r.data)));
 }
-function knownNight(s:Store,day:string){return !!(s.get(`release-incident:${day}`)||s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
+function knownNight(s:Store,day:string){return !!(s.get(`release-incident:${day}`)||s.get(`release-window-result:${day}`)||s.get(`executor:${day}:night`)||s.get(`release-preflight-report:${day}`)||s.get(`release-qa-report:${day}`)||s.get(`release-rehearsal:${day}:14:00`)||s.get(`release-rehearsal:${day}:17:40`)||releaseRefusals(s,day).length);}
 function missedNight(s:Store,day:string){
  const result=s.get<{shipped:boolean}>(`release-window-result:${day}`);
  if(result?.shipped===true||s.get<{shipped?:boolean}>(`release-incident:${day}`)?.shipped===true)return false;
@@ -36,18 +36,19 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
  const windowBoundary=(time:number)=>{const stamp=Date.parse(day+'T12:00:00Z');return stamp+(time+1-toronto(stamp).minute)*60000;};
  if(day>current.day||minute<1140)return {queued:false};
  const retainedWindows=s.get<{windows?:Window[]}>(`release-incident:${day}`)?.windows??[];
- const observed=reports(s,day),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`),windows:Window[]=[];
+ const observed=reports(s,day),windows:Window[]=[],failedReports:ReleaseReadiness[]=[];
  for(const [name,time,step] of [['preflight',1140,'preflight'],['QA',1200,'qa'],['Production',1290,'promote']] as const){
   const effect=s.get<{state:string;evidence?:{reason?:string}}>(`executor:${day}:${step}`);
   if(minute<time)continue;
-  if(name==='preflight'&&preflight?.ready===false)windows.push({name,minute:time,state:'refused',reason:preflight.missing.map(g=>g.input).join(', '),knownBy:preflight.at});
+  const failed=observed.filter(r=>r.stage===(name==='preflight'?'preflight':name==='QA'?'qa':'production')&&!r.ready&&toronto(r.at).minute===time).at(-1);
+  if(failed){failedReports.push(failed);windows.push({name,minute:time,state:'refused',reason:failed.missing.map(g=>g.input).join(', '),knownBy:failed.at});}
   else if(effect?.state==='failure'){const event=s.db.query('SELECT MIN(at) AS at FROM events WHERE id IN (?,?)').get(`executor:${day}:${step}:failure`,`executor:${day}:${step}:deadline`) as {at:number|null};windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`,knownBy:event.at??retainedWindows.find(w=>w.name===name&&w.state==='refused')?.knownBy??now});}
   else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`,knownBy:windowBoundary(time)});
  }
  const refusals=releaseRefusals(s,day);
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
- const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
+ const latest=observed.at(-1);if(!failedReports.length&&latest?.ready===false)failedReports.push(latest);
  const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else if(!r.missing.some(g=>['release configuration','preflight checks'].includes(g.input)))first=undefined;}return first;};
  const knownPause=(until:number)=>{
   const resume=s.db.query("SELECT rowid,at FROM events WHERE kind='resume' AND at<=? ORDER BY rowid DESC LIMIT 1").get(until) as {rowid:number;at:number}|null;
@@ -59,7 +60,7 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
   if(input==='factory state'&&/paused/i.test(reason)){const episode=knownPause(until);if(episode.resumeAt!==undefined&&report!==undefined&&report<=episode.resumeAt)report=undefined;return Math.min(report??until,episode.pauseAt??until);}
   return report??until;
  };
- for(const gap of failing?.missing??[]){gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failing!.at),basis:'recorded observation'});}
+ for(const failed of failedReports)for(const gap of failed.missing){if(!gaps.some(g=>g.input===gap.input))gaps.push({...gap,knownBy:knownInput(gap.input,gap.reason,failed.at),basis:'recorded observation'});}
  for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':/config/i.test(reason)?'release configuration':'release admission';if(!gaps.some(g=>g.input===input)){gaps.push({input,reason,knownBy:knownInput(input,reason,row.at),basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});
  const shipped=s.get<{shipped?:boolean}>(`release-incident:${day}`)?.shipped===true||s.get<{shipped?:boolean}>(`release-window-result:${day}`)?.shipped===true||releaseOutcome(s,day).shipped;
