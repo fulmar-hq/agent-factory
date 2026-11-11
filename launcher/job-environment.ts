@@ -30,3 +30,12 @@ export function checkInstalledEnvironments(agents:string,dir:string,which=(name:
   return {job,path:env.PATH,executables:scheduledExecutables.length};
  });
 }
+
+export function validateLoadedEnvironment(xml:string,raw:string,dir:string,job:ScheduledJob){
+ const expected=plistEnvironment(xml),blocks=[...raw.matchAll(/^\tenvironment = \{\n([\s\S]*?)^\t\}/gm)];
+ if(blocks.length!==1)throw Error('loaded environment absent or ambiguous: '+job);
+ const field=(name:string,optional=false)=>{const rows=[...blocks[0][1].matchAll(new RegExp(`^\\t\\t${name} => (.+)$`,'gm'))];if(optional&&rows.length===0)return undefined;if(rows.length!==1)throw Error('loaded '+name+' absent or ambiguous: '+job);return rows[0][1];};
+ const actual={FACTORY_PRIVATE_DIR:field('FACTORY_PRIVATE_DIR')!,PATH:field('PATH')!,TZ:field('TZ',true)};
+ if(actual.FACTORY_PRIVATE_DIR!==dir||actual.FACTORY_PRIVATE_DIR!==expected.FACTORY_PRIVATE_DIR||actual.PATH!==expected.PATH||actual.TZ!==expected.TZ)throw Error('loaded private directory, PATH or timezone differs from its plist: '+job);
+ return actual;
+}

@@ -20,7 +20,9 @@ const missing=missingExecutables(pathEnv);if(missing.length)throw Error(`release
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null],['rehearsal-early',14,0],['rehearsal-late',17,40]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
-const identity=processIdentity(process.pid);if(!identity)throw Error('installer process identity unavailable');
+// Preparation starts no job/process and keeps an exclusive filesystem claim.
+// Only effect-bearing installation requires native process-identity proof.
+const identity=install?processIdentity(process.pid):undefined;if(install&&!identity)throw Error('installer process identity unavailable');
 const lock=join(root,'release-install-active');mkdirSync(lock,{mode:0o700});writeFileSync(join(lock,'claim.json'),JSON.stringify({pid:process.pid,identity,at:Date.now(),repo,install}),{mode:0o600});
 try{
 for(const [stage,hour,minute] of jobs){

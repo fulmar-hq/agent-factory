@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {config} from './fixtures';
 import {createHash} from 'node:crypto';
-import {scheduledJobs,scheduledExecutables,executableLocations,jobEnvironment,plistEnvironment,missingExecutables,checkInstalledEnvironments} from '../launcher/job-environment';
+import {scheduledJobs,scheduledExecutables,executableLocations,jobEnvironment,plistEnvironment,missingExecutables,checkInstalledEnvironments,validateLoadedEnvironment} from '../launcher/job-environment';
 const home='/Users/fictional',bun=home+'/.bun/bin/bun',dir=home+'/.factory';
 const locations=new Set(Object.values(executableLocations).map(p=>p.replace('HOME',home).replace('BUN',dirname(bun))));
 const which=(name:string,path:string)=>{if(name.startsWith('/'))return locations.has(name)?name:null;return path.split(':').map(d=>d+'/'+name).find(p=>locations.has(p))??null;};
@@ -72,3 +72,11 @@ test('actual preparers emit resolvable scheduled plists even under a hostile inv
  const actual=checkInstalledEnvironments(privateDir,privateDir,resolve,job=>join(privateDir,`com.agent-factory.${job}.plist`));expect(actual).toHaveLength(scheduledJobs.length);
  for(const row of actual)expect(row.path).not.toBe(env.PATH);
 },20000);
+
+test('correct plist files cannot conceal stale, missing or ambiguous loaded private directory/timezone',()=>{
+ const good=jobEnvironment(home,bun,dir),xml=plist(good);
+ const loaded=(env:Record<string,string>)=>`\tenvironment = {\n${Object.entries(env).map(([k,v])=>`\t\t${k} => ${v}\n`).join('')}\t}\n`;
+ expect(validateLoadedEnvironment(xml,loaded(good),dir,'release.preflight')).toEqual(good);
+ for(const bad of [{...good,FACTORY_PRIVATE_DIR:'/stale-controller'},{...good,TZ:'UTC'},Object.fromEntries(Object.entries(good).filter(([k])=>k!=='FACTORY_PRIVATE_DIR')),Object.fromEntries(Object.entries(good).filter(([k])=>k!=='TZ'))])expect(()=>validateLoadedEnvironment(xml,loaded(bad),dir,'release.preflight')).toThrow();
+ expect(()=>validateLoadedEnvironment(xml,loaded(good).replace('\t}',`\t\tTZ => UTC\n\t}`),dir,'release.preflight')).toThrow('ambiguous');
+});
