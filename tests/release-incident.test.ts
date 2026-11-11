@@ -1,0 +1,26 @@
+import {test,expect} from 'bun:test';
+import {Store} from '../tracking/store';
+import {releaseIncident,reconcileReleaseIncidents} from '../launcher/release-incident';
+const at=(day:string,time:string)=>Date.parse(day+'T'+time+':00-05:00');
+function report(s:Store,day:string,time:string,missing:{input:string;reason:string}[],kind='release-rehearsal'){
+ const r={day,at:at(day,time),validThrough:at(day,'22:30'),ready:missing.length===0,missing,evidence:{}};
+ s.event(`report:${day}:${time}`,kind,r,'fixture',r.at);if(time==='19:00')s.set(`release-preflight-report:${day}`,r);else s.set(`release-rehearsal:${day}:${time}`,r);
+}
+test('Monday and Tuesday conditions name early knowability and a second consecutive missed night, with one mail/night',()=>{
+ const s=new Store(':memory:'),mails=new Map<string,string>(),send=(id:string,to:string,summary:string,body:string)=>{const value=JSON.stringify([to,summary,body]);expect(mails.get(id)??value).toBe(value);mails.set(id,value);return {id,queued:true};};
+ try{
+ for(const [day,gaps] of [['2026-11-09',[{input:'fresh billing',reason:'wallet billing unknown'}]],['2026-11-10',[{input:'fresh billing',reason:'aws not found under installed PATH'},{input:'release usage',reason:'70% gate'},{input:'hosted acceptance path',reason:'installed source changed'}]]] as const){
+  report(s,day,'14:00',[...gaps]);report(s,day,'19:00',[...gaps],'release-readiness');
+  const incident=releaseIncident(s,day,at(day,'19:01'),send);expect(incident.queued).toBe(true);releaseIncident(s,day,at(day,'22:30'),send);
+ }
+ expect(mails.size).toBe(2);expect([...mails.values()][0]).toContain('14:00');expect([...mails.values()][1]).toContain('2 consecutive missed nights');expect([...mails.values()][1]).toContain('release usage');
+ expect((s.get<any>('release-incident:2026-11-10')).gaps.every((g:any)=>g.knownBy===at('2026-11-10','14:00'))).toBe(true);
+ }finally{s.close();}
+});
+test('missing scheduled invocation becomes knowable after its minute; watcher restart recovers historical evidence',()=>{
+ const s=new Store(':memory:'),mails=new Set<string>(),send=(id:string)=>{mails.add(id);return {id,queued:true};};
+ try{report(s,'2026-11-11','14:00',[]);expect(releaseIncident(s,'2026-11-11',at('2026-11-11','19:00'),send).queued).toBe(false);releaseIncident(s,'2026-11-11',at('2026-11-11','19:01'),send);expect((s.get<any>('release-incident:2026-11-11')).gaps[0].knownBy).toBe(at('2026-11-11','19:01'));reconcileReleaseIncidents(s,at('2026-11-12','12:00'),send);expect(mails.size).toBe(1);expect(s.db.query('SELECT count(*) AS n FROM debits').get()).toEqual({n:0});}finally{s.close();}
+});
+test('failed alert retries the original incident payload; unrecorded earlier knowability is never invented',()=>{
+ const s=new Store(':memory:');try{report(s,'2026-11-11','19:00',[{input:'AWS sign-in',reason:'expired'}],'release-readiness');expect(()=>releaseIncident(s,'2026-11-11',at('2026-11-11','19:01'),()=>{throw Error('mail offline');})).toThrow('offline');let body='';releaseIncident(s,'2026-11-11',at('2026-11-11','21:31'),(id,to,summary,text)=>{body=text;return {id,queued:true};});expect(body).toContain('19:00');expect(body).not.toContain('14:00');}finally{s.close();}
+});

@@ -1,3 +1,4 @@
+import {reconcileReleaseIncidents} from '../launcher/release-incident';
 import {collectUsageProjection} from '../launcher/release-usage-projection';
 import {requestFreezeProof} from '../launcher/release-freeze-proof';
 import {watchReleasePause} from '../launcher/release-pause';
@@ -115,9 +116,14 @@ try {
  }
  console.error(String(error));process.exitCode=1;
 }finally{
- if(stage==='reconcile')try{
-  watchReleasePause(s,root);
-  await releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))});
- }catch(error){s.event(`release-result-failure:${toronto(Date.now()).day}`,'release-window-result-failure',{error:String(error)},'Restore existing outbox; observer retries the stable daily result');}
+ if(stage==='reconcile'){
+  const observers:[string,()=>unknown|Promise<unknown>][]=[
+   ['release-pause',()=>watchReleasePause(s,root)],
+   ['release-incident',()=>reconcileReleaseIncidents(s)],
+   ['release-window-result',()=>releaseWindowResult(s,{observeServers:()=>withReleaseAuth(root,()=>readQaServerStates({profile:'fisher-acc030',region:'ca-central-1',instance:'i-063943f2f032b2903',database:'alido-qa-db'}))})],
+  ];
+  for(const [kind,observe] of observers)try{await observe();}
+  catch(error){s.event(`${kind}-failure:${Date.now()}`,`${kind}-failure`,{error:String(error)},'Restore existing outbox or source evidence; retry stable IDs without release effects');}
+ }
  s.close();
 }
