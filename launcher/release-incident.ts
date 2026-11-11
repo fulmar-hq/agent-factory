@@ -29,13 +29,13 @@ export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAc
   else if(effect?.state==='failure')windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`});
   else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`});
  }
- const refusals=s.db.query("SELECT at,data FROM events WHERE kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') ORDER BY at LIMIT 1001").all(day) as {at:number;data:string}[];
+ const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped')) OR (kind='release-executor-refusal' AND id LIKE ?) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
  if(refusals.length>1000)throw Error('release refusal inventory exceeds incident bound');
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
  const failing=preflight?.ready===false?preflight:observed.findLast(r=>!r.ready);
  for(const gap of failing?.missing??[]){const first=observed.find(r=>r.missing.some(g=>g.input===gap.input));gaps.push({...gap,knownBy:first?.at??failing!.at,basis:'recorded observation'});}
- for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){const first=observed.find(r=>r.missing.some(g=>g.input===input));gaps.push({input,reason,knownBy:first?.at??row.at,basis:'recorded observation'});}}
+ for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){const first=observed.find(r=>r.missing.some(g=>g.input===input));gaps.push({input,reason,knownBy:first?.at??row.at,basis:'recorded observation'});}}
  if(!gaps.length)for(const w of windows){const stamp=Date.parse(day+'T12:00:00Z'),local=toronto(stamp),knownBy=stamp+(w.minute+1-local.minute)*60000;gaps.push({input:`${w.name} window`,reason:w.reason,knownBy,basis:'missed window'});}
  const shipped=releaseOutcome(s,day).shipped;
  let consecutiveMisses=shipped?0:1,prior=previousDay(day);

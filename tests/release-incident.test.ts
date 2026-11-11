@@ -24,3 +24,8 @@ test('missing scheduled invocation becomes knowable after its minute; watcher re
 test('failed alert retries the original incident payload; unrecorded earlier knowability is never invented',()=>{
  const s=new Store(':memory:');try{report(s,'2026-11-11','19:00',[{input:'AWS sign-in',reason:'expired'}],'release-readiness');expect(()=>releaseIncident(s,'2026-11-11',at('2026-11-11','19:01'),()=>{throw Error('mail offline');})).toThrow('offline');let body='';releaseIncident(s,'2026-11-11',at('2026-11-11','21:31'),(id,to,summary,text)=>{body=text;return {id,queued:true};});expect(body).toContain('19:00');expect(body).not.toContain('14:00');}finally{s.close();}
 });
+
+test('a CLI refusal is escalated immediately and an unchanged reconciliation adds no diary event',()=>{
+ const s=new Store(':memory:'),send=(id:string)=>({id,queued:true}),day='2026-11-11';
+ try{s.event('executor-cli:'+day+':qa:missing-command','release-executor-refusal',{stage:'qa',error:'aws not found'},'fixture',at(day,'20:00'));expect(releaseIncident(s,day,at(day,'20:00'),send).queued).toBe(true);const before=s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-incident'").get();releaseIncident(s,day,at(day,'20:00')+1000,send);expect(s.db.query("SELECT count(*) AS n FROM events WHERE kind='release-incident'").get()).toEqual(before);expect((s.get<any>('release-incident:'+day)).gaps[0].reason).toBe('aws not found');}finally{s.close();}
+});
