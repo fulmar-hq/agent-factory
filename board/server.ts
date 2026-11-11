@@ -1,3 +1,8 @@
+import { refreshPulls } from "./pulls";
+import { claudeReading } from "../adapters/usage";
+import { boardEvidence } from "./runtime";
+import { boardQuestions } from "../launcher/questions";
+import { boardModel } from "./model";
 import {slotLimit} from "../launcher/capacity";
 import { issueTicket } from "../adapters/github";
 import { estimate, history, score } from "../estimator/predict";
@@ -14,8 +19,31 @@ import {
 } from "../launcher/config";
 import { Engine, usageGate } from "../launcher/engine";
 import { available } from "../wallet/ledger";
-const same = (a: string, b: string) =>
-  a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+export const same = (a: string, b: string) => {
+  const left = Buffer.from(a), right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+const security = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "Referrer-Policy": "no-referrer",
+};
+const json = (x: unknown, status = 200) =>
+  new Response(JSON.stringify(x), {
+    status,
+    headers: { ...security, "Content-Type": "application/json" },
+  });
+export function authorizationResponse(req: Request, port: number, token: string): Response | undefined {
+  if (req.headers.get("host") !== `127.0.0.1:${port}`)
+    return json({ error: "loopback host required" }, 403);
+  if (req.method === "POST" && (
+    req.headers.get("origin") !== `http://127.0.0.1:${port}` ||
+    !same(req.headers.get("authorization") ?? "", `Bearer ${token}`)
+  ))
+    return json({ error: "owner authorization required" }, 403);
+}
 export async function board(dir = root, port = 4318) {
   const c = await configAt(join(dir, "config.yaml")),
     s = new Store(join(dir, "controller.sqlite")),
@@ -23,32 +51,15 @@ export async function board(dir = root, port = 4318) {
   const token = String(await Bun.file(join(dir, "owner-token")).text()).trim();
   if (token.length < 32)
     throw Error("owner token missing or too short; run scripts/prepare.ts");
-  const security = {
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy":
-      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
-    "Referrer-Policy": "no-referrer",
-  };
-  const json = (x: unknown, status = 200) =>
-    new Response(JSON.stringify(x), {
-      status,
-      headers: { ...security, "Content-Type": "application/json" },
-    });
+  let evidenceRefresh: Promise<void> | undefined;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
     async fetch(req) {
       const url = new URL(req.url),
-        host = req.headers.get("host");
-      if (host !== `127.0.0.1:${server.port}`)
-        return json({ error: "loopback host required" }, 403);
+        refusal = authorizationResponse(req, server.port!, token);
+      if (refusal) return refusal;
       if (req.method === "POST") {
-        if (
-          req.headers.get("origin") !== `http://127.0.0.1:${server.port}` ||
-          !same(req.headers.get("authorization") ?? "", `Bearer ${token}`)
-        )
-          return json({ error: "owner authorization required" }, 403);
         try {
           const body = (await req.json()) as Record<string, unknown>;
           if (
@@ -66,9 +77,9 @@ export async function board(dir = root, port = 4318) {
           ) {
             const result = s.db
               .query(
-                "UPDATE questions SET answer=? WHERE id=? AND answer IS NULL",
+                "UPDATE questions SET answer=?,resolved_at=?,resolved_by='owner answer' WHERE id=? AND answer IS NULL AND resolved_at IS NULL",
               )
-              .run(body.answer, body.id);
+              .run(body.answer, Date.now(), body.id);
             if (!result.changes)
               return json({ error: "unresolved question not found" }, 409);
             s.event(
@@ -111,6 +122,29 @@ export async function board(dir = root, port = 4318) {
         }
       }
       if (req.method !== "GET") return json({ error: "method refused" }, 405);
+      if (url.pathname === "/api/board") {
+        const readings = s.get<Awaited<ReturnType<typeof inputs>>>("readings") ?? await inputs(dir);
+        const now = Date.now();
+        if(dir === root) {
+          evidenceRefresh ??= refreshPulls(s,c,now).finally(()=>{evidenceRefresh=undefined;});
+          await evidenceRefresh;
+        }
+        // Read the same native quota metadata used by the launcher gate, never token estimates.
+        const claude = dir === root ? await claudeReading(now) : undefined;
+        if(claude && (!readings.claude || claude.observedAt>readings.claude.observedAt))readings.claude=claude;
+        return json(boardModel(e, readings, now, url.searchParams.get("lang") === "fr" ? "fr" : "en", await boardEvidence(dir,now,c.ticket_budget_default?.estimate_minutes ? c.ticket_budget_default.estimate_minutes*60 : undefined), url.searchParams.get("more") === "1"));
+      }
+      if(url.pathname === '/api/owner-work') {
+        const run=url.searchParams.get('run'), evidence=await boardEvidence(dir);
+        const owner=evidence.ownerRuns.find(x=>x.id===run);
+        if(!owner)return json({error:'Live owner run not found'},404);
+        const path=join(dir,'work',owner.id);
+        for(const name of ['brief.md','brief.txt','prompt.txt','prompt.md']) {
+          const file=Bun.file(join(path,name));
+          if(await file.exists())return new Response((await file.text()).slice(0,12000),{headers:{...security,'Content-Type':'text/plain; charset=utf-8'}});
+        }
+        return json({error:'Work brief unavailable'},404);
+      }
       if (url.pathname === "/api/state") {
         const r = s.get<Record<string, any>>("readings") ?? (await inputs(dir)),
           now = Date.now();
@@ -176,7 +210,7 @@ export async function board(dir = root, port = 4318) {
               ];
             }),
           ),
-          questions: s.rows("questions"),
+          ...boardQuestions(s),
           tickets: s.rows("tickets"),
           sessions: e.sessions().map(x=>({...x,budget:e.budget(x)})),
           releases: s.rows("releases"),
