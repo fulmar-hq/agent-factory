@@ -3,7 +3,7 @@ import {releaseAction} from './release-actions';
 import {releaseOutcome} from './release-result';
 import {toronto} from './release';
 import type {ReleaseReadiness} from './release-readiness';
-type Window={name:string;minute:number;state:'refused'|'missed';reason:string};
+type Window={name:string;minute:number;state:'refused'|'missed';reason:string;knownBy:number};
 type Gap={input:string;reason:string;knownBy:number;basis:'recorded observation'|'missed window'};
 const previousDay=(day:string)=>new Date(Date.parse(day+'T12:00:00Z')-86400000).toISOString().slice(0,10);
 const clock=(at:number)=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',hour:'numeric',minute:'2-digit',hourCycle:'h23'}).format(at);
@@ -20,23 +20,25 @@ function missedNight(s:Store,day:string){
 }
 export function releaseIncident(s:Store,day:string,now=Date.now(),send=releaseAction){
  const current=toronto(now),minute=current.day===day?current.minute:1440;
+ const windowBoundary=(time:number)=>{const stamp=Date.parse(day+'T12:00:00Z');return stamp+(time+1-toronto(stamp).minute)*60000;};
  if(day>current.day||minute<1140)return {queued:false};
  const observed=reports(s,day),preflight=s.get<ReleaseReadiness>(`release-preflight-report:${day}`),windows:Window[]=[];
  for(const [name,time,step] of [['preflight',1140,'preflight'],['QA',1200,'qa'],['Production',1290,'promote']] as const){
   const effect=s.get<{state:string;evidence?:{reason?:string}}>(`executor:${day}:${step}`);
   if(minute<time)continue;
-  if(name==='preflight'&&preflight?.ready===false)windows.push({name,minute:time,state:'refused',reason:preflight.missing.map(g=>g.input).join(', ')});
-  else if(effect?.state==='failure')windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`});
-  else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`});
+  if(name==='preflight'&&preflight?.ready===false)windows.push({name,minute:time,state:'refused',reason:preflight.missing.map(g=>g.input).join(', '),knownBy:preflight.at});
+  else if(effect?.state==='failure'){const event=s.db.query('SELECT MIN(at) AS at FROM events WHERE id IN (?,?)').get(`executor:${day}:${step}:failure`,`executor:${day}:${step}:deadline`) as {at:number|null};windows.push({name,minute:time,state:'refused',reason:effect.evidence?.reason??`${name} checks or completion failed`,knownBy:event.at??now});}
+  else if(!effect&&minute>time)windows.push({name,minute:time,state:'missed',reason:`scheduled ${name} did not start`,knownBy:windowBoundary(time)});
  }
  const refusals=s.db.query("SELECT at,data FROM events WHERE (kind='release-executor' AND json_extract(data,'$.day')=? AND (json_extract(data,'$.kind') LIKE 'refused:%' OR json_extract(data,'$.kind') LIKE '%:skipped') AND json_extract(data,'$.kind') NOT LIKE '%outside window%') OR (kind='release-executor-refusal' AND id LIKE ? AND json_extract(data,'$.stage') IN ('preflight','qa','production')) ORDER BY at LIMIT 1001").all(day,`executor-cli:${day}:%`) as {at:number;data:string}[];
  if(refusals.length>1000)throw Error('release refusal inventory exceeds incident bound');
  if(!windows.length&&!refusals.length)return {queued:false};
  const gaps:Gap[]=[];
- const failing=preflight?.ready===false?preflight:observed.findLast(r=>!r.ready);
- for(const gap of failing?.missing??[]){const first=observed.find(r=>r.missing.some(g=>g.input===gap.input));gaps.push({...gap,knownBy:first?.at??failing!.at,basis:'recorded observation'});}
- for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){const first=observed.find(r=>r.missing.some(g=>g.input===input));gaps.push({input,reason,knownBy:first?.at??row.at,basis:'recorded observation'});}}
- if(!gaps.length)for(const w of windows){const stamp=Date.parse(day+'T12:00:00Z'),local=toronto(stamp),knownBy=stamp+(w.minute+1-local.minute)*60000;gaps.push({input:`${w.name} window`,reason:w.reason,knownBy,basis:'missed window'});}
+ const latest=observed.at(-1),failing=preflight?.ready===false?preflight:latest?.ready===false?latest:undefined;
+ const firstCurrentGap=(input:string,until:number)=>{let first:number|undefined;for(const r of observed.filter(r=>r.at<=until)){if(r.missing.some(g=>g.input===input))first??=r.at;else first=undefined;}return first;};
+ for(const gap of failing?.missing??[]){const first=firstCurrentGap(gap.input,failing!.at);gaps.push({...gap,knownBy:first??failing!.at,basis:'recorded observation'});}
+ for(const row of refusals){const event=JSON.parse(row.data),reason=String(event.data?.reason??event.error??event.kind),input=/paused/.test(reason)?'factory state':/billing|wallet/.test(reason)?'fresh billing':'release admission';if(!gaps.some(g=>g.input===input)){const first=firstCurrentGap(input,row.at);gaps.push({input,reason,knownBy:first??row.at,basis:'recorded observation'});}}
+ if(!gaps.length)for(const w of windows)gaps.push({input:`${w.name} window`,reason:w.reason,knownBy:w.knownBy,basis:w.state==='missed'?'missed window':'recorded observation'});
  const shipped=releaseOutcome(s,day).shipped;
  let consecutiveMisses=shipped?0:1,prior=previousDay(day);
  while(!shipped&&consecutiveMisses<30&&missedNight(s,prior)){consecutiveMisses++;prior=previousDay(prior);}

@@ -34,3 +34,8 @@ test('a rehearsal error or refused off-schedule attempt is not a missed release 
  const s=new Store(':memory:'),day='2026-11-11',send=()=>{throw Error('must not mail');};
  try{s.event('executor-cli:'+day+':rehearsal:failure','release-executor-refusal',{stage:'rehearsal',error:'missing input'},'fixture',at(day,'14:00'));s.event('off-hour','release-executor',{day,kind:'refused:qa outside window',data:{reason:'qa outside window'}},'fixture',at(day,'14:00'));s.set('executor:'+day+':preflight',{state:'running'});expect(releaseIncident(s,day,at(day,'19:01'),send).queued).toBe(false);}finally{s.close();}
 });
+
+test('a resolved rehearsal gap is not blamed for a later QA failure, whose real observation time is retained',()=>{
+ const s=new Store(':memory:'),day='2026-11-11',send=(id:string)=>({id,queued:true});
+ try{report(s,day,'14:00',[{input:'fresh billing',reason:'temporarily stale'}]);report(s,day,'17:40',[]);report(s,day,'19:00',[],'release-readiness');s.set('executor:'+day+':preflight',{state:'success'});s.set('executor:'+day+':qa',{state:'failure',context:{day,revision:'a'.repeat(40),tree:'b'.repeat(40),deadline:at(day,'21:20')},evidence:{reason:'QA workflow failed'}});s.event('executor:'+day+':qa:failure','release-executor',{day,kind:'qa:failure'},'fixture',at(day,'20:20'));releaseIncident(s,day,at(day,'20:21'),send);const incident=s.get<any>('release-incident:'+day);expect(incident.gaps).toEqual([{input:'QA window',reason:'QA workflow failed',knownBy:at(day,'20:20'),basis:'recorded observation'}]);expect(incident.body).not.toContain('billing');}finally{s.close();}
+});
