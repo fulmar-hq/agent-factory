@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {resolveQuestions,boardQuestions} from '../launcher/questions';
 import {expireDecisions} from '../launcher/autonomy';
 import {config,ticket,admission,now} from './fixtures';

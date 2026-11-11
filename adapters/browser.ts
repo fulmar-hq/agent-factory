@@ -123,7 +123,7 @@ export function nativeBrowserPorts(e:Engine,dir:string,resume:(id:string)=>void)
   return {
     async start(j,brief,path) {
       const parent=e.sessions().find(x=>x.id===j.parent);
-      if(!parent || parent.status!=="waiting-browser")throw Error("waiting browser parent required");
+      if(!parent || (!j.detached && parent.status!=="waiting-browser"))throw Error("browser source custody required");
       const high=(JSON.parse(parent.brief) as Ticket).benefit==="high";
       usageGate(e.s.get<Record<string,Meter>>("readings")?.claude,high,Date.now(),e.c,"claude");
       await verifySubscription("claude");
@@ -131,7 +131,7 @@ export function nativeBrowserPorts(e:Engine,dir:string,resume:(id:string)=>void)
       for(const flag of ["--bg","--chrome","--permission-mode","--allowedTools"])if(!help.includes(flag))throw Error(`Claude missing ${flag}`);
       const repos=await optionalJSON(join(dir,"repositories.json")) as Record<string,string>|null;
       const cwd=repos?.[j.repo];if(!cwd)throw Error("browser trusted source checkout unavailable");
-      if(e.s.get("paused")!==false || e.sessions().find(x=>x.id===j.parent)?.status!=="waiting-browser" || e.s.get<{child:string}>(`browser-parent:${j.parent}`)?.child!==j.id)throw Error("browser start custody/paused refused");
+      if(e.s.get("paused")!==false || (!j.detached && (e.sessions().find(x=>x.id===j.parent)?.status!=="waiting-browser" || e.s.get<{child:string}>(`browser-parent:${j.parent}`)?.child!==j.id)))throw Error("browser start custody/paused refused");
       usageGate(e.s.get<Record<string,Meter>>("readings")?.claude,high,Date.now(),e.c,"claude");
       e.s.set(`browser-cwd:${j.id}:${j.nonce}`,cwd);
       const output=await browserCommand(browserArgs(j,brief,path),cwd);
