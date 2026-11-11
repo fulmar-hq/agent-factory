@@ -41,3 +41,15 @@ test('remote success requires exact native readback proof and rejects rerun or w
  receiptTree=tree;attempt=2;expect(await port.observe('readback',c,handle)).toMatchObject({state:'failure'});
  attempt=1;completedAt=999;expect(await port.observe('readback',c,handle)).toMatchObject({state:'failure'});
 });
+test('scheduled Main verification is not a release overlap; queued push and deployments remain overlaps',async()=>{
+ let run={id:7,status:'queued',event:'schedule',path:'.github/workflows/ci.yml',head_branch:'main'};
+ const execute=async(args:string[])=>{
+  const p=args[4]??'';
+  return JSON.stringify(p.includes('git/ref')?{object:{sha:revision}}:p.includes('git/commits')?{tree:{sha:tree}}:p.includes('variables/')?{value:JSON.stringify({id:'fixture',held:false})}:p.includes('pulls?')?[]:{workflow_runs:p.includes('status=queued')?[run]:[]});
+ };
+ const port=new AlidoReleasePort(execute);
+ expect((await port.snapshot()).overlap).toBe(false);
+ run={...run,event:'push'};expect((await port.snapshot()).overlap).toBe(true);
+ run={...run,event:'workflow_run',path:'.github/workflows/deploy.yml'};expect((await port.snapshot()).overlap).toBe(true);
+ run={...run,event:'workflow_dispatch',path:'.github/workflows/factory-release.yml'};expect((await port.snapshot()).overlap).toBe(true);
+});

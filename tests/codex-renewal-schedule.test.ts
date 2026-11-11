@@ -1,0 +1,41 @@
+import {publisherSources,publisherBoundary} from '../launcher/publisher-evidence';
+import {test,expect} from 'bun:test';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';
+import {join,dirname} from 'node:path';
+import {tmpdir} from 'node:os';
+import {Store} from '../tracking/store';
+import {TestEngine as Engine} from './fixtures';
+import {builderSlots} from '../launcher/capacity';
+import {renewalDue,renewalDigest,renewalFingerprint,renewalSources,scheduleCodexRenewal} from '../launcher/codex-renewal';
+import {config,qualification,meter,now,ticket,admission} from './fixtures';
+function setup(hours=7){const dir=mkdtempSync(join(tmpdir(),'renewal-schedule-')),source=join(dir,'source');for(const path of new Set([...renewalSources,...publisherSources])){mkdirSync(dirname(join(source,path)),{recursive:true});writeFileSync(join(source,path),'fictional boundary');}const fingerprint=renewalFingerprint(source,'fixture'),q={...qualification(),phoneVerified:false,waiver:{phone:'deferred'},evidence:join(dir,'report.md'),expiresAt:now+hours*3600000};const all={codex:{...q,effort:'high'},'codex:high':{...q,effort:'high'},'codex:medium':q};writeFileSync(join(dir,'qualifications.json'),JSON.stringify(all));writeFileSync(join(dir,'source-hashes.json'),JSON.stringify(fingerprint.hashes));writeFileSync(join(dir,'config.yaml'),JSON.stringify(config()));const s=new Store(':memory:'),e=new Engine(s,config());const pubDir=join(dir,'runs/delivery/fictional/initial/publisher');mkdirSync(pubDir,{recursive:true});const executionReceipt=join(pubDir,'implementation.json'),publisher={id:'fictional',repo:'example/demo',head:'a'.repeat(40),tree:'b'.repeat(40),executionReceipt,testedTreeReceipt:join(pubDir,'tested-tree.json')};const savePublisher=()=>writeFileSync(executionReceipt,JSON.stringify({version:1,boundary:publisherBoundary(source,dir),startedAt:now-1000,completedAt:now,authorityExpiresAt:now+3600000,head:publisher.head,tree:publisher.tree}));savePublisher();s.event('fictional-publish','launcher-publish',publisher,'retain',now);e.pause(false,'owner');s.set('readings',{codex:meter()});return {dir,source,fingerprint,all,s,e,savePublisher};}
+test('six-hour exclusive boundary schedules both efforts without changing expiry',()=>{const f=setup();try{expect(renewalDue(f.all,f.fingerprint,f.fingerprint,now).dueAt).toBe(now+3600000);let calls=0;const r=scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now);expect(r.state).toBe('scheduled');expect(calls).toBe(0);expect(f.s.get('codex-renewal-slot')).toBeNull();}finally{f.s.close();}});
+test('one durable claim consumes a normal slot and duplicate ticks cannot replay',()=>{const f=setup(5);try{let calls=0;expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('starting');expect(builderSlots(f.s,f.e.c).used).toBe(1);expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('claimed');expect(calls).toBe(1);expect(f.s.get('codex-renewal-uncertain')).toBeNull();}finally{f.s.close();}});
+test('a synchronous spawn failure rolls back the claim and slot',()=>{const f=setup(5);try{expect(()=>scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>{throw Error('spawn refused');},now)).toThrow('spawn refused');expect(f.s.get('codex-renewal-slot')).toBeNull();expect(builderSlots(f.s,f.e.c).used).toBe(0);}finally{f.s.close();}});
+test('material source change renews immediately even before six-hour window',()=>{const f=setup();try{writeFileSync(join(f.source,renewalSources[0]!), 'changed fictional boundary');let calls=0;expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('waiting-publisher-proof');expect(calls).toBe(0);f.savePublisher();expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('starting');expect(calls).toBe(1);}finally{f.s.close();}});
+for(const reason of ['pause','usage','capacity','unknown custody'] as const)test('renewal preserves '+reason+' guard',()=>{const f=setup(5);try{if(reason==='pause')f.e.pause(true,'owner');if(reason==='usage')f.s.set('readings',{codex:meter(.9)});if(reason==='unknown custody')f.s.set('codex-renewal-slot',{state:'unknown'});if(reason==='capacity'){f.e.admit(ticket(1),admission());f.e.admit(ticket(2),admission());}let calls=0;if(reason==='usage')expect(()=>scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now)).toThrow('usage stop');else expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe(reason==='pause'?'paused':reason==='capacity'?'waiting-capacity':'custody-blocked');expect(calls).toBe(0);}finally{f.s.close();}});
+test('uncertain adoption prevents new production admission with otherwise passing evidence',()=>{const f=setup();try{f.s.set('codex-renewal-uncertain',true);expect(()=>f.e.admit(ticket(),admission())).toThrow('qualification replacement uncertain');}finally{f.s.close();}});
+
+test('uncertain replacement never starts a new attempt through changed qualification bytes',()=>{const f=setup(5);try{f.s.set('codex-renewal-uncertain',true);let starts=0;expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>starts++,now).state).toBe('adoption-uncertain');expect(starts).toBe(0);expect(f.s.get('codex-renewal-slot')).toBeNull();}finally{f.s.close();}});
+
+
+test('successful renewal cannot repeat six native runs against an unchanged aged publisher proof',()=>{
+ const f=setup(5);try{
+  const pub=JSON.parse((f.s.db.query("SELECT data FROM events WHERE kind='launcher-publish'").get() as {data:string}).data),path=pub.executionReceipt,proof=JSON.parse(readFileSync(path,'utf8'));proof.startedAt=now-19*3600000-1000;proof.completedAt=now-19*3600000;proof.authorityExpiresAt=now+5*3600000;writeFileSync(path,JSON.stringify(proof));f.s.set('delivery-qualified',{version:2,expiresAt:now+5*3600000});let starts=0;
+  expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>starts++,now).state).toBe('starting');
+  for(const q of Object.values(f.all))q.expiresAt=now+86400000;const bytes=JSON.stringify(f.all);writeFileSync(join(f.dir,'qualifications.json'),bytes);f.s.set('codex-renewal-slot',{state:'released'});f.s.set('launcher-maintenance-lease',{state:'released'});f.s.set('codex-renewal-covered-publisher',{qualificationSha256:renewalDigest(bytes),fingerprint:renewalDigest(f.fingerprint),publisherReceipt:path,publisherExpiresAt:now+5*3600000});
+  expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>starts++,now+60000).state).toBe('waiting-publisher-proof');expect(starts).toBe(1);
+ }finally{f.s.close();}
+});
+
+
+test('changing only the trusted dependency helper changes renewal fingerprint and refuses old publisher proof',()=>{
+ const f=setup();try{
+  const helper='scripts/cache-retention.py',before=renewalFingerprint(f.source,'fixture');
+  writeFileSync(join(f.source,helper),'fictional changed dependency helper');
+  const after=renewalFingerprint(f.source,'fixture');expect(after.hashes[helper]).not.toBe(before.hashes[helper]);
+  expect(Object.fromEntries(Object.entries(after.hashes).filter(([path])=>path!==helper))).toEqual(Object.fromEntries(Object.entries(before.hashes).filter(([path])=>path!==helper)));
+  let calls=0;expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('waiting-publisher-proof');expect(calls).toBe(0);
+  f.savePublisher();expect(scheduleCodexRenewal(f.e,f.dir,f.source,'fixture',()=>calls++,now).state).toBe('starting');expect(calls).toBe(1);
+ }finally{f.s.close();}
+});
