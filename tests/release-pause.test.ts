@@ -53,3 +53,16 @@ test('generic authenticated controls disclose their unknown caller while retaini
  const {dir,s}=setup(),clock=spyOn(Date,'now').mockReturnValue(at('20:45')),e=new Engine(s,config());let body='';
  try{e.pause(false,'owner');e.pause(true,'owner');watchReleasePause(s,dir,at('20:45'),(id,to,summary,text)=>{expect(to).toBe('Coordinator');body=text;return {id,queued:true};});expect(body).toContain('actual caller not recorded');expect(body).toContain('Coordinator');}finally{clock.mockRestore();s.close();}
 });
+
+test('resume at admission cannot cache a nonexistent episode or hide the next pausing owner',()=>{
+ const f=setup();f.s.close();const s=new Store(join(f.dir,'controller.sqlite')),other=new Store(join(f.dir,'controller.sqlite')),e=new Engine(other,config()),clock=spyOn(Date,'now').mockReturnValue(at('20:45')),atomic=s.atomic.bind(s);let interleave=true;
+ s.set('paused',true);s.event('old-platform','pause',{owner:'Platform'},'fixture',at('16:00'));
+ s.atomic=<T>(fn:()=>T):T=>{if(interleave){interleave=false;e.pause(false,'owner');}return atomic(fn);};
+ try{expect(watchReleasePause(s,f.dir,at('20:45'),()=>{throw Error('no current pause');}).queued).toBe(false);expect(s.get('release-pause-episode')).toBeNull();other.set('paused',true);other.event('next-quality','pause',{owner:'Quality'},'fixture',at('20:45')+1000);const roles:string[]=[];watchReleasePause(s,f.dir,at('20:45')+1000,(id,to)=>{roles.push(to);return {id,queued:true};});expect(roles.sort()).toEqual(['Coordinator','Quality']);}finally{clock.mockRestore();other.close();s.close();}
+});
+test('the pause setter retains its intents before a second controller can immediately resume',()=>{
+ const f=setup();f.s.close();const s=new Store(join(f.dir,'controller.sqlite')),other=new Store(join(f.dir,'controller.sqlite')),mail=join(f.dir,'mail.sqlite'),db=new Database(mail),priorMail=process.env.FACTORY_MAIL_DB,clock=spyOn(Date,'now').mockReturnValue(at('20:45')),atomic=s.atomic.bind(s);let interleave=true;
+ db.exec('CREATE TABLE messages(id TEXT PRIMARY KEY,send_id,created_at,sender,sender_app,sender_ref,recipient,recipient_app,kind,reply,summary,body,thread_id,depth,hash,state,wake_state)');process.env.FACTORY_MAIL_DB=mail;s.set('paused',false);
+ s.atomic=<T>(fn:()=>T):T=>{const result=atomic(fn);if(interleave){interleave=false;new Engine(other,config()).pause(false,'owner');}return result;};
+ try{new Engine(s,config()).pause(true,'owner','Platform');expect(s.get('paused')).toBe(false);expect(db.query('SELECT recipient FROM messages ORDER BY recipient').all()).toEqual([{recipient:'Coordinator'},{recipient:'Platform'}]);}finally{clock.mockRestore();if(priorMail===undefined)delete process.env.FACTORY_MAIL_DB;else process.env.FACTORY_MAIL_DB=priorMail;db.close();other.close();s.close();}
+});
