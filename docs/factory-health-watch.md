@@ -20,13 +20,11 @@ After installation, `bun scripts/factory-health-watch.ts --rehearse YYYY-MM-DD` 
 
 Product-only intake sees unapproved ready drafts and the open product backlog
 before review/building context; a ready label alone is never counted as runnable.
-Its context includes the reconciler's refusal and the exact body SHA-256. Product
-may return `existingIssue` and `bodyDigest` on an intake proposal to complete a
-never-attempted, unapproved coding draft on that original issue. The result must
-cite that same product issue. The launcher preserves its prose and retained edit
-plan, refuses changed bodies, existing approval, blocked/building/review states
-and prior session custody, and confirms the edit before normal auto-approval.
-This route never approves work, resets an attempt or converts owner setup work
-into a coding task. An uncertain response reuses the retained exact edit; it
-cannot overwrite an author's later body change. New product leaves still use the
-ordinary proposal path; review work remains on the original PR.
+Its context includes the reconciler's refusal and a bounded source excerpt.
+Incomplete existing drafts stay with their named owner for correction and normal
+content-bound approval on their original issue. Product reports the issue,
+refusal and next actor; it must not convert owner-only setup into coding work or
+create duplicates. Intake proposals only create genuine new product leaves.
+Existing-issue update fields are rejected before effects: the launcher has no
+proven compare-and-swap path for replacing an author's GitHub issue body.
+Review work remains on its original PR.

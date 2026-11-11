@@ -1,9 +1,12 @@
 import {test,expect} from 'bun:test';
-import {createHash} from 'node:crypto';
+import {mkdtempSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 import {Store} from '../tracking/store';
-import {TestEngine as Engine,config} from './fixtures';
-import {intakeContext,completeIntakeDraft} from '../launcher/intake-context';
-const digest=(body:string)=>createHash('sha256').update(body).digest('hex');
+import {TestEngine as Engine,config,ticket} from './fixtures';
+import {intakeContext} from '../launcher/intake-context';
+import {applyOwnerResults,supply} from '../launcher/autonomy';
+
 test('product refill sees refused ready and real backlog before a large review queue',()=>{
  const review=Array.from({length:70},(_,n)=>({id:`example/site#${n+1}`,labels:[{name:'state:review'}]}));
  const ready={id:'example/site#80',labels:[{name:'state:ready'}],decision:'approved intake changed or approval missing'};
@@ -14,35 +17,37 @@ test('product refill sees refused ready and real backlog before a large review q
  expect(intakeContext([backlog,...review],false)[0]).toEqual(review[0]);
 });
 function fixture(){
- const e=new Engine(new Store(':memory:'),config());
- const issue={number:7,title:'Show request summary',body:'Existing product outcome.\n\n```factory\n{"old":"incomplete"}\n```',state:'OPEN',labels:[{name:'state:ready'},{name:'kind:fix'},{name:'area:runtime'}]};
- const proposal={repo:'example/demo',title:issue.title,existingIssue:7,bodyDigest:digest(issue.body)};
- const brief={category:'product',kind:'fix',area:'runtime',intakeEvidence:{kind:'issue',number:7},paths:['src/summary.ts'],outcome:'Show saved request summary'};
- const calls:string[][]=[];
- const execute=async(args:string[])=>{calls.push(args);if(args.includes('view'))return JSON.stringify(issue);if(args.includes('--body'))issue.body=args[args.indexOf('--body')+1];return '';};
- return {e,issue,proposal,brief,calls,execute};
+ const c=config();c.refill={rule:'product tasks only from the real backlog; never review or acceptance tickets',report_mix:true};
+ c.autonomy={intake_mode:'build',intake_owner:'builder',idle_wake_minutes:10,ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['AGENTS.md']},restart:{max_retries:1,causes_per_hour:3}};
+ const e=new Engine(new Store(':memory:'),c);e.s.set('paused',false);return e;
 }
-test('unapproved product draft keeps prose and original issue; lost edit response reuses retained exact body',async()=>{
- const f=fixture();let lost=true;
- const execute=async(args:string[])=>{const v=await f.execute(args);if(args.includes('--body')&&lost){lost=false;throw Error('lost response');}return v;};
- try{
-  await expect(completeIntakeDraft(f.e,f.proposal,f.brief,'proposal:fixture:0',execute)).rejects.toThrow('lost response');
-  expect(await completeIntakeDraft(f.e,f.proposal,f.brief,'proposal:fixture:0',execute)).toBe(7);
-  expect(f.issue.body).toContain('Existing product outcome.');expect(f.issue.body).not.toContain('"old"');
-  expect(f.issue.body.match(/```factory/g)).toHaveLength(1);
-  expect(f.calls.filter(a=>a.includes('--body'))).toHaveLength(1);
-  expect(f.calls.some(a=>a.includes('create'))).toBe(false);
-  expect(f.e.s.get('proposal:fixture:0')).toBe(7);
- }finally{f.e.s.close();}
+test('supply passes a refused draft decision and source to Product without treating its label as runnable',()=>{
+ const e=fixture();try{
+  const issue={number:7,title:'Show request summary',body:'Existing coding outcome.',state:'OPEN',labels:[{name:'state:ready'},{name:'kind:fix'},{name:'area:runtime'}]};
+  e.s.db.query('INSERT INTO tickets VALUES(?,?,?,?)').run('example/demo#7',JSON.stringify(issue),Date.now(),'Error: factory intake block missing');
+  supply(e,[],Date.now());
+  const round=e.s.get<{wake:string}>('intake-round')!;
+  const wake=e.s.get<{payload:{ready:number;existing:{decision:string;source:string}[];brief:string}}>(`owner-wake:${round.wake}`)!;
+  expect(wake.payload.ready).toBe(0);
+  expect(wake.payload.existing[0]).toMatchObject({decision:'Error: factory intake block missing',source:'Existing coding outcome.'});
+  expect(wake.payload.brief).toContain('named owner');
+ }finally{e.s.close();}
 });
-for(const condition of ['changed','approved','building','blocked','attempted','wrong-source'])test(`draft completion refuses ${condition} without edits`,async()=>{
- const f=fixture();try{
-  if(condition==='changed')f.issue.body+=' Owner edit.';
-  if(condition==='approved')f.issue.labels.push({name:'ready:old'});
-  if(condition==='building'||condition==='blocked')f.issue.labels[0]={name:`state:${condition}`};
-  if(condition==='attempted')f.e.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('prior','example/demo#7','builder','codex','archived','{}');
-  if(condition==='wrong-source')f.brief.intakeEvidence.number=8;
-  await expect(completeIntakeDraft(f.e,f.proposal,f.brief,'proposal:fixture:0',f.execute)).rejects.toThrow();
-  expect(f.calls.some(a=>a.includes('edit'))).toBe(false);
- }finally{f.e.s.close();}
+// GitHub's issue-body update has no proven compare-and-swap contract here.
+// Refuse every existing-draft update proposal before even reading remote state:
+// there can be no clobber, owner-setup conversion or false label completion.
+for(const scenario of ['author-edit-interleaving','owner-only-setup','missing-kind-area-labels','existingIssue-only','bodyDigest-only'])test(`existing draft result fails closed: ${scenario}`,async()=>{
+ const e=fixture(),scratch=mkdtempSync(join(tmpdir(),'intake-refused-'));
+ const original={body:scenario==='owner-only-setup'?'Owner must enter a sign-in code.':'Retain the author outcome.',labels:scenario==='missing-kind-area-labels'?['state:ready']:['state:ready','kind:fix','area:runtime']};
+ const proposal={repo:'example/demo',title:'Configure provider access',brief:{...ticket(),category:'product',kind:'fix',area:'runtime',intakeEvidence:{kind:'issue',number:7}},...(scenario==='bodyDigest-only'?{}:{existingIssue:7}),...(scenario==='existingIssue-only'?{}:{bodyDigest:'a'.repeat(64)})};
+ writeFileSync(join(scratch,'intake.json'),JSON.stringify({tickets:[proposal],mix:{product:1,other:0}}));
+ const id=`intake:${scenario}`,calls:string[][]=[];
+ e.s.set(`owner-wake:${id}`,{id,owner:'builder',kind:'product-intake',payload:{round:'fixture'},state:'done',cleanupVerified:true,scratch});
+ try{
+  await applyOwnerResults(e,scratch,undefined,Date.now(),async args=>{calls.push(args);throw Error('existing issue update must not reach GitHub');});
+  expect(e.s.get(`owner-result:${id}`)).toMatchObject({applied:false});
+  expect(calls).toEqual([]);
+  expect(original.body).toBe(scenario==='owner-only-setup'?'Owner must enter a sign-in code.':'Retain the author outcome.');
+  expect(e.s.get(`proposal:${id}:0`)).toBeNull();
+ }finally{e.s.close();}
 });
