@@ -20,7 +20,7 @@ const environment=jobEnvironment(homedir(),process.execPath,root),pathEnv=enviro
 // must prove both PATH names and fixed Mac interpreter paths on the target.
 if(install){const missing=missingExecutables(pathEnv);if(missing.length)throw Error(`release tools missing from scheduled PATH: ${missing.join(', ')}`);}
 const xml=(s:string)=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null],['rehearsal-early',14,0],['rehearsal-late',17,40]] as const;
+const jobs=[['preflight',19,0],['qa',20,0],['production',21,30],['reconcile',null,null],['rehearsal-early',14,0],['rehearsal-late',17,40],['freeze-start',17,30]] as const;
 const archive=join(root,'receipts',`release-install-${Date.now()}`);mkdirSync(archive,{recursive:true,mode:0o700});
 // Preparation starts no job/process and keeps an exclusive filesystem claim.
 // Only effect-bearing installation requires native process-identity proof.
