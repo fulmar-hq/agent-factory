@@ -26,7 +26,7 @@ for(const [stage,hour,minute] of jobs){
  if(install){
   const installed=join(homedir(),'Library/LaunchAgents',`${label}.plist`);mkdirSync(resolve(installed,'..'),{recursive:true});
   if(existsSync(installed))copyFileSync(installed,join(archive,`${label}.installed.plist`));
-  await rebindReleaseJob(label,installed,process.getuid!(),[process.execPath,join(repo,'scripts/release.ts'),repo,pathEnv],command,()=>copyFileSync(path,installed));
+  await rebindReleaseJob(label,installed,process.getuid!(),{program:process.execPath,args:[process.execPath,join(repo,'scripts/release.ts'),stage],directory:repo,path:pathEnv},command,()=>copyFileSync(path,installed));
  }
  console.log(`${install?'installed':'prepared'} ${label}`);
 }

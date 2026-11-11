@@ -23,8 +23,11 @@ async function pull(number:number):Promise<FactoryPull>{
  const verify=checks.check_runs.filter((r:{name:string;app?:{id:number}})=>r.name==='Verify'&&r.app?.id===15368).sort((a:{id:number},b:{id:number})=>b.id-a.id)[0];
  return {number:p.number,head:p.head.sha,tree:commit.tree.sha,createdAt:p.created_at,draft:p.draft,state:p.state.toUpperCase(),mergeState:p.mergeable_state.toUpperCase(),verify:verify?.head_sha===p.head.sha&&verify?.status==='completed'&&verify?.conclusion==='success'};
 }
-export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:ReviewPass={claims:0}):MaintenancePort{return {
- integrationHold:()=>integrationFreeze(root),
+export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:ReviewPass={claims:0},installPorts:{git?:typeof git;api?:typeof api;hold?:()=>string|null}={}):MaintenancePort{
+ const installGit=installPorts.git??git,installApi=installPorts.api??api,hold=installPorts.hold??(()=>integrationFreeze(root));
+ const ensureUnfrozen=()=>{const reason=hold();if(reason)throw Error('source installation frozen: '+reason);};
+ return {
+ integrationHold:hold,
  pulls:async()=>{const list=await api('pulls?state=open&sort=created&direction=asc&per_page=100');if(!Array.isArray(list)||list.length>=100)throw Error('factory PR inventory truncated');return list.filter(p=>p.base?.ref==='main'&&p.base?.repo?.full_name===factoryRepository&&p.head?.repo?.full_name===factoryRepository).map(p=>({number:p.number,head:p.head.sha,createdAt:p.created_at,draft:p.draft,state:'OPEN',tree:'',verify:false,mergeState:'UNKNOWN'}));},
  pull,
  update:async p=>{await command(['gh','api','--method','PUT',`repos/${factoryRepository}/pulls/${p.number}/update-branch`,'--raw-field',`expected_head_sha=${p.head}`]);},
@@ -39,14 +42,15 @@ export function maintenancePort(s:Store,runChallenge=runFactoryChallenge,pass:Re
   if(timedOut||code!==0||status!==200||!framed)throw Error(`merge effect uncertain; retain intent (${timedOut?'timeout':stderr.slice(0,300)})`);
   const merged=JSON.parse(framed[2]);if(merged.merged!==true)throw Error('protected squash was not accepted');const p=await api(`pulls/${number}`);if(!p.merged||p.head.sha!==head)throw Error('merge readback mismatch');const c=await api(`git/commits/${p.merge_commit_sha}`);return {head:p.merge_commit_sha,tree:c.tree.sha};},
  install:async target=>{
-  if((await git('branch','--show-current')).trim()!=='main'||(await git('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');
-  if(!(await git('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');
-  await git('fetch','origin','main');const remote=(await git('rev-parse','origin/main')).trim();
+  ensureUnfrozen();
+  if((await installGit('branch','--show-current')).trim()!=='main'||(await installGit('status','--porcelain')).trim())throw Error('installed main must be clean; preserve and reconcile local work');
+  if(!(await installGit('remote','get-url','origin')).trim().match(/^https:\/\/github.com\/fulmar-hq\/agent-factory(?:\.git)?$/))throw Error('installed origin mismatch');
+  await installGit('fetch','origin','main');const remote=(await installGit('rev-parse','origin/main')).trim();
   if(target==='main')throw Error('explicit verified install revision required');
   const approval=s.get<{state:string;tree:string}>(`factory-merge-outcome:${target}`);if(approval?.state!=='verified')throw Error('install revision has no verified merge approval');
-  await git('merge-base','--is-ancestor',target,remote);
-  const verified=await api(`commits/${target}`);if(verified.sha!==target||verified.commit.tree.sha!==approval.tree||verified.commit.verification.verified!==true||verified.commit.verification.reason!=='valid')throw Error('installed revision signature unverified');
-  const before=(await git('rev-parse','HEAD')).trim();await git('merge','--ff-only',target);const after=(await git('rev-parse','HEAD')).trim();
+  await installGit('merge-base','--is-ancestor',target,remote);
+  const verified=await installApi(`commits/${target}`);if(verified.sha!==target||verified.commit.tree.sha!==approval.tree||verified.commit.verification.verified!==true||verified.commit.verification.reason!=='valid')throw Error('installed revision signature unverified');
+  const before=(await installGit('rev-parse','HEAD')).trim();ensureUnfrozen();await installGit('merge','--ff-only',target);const after=(await installGit('rev-parse','HEAD')).trim();
   if(after!==target)throw Error('installed readback differs');s.event(`factory-install:${before}:${after}`,'factory-install',{before,after,checkout:repo},'Use a reviewed signed revert; preserve runtime state and all branches');return after;
  }
 };}

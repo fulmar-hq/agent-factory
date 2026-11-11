@@ -47,3 +47,21 @@ test('freeze crossing a review or merge readback never installs a revision durin
  if(boundary==='merge')expect(s.get('factory-install-pending')).toMatchObject({head:'c'.repeat(40)});
  }finally{s.close();}}
 });
+
+test('actual installer rechecks freeze after asynchronous fetch for pending and newly merged source',async()=>{
+ const {maintenancePort}=await import('../scripts/maintain-factory');
+ for(const pending of [true,false]){const {s,port,effects}=setup(),target='c'.repeat(40);let held=false,mutated=false;
+ try{
+ const installer=maintenancePort(s,undefined,undefined,{hold:()=>held?'proof window':null,git:async(...args)=>{
+  if(args[0]==='branch')return 'main';if(args[0]==='status')return '';if(args[0]==='remote')return 'https://github.com/fulmar-hq/agent-factory.git';
+  if(args[0]==='fetch'){held=true;return '';}
+  if(args[0]==='merge'){mutated=true;return '';}
+  return args[1]==='origin/main'?target:'d'.repeat(40);
+ },api:async()=>({sha:target,commit:{tree:{sha:p.tree},verification:{verified:true,reason:'valid'}}})});
+ port.install=installer.install;port.integrationHold=installer.integrationHold;
+ if(pending){s.set('factory-install-pending',{head:target,tree:p.tree});s.set(`factory-merge-outcome:${target}`,{state:'verified',tree:p.tree});}
+ await maintainFactory(s,port);
+ expect(held).toBe(true);expect(mutated).toBe(false);expect(s.get('factory-install-pending')).toMatchObject({head:target});
+ expect(effects.filter(e=>e.startsWith('install:'))).toEqual([]);
+ }finally{s.close();}}
+});
