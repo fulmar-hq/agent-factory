@@ -1,3 +1,4 @@
+import {queueWake} from './wake';
 import {createHash} from 'node:crypto';
 import type {Store} from '../tracking/store';
 import type {ReleaseReadiness} from './release-readiness';
@@ -21,6 +22,10 @@ export function recordRehearsal(s:Store,r:ReleaseReadiness,slot:'14:00'|'17:40',
   // reason on retry cannot conflict with mail already queued before a crash.
   s.set(id,retained);
   send(id,retained.owner,retained.summary,retained.body,r.at);
+  // Permanent factory owners are native runtimes, not necessarily open app
+  // chats in the Mail directory. Their normal guarded wake carries this same
+  // mail action; queuing is never represented as actual delivery or execution.
+  if(retained.owner!=='Coordinator')queueWake(s,{id:`mail:${id}`,owner:retained.owner.toLowerCase(),kind:'release-readiness-gap',payload:{mailId:id,...retained}},r.at);
  }
  return r;
 }

@@ -290,6 +290,9 @@ Quality or Platform. AWS sign-in, usage decisions and pauses go to Coordinator.
 Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
 preflight. Repeated observations reuse the immutable action payload and mail ID;
 clean collections are retained as `release-rehearsal` events and are not mailed.
+Factory-native owners also receive the same action through their normal guarded
+owner wake, because an owner need not have an open app chat. Queued mail/wakes
+are not claimed as delivery or completed work.
 The 17:40 collection confirms readiness after source integration freezes.
 Rehearsals grant no exception to gates, holds, spending or release times.
 Install both rehearsal jobs after review, archive prior plists and read back
