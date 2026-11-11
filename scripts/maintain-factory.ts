@@ -16,7 +16,7 @@ import {runFactoryChallenge} from '../adapters/factory-challenge';
 import {maintainFactory,FactoryMergeRejected,nativeChallenge,factoryRepository,type FactoryPull,type Challenge,type MaintenancePort} from '../launcher/factory-maintenance';
 // Always operate on the registered installation, including an explicitly
 // requested serial pass invoked from an isolated source checkout.
-const repo=resolve(JSON.parse(readFileSync(join(root,'repositories.json'),'utf8'))[factoryRepository]);
+const repo=import.meta.main?resolve(JSON.parse(readFileSync(join(root,'repositories.json'),'utf8'))[factoryRepository]):resolve(import.meta.dir,'..');
 const api=async(path:string)=>JSON.parse(await command(['gh','api',`repos/${factoryRepository}/${path}`]));
 const git=(...args:string[])=>command(['git','-C',repo,...args]);
 async function pull(number:number,s?:Store,fresh=true):Promise<FactoryPull>{
