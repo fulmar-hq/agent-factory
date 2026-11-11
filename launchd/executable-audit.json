@@ -32,6 +32,6 @@
   "scripts/cache-retention.py": "9b05ebb3d99adaabcaf5c6e0b8d7c83c81a3597c6e872a67df94021ac868937c",
   "scripts/claude-usage.py": "582d30de3a085f32db1f4660de9c199b53090d9019c2e817656db322f8f02b92",
   "scripts/maintain-factory.ts": "ae0735343425bbbb7c979b36deb5f4ef2f4d2dd56ebcc37da30657b803295de8",
-  "scripts/release.ts": "c77bc2901efa202d4d227b8e95ed04a0793de8d7ac1ec122027208116d326156",
+  "scripts/release.ts": "92d5a359068084b5968bdb7bb1546e56907bbe24efedf70dfb820cf0edc817d2",
   "scripts/alido-release.py": "957fe2754b2e63b42dd64e08c6d06af08c95eb5e446b758004ad93b00aac9410"
 }
