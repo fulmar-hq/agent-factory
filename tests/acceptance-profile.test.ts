@@ -31,3 +31,18 @@ test('fresh asynchronous meter uses the post-fetch clock and deadline',()=>{
  expect(()=>acceptanceUsage(c,'codex',m,1300,()=>1300)).toThrow('deadline');
  expect(()=>acceptanceUsage(c,'codex',{...m,observedAt:1400},8000,()=>1300)).toThrow('usage stale');
 });
+
+
+test('release acceptance is high benefit with unchanged 70/90 usage gates',()=>{
+ const c=config(),now=1300,deadline=8000;
+ expect(c.usage_gates.admit_below).toBe(0.70);expect(c.usage_gates.stop_at).toBe(0.90);
+ for(const used of [0.69,0.70,0.82,0.899]){
+  const reading={...meter(),observedAt:now,windows:[{used,resetsAt:9000},{used:0.2,resetsAt:9000}]};
+  expect(()=>acceptanceUsage(c,'codex',reading,deadline,()=>now)).not.toThrow();
+ }
+ for(const used of [0.90,1]){
+  const reading={...meter(),observedAt:now,windows:[{used:0.2,resetsAt:9000},{used,resetsAt:9000}]};
+  expect(()=>acceptanceUsage(c,'codex',reading,deadline,()=>now)).toThrow('usage stop');
+ }
+ expect(()=>acceptanceUsage(c,'codex',undefined,deadline,()=>now)).toThrow('usage unknown');
+});

@@ -175,3 +175,18 @@ test('readiness gates the effective ticket profile while Claude remains expired'
   expect((await collectReleaseReadiness(e.options)).missing.some(x=>x.input==='quality qualification')).toBe(true);
  }finally{e.s.close();}
 });
+
+
+test('scheduled release owners are high benefit but still stop at 90 percent',async()=>{
+ const e=environment();try{
+  expect(e.c.usage_gates.admit_below).toBe(0.70);expect(e.c.usage_gates.stop_at).toBe(0.90);
+  const readings=e.files['readings.json'] as Record<string,ReturnType<typeof meter>>;
+  for(const used of [0.69,0.70,0.82,0.899,0.90,1]){
+   for(const provider of ['codex','claude'])readings[provider]={...meter(),observedAt:now,windows:[{used,resetsAt:through+1},{used:0.2,resetsAt:through+1}]};
+   const r=await collectReleaseReadiness(e.options);
+   const refused=r.missing.filter(x=>x.input.endsWith(' usage'));
+   if(used<0.90){expect(r.ready).toBe(true);expect(refused).toEqual([]);}
+   else {expect(r.ready).toBe(false);expect(refused.map(x=>x.input).sort()).toEqual(['quality usage','release usage']);expect(refused.every(x=>x.reason.includes('usage stop'))).toBe(true);}
+  }
+ }finally{e.s.close();}
+});

@@ -16,7 +16,7 @@ export async function acceptanceProfile(c:Config,dir:string,day:string,validThro
 export function acceptanceUsage(c:Config,provider:'codex'|'claude',reading:Meter|undefined,deadline:number,clock=Date.now){
  const checkedAt=clock();
  if(checkedAt>=deadline)throw Error('Quality acceptance deadline expired during admission');
- usageGate(reading,false,checkedAt,c,provider);
+ usageGate(reading,true,checkedAt,c,provider);
 }
 export async function admitAcceptance(c:Config,dir:string,s:Store,day:string,deadline:number,clock=Date.now){
  const effective=await acceptanceProfile(c,dir,day,deadline);
