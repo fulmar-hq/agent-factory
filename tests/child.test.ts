@@ -19,7 +19,9 @@ for(const [detached,groupDenied] of [[false,false],[true,false],[true,true]] as 
   try {
     let descendant=0;
     for(let i=0;i<100;i++) {
-      try {descendant=Number(readFileSync(join(dir,"pids"),"utf8"));break;}catch{}
+      // writeFileSync may expose an empty file between create and write.
+      // Wait for the actual PID; zero must never become a process-group target.
+      try {const pid=Number(readFileSync(join(dir,"pids"),"utf8"));if(Number.isSafeInteger(pid)&&pid>0){descendant=pid;break;}}catch{}
       await new Promise(r=>setTimeout(r,20));
     }
     expect(descendant).toBeGreaterThan(0);

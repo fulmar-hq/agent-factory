@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Store} from '../tracking/store';
 import {config} from './fixtures';
+import {evaluateFactoryHealth} from '../launcher/factory-health';
 import {collectFactoryHealth,healthBridge,rehearseFactoryAlarm,watchFactoryHealth} from '../launcher/factory-health-runtime';
 function bridge(){const dir=mkdtempSync(join(tmpdir(),'health-runtime-')),path=join(dir,'mail.sqlite'),db=new Database(path);db.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY,send_id TEXT,created_at INTEGER,sender TEXT,sender_app TEXT,sender_ref TEXT,recipient TEXT,recipient_app TEXT,kind TEXT,reply TEXT,summary TEXT,body TEXT,thread_id TEXT,depth INTEGER,hash TEXT,state TEXT,wake_state TEXT,wake_id TEXT);CREATE TABLE telegram_messages(message_id INTEGER PRIMARY KEY,mail_id TEXT,sent_at INTEGER);`);return {dir,path,db};}
 test('one explicitly labelled test reaches only Vincent outbox and retries retain one ID',()=>{const f=bridge(),now=Date.now();try{const r=rehearseFactoryAlarm(f.path,'2026-11-10',now);expect(r.delivered).toBeNull();rehearseFactoryAlarm(f.path,'2026-11-10',now+1);const rows=f.db.query('SELECT * FROM messages').all() as Record<string,unknown>[];expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({recipient:'Vincent',recipient_app:'telegram'});expect(rows[0].summary).toContain('test of the new factory alarm');f.db.query('INSERT INTO telegram_messages VALUES(?,?,?)').run(123,r.id,now+2);expect(rehearseFactoryAlarm(f.path,'2026-11-10',now+3).delivered).toBe(`telegram:123:${now+2}`);}finally{f.db.close();}});
@@ -83,4 +84,15 @@ test('Telegram receipt failure cannot block independent Coordinator delivery or 
   expect((f.db.query("SELECT COUNT(*) AS n FROM messages WHERE recipient='Coordinator'").get() as {n:number}).n).toBeGreaterThan(0);
   const db=new Database(join(f.dir,'missing-controller/health/state.sqlite'),{readonly:true});try{expect((db.query("SELECT COUNT(*) AS n FROM delivery_failures WHERE recipient='Vincent'").get() as {n:number}).n).toBeGreaterThan(0);}finally{db.close();}
  }finally{f.db.close();}
+});
+
+test('expired original sign-in remains observable as expired metadata without AWS calls',async()=>{
+ const f=bridge(),s=new Store(join(f.dir,'controller.sqlite')),now=Date.now()+1000,calls:string[][]=[];
+ try{
+  s.set('paused',false);s.set('heartbeat',{at:now,status:'ok',ready:0});s.event('start','resume',{},'retain',now-1);
+  writeFileSync(join(f.dir,'config.yaml'),JSON.stringify(config()));writeFileSync(join(f.dir,'qualifications.json'),'{}');writeFileSync(join(f.dir,'tick.log'),JSON.stringify({at:now,status:'ok'})+'\n');
+  writeFileSync(join(f.dir,'release-auth-session.json'),JSON.stringify({version:1,kind:'original-password-mfa-session',signedInAt:new Date(now-600000).toISOString(),expiresAt:new Date(now-60000).toISOString(),receipt:'fictional expired original sign-in'}));
+  const r=await collectFactoryHealth(f.dir,now,null,undefined,async args=>{calls.push(args);return JSON.stringify(args.at(-1)?.includes('variables')?{value:JSON.stringify({version:1,id:'fictional',held:false,legacy_issue:null,at:new Date(now).toISOString(),by:'fixture',reason:'fixture off'})}:{labels:[]});});
+  expect(r.snapshot.aws).toMatchObject({state:'ok',value:{verified:true,expiresAt:now-60000}});expect(evaluateFactoryHealth(r.snapshot,()=>now).findings.find(f=>f.condition==='aws')).toMatchObject({status:'incident'});expect(calls.every(c=>c[0]==='gh'&&c.includes('GET'))).toBe(true);
+ }finally{s.close();f.db.close();}
 });

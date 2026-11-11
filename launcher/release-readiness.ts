@@ -23,11 +23,16 @@ const heldLabel=(l:unknown)=>record(l)&&typeof l.name==='string'&&['qa hold','qa
 
 // This is original sign-in provenance, not an AWS access-token/role-credential
 // expiry. Refreshing either of those never extends a password/MFA session.
-export function originalSessionExpiry(raw:unknown,now:number,validThrough:number) {
+export function originalSessionMetadata(raw:unknown,now:number) {
  if(!record(raw)||raw.version!==1||raw.kind!=='original-password-mfa-session'||typeof raw.signedInAt!=='string'||typeof raw.expiresAt!=='string'||typeof raw.receipt!=='string'||!raw.receipt.trim())throw Error('original AWS sign-in receipt is missing');
  const start=Date.parse(raw.signedInAt),end=Date.parse(raw.expiresAt);
- if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=start||end-start>24*3600000||end<=validThrough)throw Error('original AWS sign-in does not remain valid through 22:30');
+ if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=start||end-start>24*3600000)throw Error('original AWS sign-in provenance is invalid');
  return {signedInAt:start,expiresAt:end,receipt:raw.receipt};
+}
+export function originalSessionExpiry(raw:unknown,now:number,validThrough:number) {
+ const p=originalSessionMetadata(raw,now);
+ if(p.expiresAt<=now||p.expiresAt<=validThrough)throw Error('original AWS sign-in does not remain valid through 22:30');
+ return p;
 }
 
 export function supportedReleaseHold(hold:unknown){
