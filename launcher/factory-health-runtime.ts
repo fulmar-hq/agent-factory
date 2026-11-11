@@ -1,7 +1,7 @@
 import {publisherBoundary,publisherQualificationVerified} from './publisher-evidence';
 import {Database} from 'bun:sqlite';
 import {openSync,closeSync,fstatSync,readSync,readFileSync,existsSync,mkdirSync,writeFileSync,renameSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,dirname} from 'node:path';
 import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {z} from 'zod';
@@ -17,8 +17,8 @@ import {processIdentity} from './process';
 import {qualificationEvidenceVerified} from './qualification-evidence';
 import {NativeReceipt} from '../adapters/native';
 import {WorkerAccounting} from '../adapters/workers';
-import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,supersedeHealthDelivery,unconfirmedHealthDeliveries,type FactoryHealthSnapshot,type HealthCondition,type HealthRecipient} from './factory-health';
-import {ownerMessageId,SHARED_SUBJECTS,type HardStopKind} from './loop-contract';
+import {healthReleaseWindows,transitionFactoryHealth,initialFactoryHealthState,FactoryHealthStateSchema,pendingHealthDeliveries,beginHealthDelivery,acknowledgeHealthDelivery,supersedeHealthDelivery,unconfirmedHealthDeliveries,earlyHealthRecoveries,type FactoryHealthSnapshot,type HealthCondition,type HealthRecipient} from './factory-health';
+import {ownerMessageId,SHARED_SUBJECTS,SENDER_HEARTBEAT_FILE,HEARTBEAT_STALE_MS,LoopHeartbeatSchema,type HardStopKind} from './loop-contract';
 const failed=(at:number,reason:string)=>({state:'unavailable' as const,observedAt:at,reason});
 const ok=<T>(at:number,receipt:string,value:T)=>({state:'ok' as const,observedAt:at,receipt,value});
 function tail(path:string){const fd=openSync(path,'r');try{const stat=fstatSync(fd),n=Math.min(stat.size,65536),bytes=Buffer.alloc(n);readSync(fd,bytes,0,n,stat.size-n);return bytes.toString().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});}finally{closeSync(fd);}}
@@ -148,22 +148,42 @@ export function healthHardStopId(condition:HealthHardStop,at:number){
 function hardStopId(m:{recipient:HealthRecipient;hardStop:boolean;condition:HealthCondition;createdAt:number}){
  return m.recipient==='Vincent'&&m.hardStop&&m.condition in HEALTH_HARD_STOPS?healthHardStopId(m.condition as HealthHardStop,m.createdAt):null;
 }
+/**
+ * Every id Vincent's row for a hard stop can carry: the contract's, or, when
+ * that one is already taken that day, the opening's own. The mail table must
+ * list both shapes as hard stops; the cross-repository test sends each through it.
+ */
+export function healthHardStopRowIds(opening:{id:string;condition:HealthHardStop;createdAt:number}){
+ return [healthHardStopId(opening.condition,opening.createdAt),`${opening.id}:Vincent`] as const;
+}
 
 const torontoTime=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',dateStyle:'short',timeStyle:'short',hourCycle:'h23'});
 // What the mail gate may do with a row for Vincent instead of sending it. None
 // is a delivery. They are read from wake_state, where a sender that predates
 // the gate never looks for rows to send.
 const GATE_STATES=['held','folded','cancelled'] as const;
-export type BridgeStatus={state:'delivered';receipt:string}|{state:typeof GATE_STATES[number]|'queued'|'missing'};
+// `carried`: the Telegram receipt of the message a folded row was folded into, when that message was sent.
+export type BridgeStatus={state:'delivered';receipt:string}|{state:'folded';carried:string|null}|{state:'held'|'cancelled'|'queued'|'missing'};
 export function healthBridge(path:string){
  if(!existsSync(path))throw Error('existing Alido Mail bridge unavailable');
  const db=new Database(path,{readwrite:true,strict:true});db.exec('PRAGMA busy_timeout=1000');
+ const telegram=(id:string)=>{const sent=db.query('SELECT message_id,sent_at FROM telegram_messages WHERE mail_id=?').get(id) as {message_id:number;sent_at:number}|null;return sent?`telegram:${sent.message_id}:${sent.sent_at}`:null;};
+ // Alido Mail's daily budget for Vincent is running when its table is in the
+ // store and its sender's heartbeat, beside the store, is fresh. All limiting
+ // of routine mail to him lives there, so the job must know when it is absent.
+ const gated=(now:number)=>{
+  try{
+   if(!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_gate'").get())return false;
+   const beat=LoopHeartbeatSchema.parse(JSON.parse(readFileSync(join(dirname(path),SENDER_HEARTBEAT_FILE),'utf8')));
+   return Math.abs(now-beat.at)<=HEARTBEAT_STALE_MS;
+  }catch{return false;}
+ };
  // Vincent's row is delivered only when Alido Mail holds its Telegram sent time.
  // The Coordinator's fyi is delivered when Alido Mail has put it in a wake
  // ("digested") or it has been read. That leg is information only: it is never
  // proof that anyone saw the alarm, and it never stands in for Vincent's leg.
  const status=(id:string,recipient:HealthRecipient):BridgeStatus=>{
-  if(recipient==='Vincent'){const sent=db.query('SELECT message_id,sent_at FROM telegram_messages WHERE mail_id=?').get(id) as {message_id:number;sent_at:number}|null;if(sent)return {state:'delivered',receipt:`telegram:${sent.message_id}:${sent.sent_at}`};}
+  if(recipient==='Vincent'){const receipt=telegram(id);if(receipt)return {state:'delivered',receipt};}
   const row=db.query('SELECT state,wake_state,wake_id FROM messages WHERE id=?').get(id) as {state:string|null;wake_state:string|null;wake_id:string|null}|null;
   if(!row)return {state:'missing'};
   if(row.state==='superseded')return {state:'cancelled'};
@@ -172,9 +192,14 @@ export function healthBridge(path:string){
    return row.state==='read'||row.state==='acked'?{state:'delivered',receipt:`alido-mail:${id}:${row.state}`}:{state:'queued'};
   }
   const gate=GATE_STATES.find(g=>g===row.wake_state);
-  return {state:gate??'queued'};
+  if(gate!=='folded')return {state:gate??'queued'};
+  // The gate names the message it folded this row into. That message's receipt,
+  // if it has one, is the proof that he was told.
+  let into:string|null=null;try{into=(db.query('SELECT into_mail FROM owner_gate WHERE mail_id=?').get(id) as {into_mail:string|null}|null)?.into_mail??null;}catch{/* A store without the gate's table names no carrier. */}
+  const receipt=into?telegram(into):null;
+  return {state:'folded',carried:receipt?`${receipt}:carried-by:${into}`:null};
  };
- return {close:()=>db.close(),status,
+ return {close:()=>db.close(),status,gated,
  // `sameCondition`: a contract-built id is shared by every writer of one
  // condition on one day, so an existing row may carry another writer's wording.
  send:(id:string,recipient:HealthRecipient,message:string,sameCondition=false)=>{
@@ -199,50 +224,84 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   const reload=()=>{const current=db.query('SELECT json FROM state WHERE id=1').get() as {json:string};state=FactoryHealthStateSchema.parse(JSON.parse(current.json));};
   save();db.exec('COMMIT');
   const bridge=healthBridge(mail);let unconfirmed:{notification:string;recipient:HealthRecipient;hardStop:boolean;reason:string;createdAt:number}[]=[];
+  // Without the mail gate nothing else limits routine mail to Vincent, so the job spaces its own.
+  const mailGate=bridge.gated(now),rules={ungated:!mailGate};
+  const linked=(notification:string,recipient:HealthRecipient)=>(db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(notification,recipient) as {bridge_id:string}|null)?.bridge_id??null;
+  const failure=(notification:string,recipient:HealthRecipient,error:unknown)=>{if(db.inTransaction)db.exec('ROLLBACK');db.query('INSERT INTO delivery_failures VALUES(?,?,?,?)').run(notification,recipient,now,String(error));};
   // Two passes, so a recovery whose opening is confirmed in this run goes out in this run.
-  try{for(let pass=0;pass<2;pass++)for(const pending of pendingHealthDeliveries(state,()=>now)){
+  try{for(let pass=0;pass<2;pass++)for(const pending of pendingHealthDeliveries(state,()=>now,rules)){
    try{
 
    db.exec('BEGIN IMMEDIATE');reload();
-   const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now);state=begun.state;
+   const begun=beginHealthDelivery(state,pending.notificationId,pending.recipient,()=>now,rules);state=begun.state;
    const command=begun.command,id=command.idempotencyKey;
-   let link=db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(command.notificationId,command.recipient) as {bridge_id:string}|null;
+   // A hard stop for Vincent is strict whichever id its row carries: it is
+   // never borrowed, and held, folded or cancelled is never taken on trust.
+   const stop=hardStopId(command),strict=command.hardStop&&command.recipient==='Vincent';
+   let link=linked(command.notificationId,command.recipient);
    if(!link){
-    // A hard stop takes the contract's id and never borrows another alarm's row,
-    // which could be held. The contract allows one such id per condition and day,
-    // so a later opening the same day keeps its own id rather than pass unsaid.
-    const stop=hardStopId(command),first=stop!==null&&!db.query('SELECT 1 FROM delivery_links WHERE bridge_id=?').get(stop);
-    // Another writer's alarm for the same condition still stands in for this one.
-    // An earlier health message does not (a reopened condition is said again),
-    // nor does a row Alido Mail folded or cancelled, which will never be sent.
-    const related=!first&&command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(command.condition)?relatedFactoryAlarm(mail,command.condition as 'qualification'|'disk'|'release'|'work',now,id):null;
+    // A hard stop takes the contract's id. The contract allows one such id per
+    // condition and day, so a later one the same day keeps its opening's own id,
+    // which the mail table also lists as a hard stop, rather than pass unsaid.
+    const first=stop!==null&&!db.query('SELECT 1 FROM delivery_links WHERE bridge_id=?').get(stop);
+    // Another writer's alarm for the same condition still stands in for a routine
+    // opening. An earlier health message does not (a reopened condition is said
+    // again), nor does a row Alido Mail folded or cancelled, which will never be sent.
+    const related=!strict&&command.recipient==='Vincent'&&command.kind==='opening'&&['qualification','disk','release','work'].includes(command.condition)?relatedFactoryAlarm(mail,command.condition as 'qualification'|'disk'|'release'|'work',now,id):null;
     const borrowed=related&&!related.id.startsWith('factory-health:')&&!['folded','cancelled'].includes(bridge.status(related.id,'Vincent').state)?related.id:null;
-    link={bridge_id:first?stop:borrowed??id};db.query('INSERT INTO delivery_links VALUES(?,?,?)').run(command.notificationId,command.recipient,link.bridge_id);
+    link=first?stop:borrowed??id;db.query('INSERT INTO delivery_links VALUES(?,?,?)').run(command.notificationId,command.recipient,link);
    }
    save();db.exec('COMMIT');
-   const strict=link.bridge_id===hardStopId(command),cleared=state.episodes[command.condition].some(e=>e.openingId===command.notificationId&&e.clearedAt!==null);
+   const cleared=state.episodes[command.condition].some(e=>e.openingId===command.notificationId&&e.clearedAt!==null);
    // Current state wins here too: an opening that never reached Alido Mail is not written once its condition has cleared.
-   const stale=cleared&&bridge.status(link.bridge_id,command.recipient).state==='missing';
-   if(!stale&&(link.bridge_id===id||strict))bridge.send(link.bridge_id,command.recipient,command.message,strict);
-   const status=bridge.status(link.bridge_id,command.recipient);
+   const stale=cleared&&bridge.status(link,command.recipient).state==='missing';
+   // A contract id is shared by every writer of one condition on one day, so its row may carry another's wording.
+   if(!stale&&(link===id||link===stop))bridge.send(link,command.recipient,command.message,link===stop);
+   const status=bridge.status(link,command.recipient);
+   // A hard stop the gate folded into a message he was sent has reached him: that message's receipt is the proof.
+   const receipt=status.state==='delivered'?status.receipt:strict&&status.state==='folded'?status.carried:null;
    // Alido Mail will never send a row it folded or cancelled, so that is archived
-   // too. A hard stop is the exception: the gate must not fold or cancel one, so
-   // it stays visible as unconfirmed for as long as its condition is open.
+   // too. A hard stop without that proof is the exception: it stays visible as
+   // unconfirmed for as long as its condition is open.
    const reason=stale?'cleared before it was sent':(status.state==='folded'||status.state==='cancelled')&&(!strict||cleared)?`${status.state} by Alido Mail`:null;
-   if(status.state==='delivered'){db.exec('BEGIN IMMEDIATE');reload();state=acknowledgeHealthDelivery(state,command,{state:'delivered',receipt:status.receipt},()=>now);save();db.exec('COMMIT');}
+   if(receipt){db.exec('BEGIN IMMEDIATE');reload();state=acknowledgeHealthDelivery(state,command,{state:'delivered',receipt},()=>now);save();db.exec('COMMIT');}
    else if(reason){db.exec('BEGIN IMMEDIATE');reload();state=supersedeHealthDelivery(state,command.notificationId,command.recipient,reason,()=>now);archived++;save();db.exec('COMMIT');}
-   }catch(error){if(db.inTransaction)db.exec('ROLLBACK');db.query('INSERT INTO delivery_failures VALUES(?,?,?,?)').run(pending.notificationId,pending.recipient,now,String(error));}
+   }catch(error){failure(pending.notificationId,pending.recipient,error);}
+  }
+  // A routine opening the gate holds says nothing once its condition has
+  // cleared. Its recovery is handed over early, under this job's own ids only,
+  // so that the gate can cancel the pair; the gate's answer is read back here
+  // on later runs. Without this the held opening is named at the next fixed slot.
+  reload();
+  for(const early of earlyHealthRecoveries(state,()=>now)){
+   if(early.recipient!=='Vincent')continue;
+   try{
+    const id=`${early.notificationId}:Vincent`,opening=`${early.openingId}:Vincent`;let attempt=early.attemptId;
+    const held=linked(early.openingId,'Vincent')===opening&&bridge.status(opening,'Vincent').state==='held';
+    if(!attempt){
+     if(!held)continue;
+     db.exec('BEGIN IMMEDIATE');reload();
+     const begun=beginHealthDelivery(state,early.notificationId,'Vincent',()=>now,{early:true});state=begun.state;attempt=begun.command.attemptId;
+     db.query('INSERT OR IGNORE INTO delivery_links VALUES(?,?,?)').run(early.notificationId,'Vincent',id);save();db.exec('COMMIT');
+    }
+    // Written again while the opening is still held, in case the first write did not land.
+    if(held)bridge.send(id,'Vincent',state.outbox.find(n=>n.id===early.notificationId)!.message);
+    const status=bridge.status(id,'Vincent'),command={notificationId:early.notificationId,recipient:'Vincent' as const,idempotencyKey:id,attemptId:attempt};
+    if(status.state==='delivered'){db.exec('BEGIN IMMEDIATE');reload();state=acknowledgeHealthDelivery(state,command,{state:'delivered',receipt:status.receipt},()=>now);save();db.exec('COMMIT');}
+    else if(status.state==='folded'||status.state==='cancelled'){db.exec('BEGIN IMMEDIATE');reload();state=supersedeHealthDelivery(state,early.notificationId,'Vincent',`${status.state} by Alido Mail`,()=>now);archived++;save();db.exec('COMMIT');}
+   }catch(error){failure(early.notificationId,early.recipient,error);}
   }
   // A message nobody confirmed after ten minutes is a fault of its own. A row
   // the mail gate holds, folds or cancels is the gate doing its job, not a
-  // fault, except for a hard stop, which has no such exception.
+  // fault, except for a hard stop, which has no such exception: only a receipt,
+  // its own or that of the message it was folded into, settles one.
   reload();
-  for(const late of unconfirmedHealthDeliveries(state,()=>now)){
-   const link=db.query('SELECT bridge_id FROM delivery_links WHERE notification=? AND recipient=?').get(late.notificationId,late.recipient) as {bridge_id:string}|null,strict=link?.bridge_id===hardStopId(late);
+  for(const late of unconfirmedHealthDeliveries(state,()=>now,rules)){
+   const link=linked(late.notificationId,late.recipient),strict=late.hardStop&&late.recipient==='Vincent';
    let reason='not yet written to Alido Mail';
-   if(link){try{const s=bridge.status(link.bridge_id,late.recipient).state;
-    if(s==='delivered'||(!strict&&s!=='queued'&&s!=='missing'))continue;
-    reason=s==='queued'?'written to Alido Mail but not sent':s==='missing'?'its Alido Mail row is missing':`${s} by the mail gate`;
+   if(link){try{const status=bridge.status(link,late.recipient),s=status.state;
+    if(s==='delivered'||(status.state==='folded'&&strict&&status.carried)||(!strict&&s!=='queued'&&s!=='missing'))continue;
+    reason=s==='queued'?'written to Alido Mail but not sent':s==='missing'?'its Alido Mail row is missing':s==='folded'?'folded by the mail gate into a message with no Telegram sent time':`${s} by the mail gate`;
    }catch(error){reason=`readback failed: ${String(error)}`;}}
    unconfirmed.push({notification:late.notificationId,recipient:late.recipient,hardStop:strict,reason,createdAt:late.createdAt});
   }
@@ -251,9 +310,10 @@ export async function watchFactoryHealth(dir:string,mail:string,at?:number,ports
   const stops=unconfirmed.filter(u=>u.hardStop).length,worst=unconfirmed[0];
   const deliveryAlarm=worst?`${unconfirmed.length} health message${unconfirmed.length>1?'s':''} unconfirmed after 10 minutes${stops?`, ${stops} of them a hard stop`:''}. First: ${worst.notification} for ${worst.recipient}, created ${torontoTime.format(worst.createdAt)} Toronto time, ${worst.reason}.`.slice(0,500):null;
   // The shared heartbeat shape: a time, and a plain reason when someone must look.
-  const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now,...(deliveryAlarm&&{alarm:deliveryAlarm})}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
+  // `mailGate` is the job's own field beside them: false means it is spacing routine mail itself.
+  const heartbeat=join(dir,'health',`heartbeat-${crypto.randomUUID()}.json`);writeFileSync(heartbeat,JSON.stringify({at:now,...(deliveryAlarm&&{alarm:deliveryAlarm}),mailGate}),{mode:0o600});renameSync(heartbeat,join(dir,'health','heartbeat.json'));
   // This result is the job's log line, so the alarm and the archive count are kept there too.
-  return {at:now,findings:evaluation.findings,outbox:state.outbox.length,archived,deliveryAlarm,unconfirmed};
+  return {at:now,findings:evaluation.findings,outbox:state.outbox.length,archived,deliveryAlarm,unconfirmed,mailGate};
  }finally{if(db.inTransaction)db.exec('ROLLBACK');db.close();}
 }
 export function rehearseFactoryAlarm(mail:string,day:string,now=Date.now()){

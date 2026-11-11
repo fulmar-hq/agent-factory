@@ -18,6 +18,9 @@ export const HEALTH_TIMING = Object.freeze({
   recurringOpenings: 3,
   recurringWindow: 60 * MINUTE,
   recurringQuiet: 30 * MINUTE,
+  // While Alido Mail's daily budget for Vincent is not running, the job spaces
+  // its own routine openings for him this far apart, per condition.
+  ungatedSpacing: 2 * 60 * MINUTE,
 });
 const timestamp = z.number().int().min(0).max(8_640_000_000_000_000);
 const text = z.string().trim().min(1);
@@ -420,6 +423,8 @@ const notificationSchema = z.object({
 export type HealthNotification = z.infer<typeof notificationSchema>;
 const episodeSchema = z.object({
   id: text, openingId: text, recoveryId: text, openedAt: timestamp, lastActionableAt: timestamp, clearedAt: timestamp.nullable(),
+  // The episode before it did not clear: it became a hard stop, and this one says so.
+  continues: z.literal(true).optional(),
 });
 const recurrenceSchema = z.object({ id: text, startedAt: timestamp, endedAt: timestamp.nullable() });
 const stateSchema = z.object({
@@ -458,6 +463,7 @@ function checkState(state: z.infer<typeof stateSchema>) {
     return expected.length;
   };
   let expectedCount = 0;
+  const hardStops = new Set(state.outbox.filter(n => n.hardStop).map(n => n.id));
   for (const condition of HEALTH_CONDITIONS) {
     const expected: Expected[] = [];
     const episodes = state.episodes[condition];
@@ -467,6 +473,7 @@ function checkState(state: z.infer<typeof stateSchema>) {
       if (e.id !== id || e.openingId !== `${id}:opening` || e.recoveryId !== `${id}:recovery` || !within(e.openedAt) ||
         !within(e.lastActionableAt) || e.lastActionableAt < e.openedAt ||
         (previous && (previous.clearedAt === null || e.openedAt < previous.clearedAt))) fail();
+      if (e.continues && (previous?.clearedAt !== e.openedAt || !hardStops.has(e.openingId) || hardStops.has(previous.openingId))) fail();
       expected.push({ id: e.openingId, incidentId: id, kind: "opening", at: e.openedAt });
       if (e.clearedAt !== null) {
         if (!within(e.clearedAt) || e.clearedAt < e.lastActionableAt) fail();
@@ -512,18 +519,45 @@ function copyState(raw: FactoryHealthState, at: number): FactoryHealthState {
 function delivered(n: HealthNotification, recipient: HealthRecipient) {
   return n.deliveries[recipient].attempts.find(a => a.result === "delivered");
 }
-/** The bad news a recovery or "settled" message follows. */
-function opener(state: FactoryHealthState, n: HealthNotification) {
-  const kind = n.kind === "recovery" ? "opening" : n.kind === "settled" ? "recurring" : null;
-  return kind && state.outbox.find(o => o.incidentId === n.incidentId && o.kind === kind);
+type Recurrence = z.infer<typeof recurrenceSchema>;
+const clip = (message: string) => message.length > 180 ? `${message.slice(0, 179)}…` : message;
+const recurringMessage = (message: string) => clip(`Keeps recurring: ${message}`);
+/** Everything raised while a "keeps recurring" span was open: its own message and each opening, in order. */
+function raisedIn(state: FactoryHealthState, condition: HealthCondition, span: Recurrence) {
+  const openings = new Set(state.episodes[condition].filter(e => e.openedAt >= span.startedAt && (span.endedAt === null || e.openedAt <= span.endedAt)).map(e => e.openingId));
+  return state.outbox.filter(n => n.id === `${span.id}:opening` || openings.has(n.id));
+}
+/**
+ * Whether this recipient has already been told what `opening` says since the
+ * span opened. The "keeps recurring" message stands only for the fault it
+ * names, and never for a hard stop. So a different fault, and the first hard
+ * stop, raised while it is open are still sent, once each. A hard stop is
+ * said again on a later day, however long the span has been open.
+ */
+function saidIn(state: FactoryHealthState, span: Recurrence, opening: HealthNotification, recipient: HealthRecipient) {
+  for (const n of raisedIn(state, opening.condition, span)) {
+    if (n.deliveries[recipient].superseded) continue;
+    if (n.kind === "recurring") { if (!opening.hardStop && n.message === recurringMessage(opening.message)) return true; }
+    else if (n.createdAt < opening.createdAt && n.message === opening.message && (!opening.hardStop || dayOf(n.createdAt) === dayOf(opening.createdAt))) return true;
+  }
+  return false;
+}
+/** Good news follows only bad news this recipient actually received. */
+function told(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient) {
+  if (n.kind === "recovery") return state.outbox.some(o => o.incidentId === n.incidentId && o.kind === "opening" && delivered(o, recipient));
+  if (n.kind !== "settled") return true;
+  const span = (state.recurrences[n.condition] ?? []).find(r => r.id === n.incidentId);
+  return span !== undefined && raisedIn(state, n.condition, span).some(o => delivered(o, recipient));
 }
 /**
  * Current state wins. A message that was never handed to the bridge is
  * archived, not sent, once it no longer describes the condition: an opening
  * whose episode has cleared goes with its recovery, a recovery goes when the
- * condition has reopened, and both go while a "keeps recurring" message covers
- * the condition. Nothing is deleted, and a "keeps recurring" message is never
- * archived here. A message already handed over is left to its readback.
+ * condition has reopened, and while a "keeps recurring" message is open an
+ * opening that repeats what was already said goes, with every recovery (the
+ * "stopped recurring" message closes them all). Nothing is deleted, and a
+ * "keeps recurring" message is never archived here. A message already handed
+ * over is left to its readback.
  */
 function settle(state: FactoryHealthState, now: number): number {
   let archived = 0;
@@ -532,23 +566,28 @@ function settle(state: FactoryHealthState, now: number): number {
   const byId = new Map(state.outbox.map(n => [n.id, n]));
   for (const condition of HEALTH_CONDITIONS) {
     const episodes = state.episodes[condition], spans = state.recurrences[condition] ?? [];
-    const covered = (at: number) => spans.some(r => at >= r.startedAt && (r.endedAt === null || at <= r.endedAt));
+    const spanAt = (at: number) => spans.find(r => at >= r.startedAt && (r.endedAt === null || at <= r.endedAt));
     episodes.forEach((e, i) => {
       const opening = byId.get(e.openingId)!, recovery = e.clearedAt === null ? null : byId.get(e.recoveryId)!;
+      const span = spanAt(e.openedAt), worsened = episodes[i + 1]?.continues === true;
       for (const r of RECIPIENTS) {
         if (waiting(opening, r)) {
-          if (covered(e.openedAt)) archive(opening, r, "covered by the keeps-recurring message");
-          else if (e.clearedAt !== null) archive(opening, r, "cleared before it was sent");
+          if (span && saidIn(state, span, opening, r)) archive(opening, r, "covered by the keeps-recurring message");
+          else if (e.clearedAt !== null) archive(opening, r, worsened ? "became a hard stop before it was sent" : "cleared before it was sent");
         }
         if (!recovery || !waiting(recovery, r)) continue;
-        if (opening.deliveries[r].superseded) archive(recovery, r, "its opening was never sent");
-        else if (covered(e.clearedAt!)) archive(recovery, r, "covered by the keeps-recurring message");
+        if (worsened) archive(recovery, r, "the condition became a hard stop");
+        else if (opening.deliveries[r].superseded) archive(recovery, r, "its opening was never sent");
+        else if (spanAt(e.clearedAt!)) archive(recovery, r, "covered by the keeps-recurring message");
         else if (i < episodes.length - 1) archive(recovery, r, "the condition reopened before this was sent");
       }
     });
     for (const span of spans) {
-      const notice = byId.get(`${span.id}:opening`)!, closing = span.endedAt === null ? null : byId.get(`${span.id}:recovery`)!;
-      for (const r of RECIPIENTS) if (closing && waiting(closing, r) && notice.deliveries[r].superseded) archive(closing, r, "its opening was never sent");
+      const closing = span.endedAt === null ? null : byId.get(`${span.id}:recovery`)!;
+      if (!closing) continue;
+      // It closes for whoever was told anything while the span was open.
+      const raised = raisedIn(state, condition, span);
+      for (const r of RECIPIENTS) if (waiting(closing, r) && raised.every(n => n.deliveries[r].superseded)) archive(closing, r, "its opening was never sent");
     }
   }
   return archived;
@@ -559,7 +598,6 @@ export function settleHealthOutbox(raw: FactoryHealthState, clock: HealthClock):
   return { state, archived: settle(state, now) };
 }
 
-const clip = (message: string) => message.length > 180 ? `${message.slice(0, 179)}…` : message;
 /**
  * Serializable incident/outbox transition; no I/O. Every actionable condition opens
  * one episode; only fresh, positive healthy evidence clears it. Pending/unknown
@@ -572,6 +610,8 @@ const clip = (message: string) => message.length > 180 ? `${message.slice(0, 179
  * condition inside an hour also raises one "keeps recurring" message, which
  * that rule never archives and which closes with one "stopped recurring" message
  * after the condition has been quiet for thirty minutes. No periodic reminders.
+ * A hard stop is always said by an opening of its own: an open episode that
+ * becomes one is closed and opened again as a hard stop in the same evaluation.
  */
 export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: FactoryHealthSnapshot, clock: HealthClock): { state: FactoryHealthState; evaluation: HealthEvaluation; archived: number } {
   const now = time(clock), state = copyState(raw, now);
@@ -586,17 +626,27 @@ export function transitionFactoryHealth(raw: FactoryHealthState, snapshot: Facto
     const episodes = state.episodes[f.condition], current = episodes.at(-1);
     const spans = state.recurrences[f.condition] ?? [], recurring = spans.at(-1)?.endedAt === null ? spans.at(-1)! : null;
     if (f.status === "incident" || f.status === "unknown") {
-      if (current?.clearedAt === null) { current.lastActionableAt = now; continue; }
+      const continues = current?.clearedAt === null;
+      if (current && continues) {
+        current.lastActionableAt = now;
+        // Already said, unless it has just become a hard stop. That is never left
+        // inside a routine episode: this one is closed (its closing message is
+        // archived, never sent) and a hard-stop episode is opened in its place.
+        if (!f.hardStop || state.outbox.some(n => n.id === current.openingId && n.hardStop)) continue;
+        current.clearedAt = now;
+        enqueue(f.condition, current.id, current.recoveryId, "recovery", "Replaced by a hard stop for the same condition.");
+      }
       const id = `factory-health:${f.condition}:${episodes.length + 1}:${now}`;
-      const episode = { id, openingId: `${id}:opening`, recoveryId: `${id}:recovery`, openedAt: now, lastActionableAt: now, clearedAt: null };
+      const episode = { id, openingId: `${id}:opening`, recoveryId: `${id}:recovery`, openedAt: now, lastActionableAt: now, clearedAt: null, ...(continues && { continues }) };
       episodes.push(episode);
       enqueue(f.condition, id, episode.openingId, "opening", f.message, f.hardStop);
-      // Count only openings since the last "keeps recurring" message closed.
+      // Count only openings since the last "keeps recurring" message closed. A
+      // fault that became a hard stop did not come back, so it is not counted twice.
       const since = Math.max(now - HEALTH_TIMING.recurringWindow, spans.at(-1)?.endedAt ?? -1);
-      if (!recurring && episodes.filter(e => e.openedAt > since).length >= HEALTH_TIMING.recurringOpenings) {
+      if (!recurring && episodes.filter(e => e.openedAt > since && !e.continues).length >= HEALTH_TIMING.recurringOpenings) {
         const recurringId = `factory-health:${f.condition}:recurring:${now}`;
         (state.recurrences[f.condition] ??= []).push({ id: recurringId, startedAt: now, endedAt: null });
-        enqueue(f.condition, recurringId, `${recurringId}:opening`, "recurring", clip(`Keeps recurring: ${f.message}`));
+        enqueue(f.condition, recurringId, `${recurringId}:opening`, "recurring", recurringMessage(f.message));
       }
       continue;
     }
@@ -629,33 +679,69 @@ export type HealthDeliveryCommand = {
   attemptId: string; message: string; kind: HealthNotification["kind"]; createdAt: number;
   condition: HealthCondition; hardStop: boolean;
 };
-function due(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient, now: number) {
+/**
+ * `ungated`: Alido Mail's daily budget for Vincent is not running, so the job
+ * spaces its own routine openings for him. `early`: hand over a recovery whose
+ * opening Alido Mail is holding, so that the two can be cancelled together.
+ */
+export type HealthDeliveryRules = { ungated?: boolean; early?: boolean };
+/**
+ * A routine opening for Vincent that waits because another for the same
+ * condition was handed over less than two hours ago. No queue forms behind it:
+ * if its condition clears while it waits it is archived, like any other.
+ */
+function spaced(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient, now: number) {
+  if (recipient !== "Vincent" || n.kind !== "opening" || n.hardStop || n.deliveries.Vincent.attempts.length) return false;
+  return state.outbox.some(o => o.condition === n.condition && o.kind === "opening" && o.id !== n.id &&
+    o.deliveries.Vincent.attempts.length > 0 && now - o.deliveries.Vincent.attempts[0]!.at < HEALTH_TIMING.ungatedSpacing);
+}
+/** A recovery whose routine opening was handed to Alido Mail and is neither confirmed nor archived. Never a hard stop's. */
+function behindOpening(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient) {
+  if (n.kind !== "recovery") return false;
+  const opening = state.outbox.find(o => o.incidentId === n.incidentId && o.kind === "opening");
+  return opening !== undefined && !opening.hardStop && opening.deliveries[recipient].attempts.length > 0 && !delivered(opening, recipient) && !opening.deliveries[recipient].superseded;
+}
+function due(state: FactoryHealthState, n: HealthNotification, recipient: HealthRecipient, now: number, rules: HealthDeliveryRules = {}) {
   const { attempts, superseded } = n.deliveries[recipient], last = attempts.at(-1);
   if (superseded || delivered(n, recipient) || n.createdAt > now || (last && now - (last.finishedAt ?? last.renewedAt ?? last.at) < HEALTH_TIMING.deliveryLease)) return false;
-  // Good news follows only bad news this recipient actually received.
-  const first = opener(state, n);
-  return first ? Boolean(delivered(first, recipient)) : true;
+  if (rules.ungated && spaced(state, n, recipient, now)) return false;
+  return told(state, n, recipient) || (rules.early === true && behindOpening(state, n, recipient));
 }
 
 /** Eligible intents only. Begin and persist the attempt before handing it to a bridge. */
-export function pendingHealthDeliveries(raw: FactoryHealthState, clock: HealthClock): { notificationId: string; recipient: HealthRecipient }[] {
+export function pendingHealthDeliveries(raw: FactoryHealthState, clock: HealthClock, rules: Pick<HealthDeliveryRules, "ungated"> = {}): { notificationId: string; recipient: HealthRecipient }[] {
   const now = time(clock), state = copyState(raw, now);
-  return state.outbox.flatMap(n => RECIPIENTS.filter(r => due(state, n, r, now)).map(recipient => ({ notificationId: n.id, recipient })));
+  return state.outbox.flatMap(n => RECIPIENTS.filter(r => due(state, n, r, now, rules)).map(recipient => ({ notificationId: n.id, recipient })));
+}
+
+/**
+ * Recoveries that wait for an opening Alido Mail has not confirmed, and those
+ * already handed over early. The caller hands one over early only when Alido
+ * Mail reports its opening held, and reads the answer back on later runs.
+ * `attemptId` is null until it has been handed over.
+ */
+export function earlyHealthRecoveries(raw: FactoryHealthState, clock: HealthClock): { notificationId: string; openingId: string; recipient: HealthRecipient; attemptId: string | null }[] {
+  const now = time(clock), state = copyState(raw, now);
+  return state.outbox.flatMap(n => n.kind !== "recovery" ? [] : RECIPIENTS.flatMap(recipient => {
+    const { attempts, superseded } = n.deliveries[recipient], opening = state.outbox.find(o => o.incidentId === n.incidentId && o.kind === "opening")!;
+    if (superseded || delivered(n, recipient) || delivered(opening, recipient) || !(attempts.length || behindOpening(state, n, recipient))) return [];
+    return [{ notificationId: n.id, openingId: opening.id, recipient, attemptId: attempts.at(-1)?.id ?? null }];
+  }));
 }
 
 /**
  * Messages nobody has confirmed more than ten minutes after they were first
  * handed over (or created, if they never were). A recovery still waiting for
- * its opening is not listed; its opening is. The caller asks the bridge why
- * each one is unconfirmed before calling it a fault.
+ * its opening is not listed; its opening is. Nor is an opening that is waiting
+ * out the spacing above. The caller asks the bridge why each one is unconfirmed
+ * before calling it a fault.
  */
-export function unconfirmedHealthDeliveries(raw: FactoryHealthState, clock: HealthClock): { notificationId: string; recipient: HealthRecipient; condition: HealthCondition; kind: HealthNotification["kind"]; hardStop: boolean; createdAt: number }[] {
+export function unconfirmedHealthDeliveries(raw: FactoryHealthState, clock: HealthClock, rules: Pick<HealthDeliveryRules, "ungated"> = {}): { notificationId: string; recipient: HealthRecipient; condition: HealthCondition; kind: HealthNotification["kind"]; hardStop: boolean; createdAt: number }[] {
   const now = time(clock), state = copyState(raw, now);
   return state.outbox.flatMap(n => RECIPIENTS.filter(r => {
     const { attempts, superseded } = n.deliveries[r];
     if (superseded || delivered(n, r) || now - (attempts[0]?.at ?? n.createdAt) <= HEALTH_TIMING.unconfirmedAfter) return false;
-    const first = opener(state, n);
-    return first ? Boolean(delivered(first, r)) : true;
+    return told(state, n, r) && !(rules.ungated && spaced(state, n, r, now));
   }).map(recipient => ({ notificationId: n.id, recipient, condition: n.condition, kind: n.kind, hardStop: n.hardStop === true, createdAt: n.createdAt })));
 }
 
@@ -666,11 +752,11 @@ export function unconfirmedHealthDeliveries(raw: FactoryHealthState, clock: Heal
  * A bridge-queued receipt alone must not be acknowledged as delivered. A retry
  * renews the attempt still in flight, so a long wait does not grow the state.
  */
-export function beginHealthDelivery(raw: FactoryHealthState, notificationId: string, recipient: HealthRecipient, clock: HealthClock): { state: FactoryHealthState; command: HealthDeliveryCommand } {
+export function beginHealthDelivery(raw: FactoryHealthState, notificationId: string, recipient: HealthRecipient, clock: HealthClock, rules: HealthDeliveryRules = {}): { state: FactoryHealthState; command: HealthDeliveryCommand } {
   const now = time(clock), state = copyState(raw, now);
   recipientSchema.parse(recipient);
   const n = state.outbox.find(n => n.id === notificationId);
-  if (!n || !due(state, n, recipient, now)) throw Error("Health delivery is not due");
+  if (!n || !due(state, n, recipient, now, rules)) throw Error("Health delivery is not due");
   const attempts = n.deliveries[recipient].attempts;
   let attempt = attempts.at(-1);
   if (attempt?.result === "in-flight") attempt.renewedAt = now;
@@ -679,7 +765,7 @@ export function beginHealthDelivery(raw: FactoryHealthState, notificationId: str
 }
 
 /** Exact attempt acknowledgement. Separate receipts; failure is retained and retryable. */
-export function acknowledgeHealthDelivery(raw: FactoryHealthState, command: HealthDeliveryCommand, result: { state: "delivered" | "failed"; receipt: string }, clock: HealthClock): FactoryHealthState {
+export function acknowledgeHealthDelivery(raw: FactoryHealthState, command: Pick<HealthDeliveryCommand, "notificationId" | "recipient" | "idempotencyKey" | "attemptId">, result: { state: "delivered" | "failed"; receipt: string }, clock: HealthClock): FactoryHealthState {
   const now = time(clock), state = copyState(raw, now);
   recipientSchema.parse(command.recipient);
   z.enum(["delivered", "failed"]).parse(result.state);

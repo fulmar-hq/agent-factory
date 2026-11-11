@@ -2,15 +2,17 @@
 // message's tier from its id alone, from a coded table in the mail repository.
 // This test builds every hard-stop id the launcher can build and checks that
 // the real mail code sends each one at once, even with the day's count spent.
-// A hard-stop kind the mail table does not list is held like routine mail, and
+// That is every contract id, and every id the health job gives a hard stop's
+// row when the day's contract id is already taken (the opening's own id). A
+// hard-stop kind the mail table does not list is held like routine mail, and
 // that fails here.
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { healthReleaseWindows } from "../launcher/factory-health";
-import { HEALTH_HARD_STOPS, healthBridge, healthHardStopId, type HealthHardStop } from "../launcher/factory-health-runtime";
+import { healthReleaseWindows, initialFactoryHealthState, transitionFactoryHealth } from "../launcher/factory-health";
+import { HEALTH_HARD_STOPS, healthBridge, healthHardStopId, healthHardStopRowIds, type HealthHardStop } from "../launcher/factory-health-runtime";
 import { HARD_STOP_KINDS, OWNER_MESSAGE_PREFIXES, SHARED_SUBJECTS, ownerMessageId, parseOwnerMessageId, type HardStopKind } from "../launcher/loop-contract";
 import { openRealMailStore, realMailSource } from "./helpers/real-mail-store";
 
@@ -18,16 +20,36 @@ const M = 60_000;
 // Two o'clock in the afternoon in Toronto, today: away from the gate's fixed slots.
 const tonight = healthReleaseWindows(Date.now())[0]!, day = tonight.day, AT = tonight.startAt - 6 * 60 * M;
 const KINDS = Object.keys(HARD_STOP_KINDS) as HardStopKind[];
-/** Every hard-stop id a launcher writer can build today: each kind with each shared subject. */
-const hardStopIds = (kinds: readonly HardStopKind[] = KINDS) =>
+/** Every contract hard-stop id a launcher writer can build today: each kind with each shared subject. */
+const contractIds = (kinds: readonly HardStopKind[] = KINDS) =>
   kinds.flatMap(kind => Object.values(SHARED_SUBJECTS).map(subject => ownerMessageId({ tier: "hard-stop", kind, subject, day })));
+/**
+ * The health job's hard stops, raised by the job's own rules: the disk over
+ * its limit, AWS access expired, the tick failed. Each with both ids its row
+ * for Vincent can carry.
+ */
+function healthStops() {
+  const source = <T>(value: T) => ({ state: "ok" as const, observedAt: AT, receipt: "fictional-readback", value });
+  const { state } = transitionFactoryHealth(initialFactoryHealthState(), { version: 1, capturedAt: AT,
+    disk: source({ usedFraction: 0.9 }), aws: source({ verified: true, credentialId: "fictional", expiresAt: AT - M }),
+    tick: source({ lastSuccessAt: AT - M, lastAttemptAt: AT, result: "failure" as const }),
+  }, () => AT);
+  return state.outbox.filter(n => n.hardStop).map(n => {
+    const condition = n.condition as HealthHardStop;
+    return { condition, kind: HEALTH_HARD_STOPS[condition].kind as HardStopKind, ids: healthHardStopRowIds({ id: n.id, condition, createdAt: n.createdAt }) };
+  });
+}
+/** Every id a hard stop for Vincent can be written under, or only those of some kinds. */
+const hardStopIds = (kinds: readonly HardStopKind[] = KINDS) =>
+  [...new Set([...contractIds(kinds), ...healthStops().filter(stop => kinds.includes(stop.kind)).flatMap(stop => stop.ids)])];
 
 type Mail = { path: string; send(now: number): Promise<unknown>; sentAt(id: string): number | null };
 /**
  * Spends the day's routine count, then writes one more routine row and every
  * hard stop, and runs one more send cycle. The routine row must be left
  * unsent (otherwise nothing was being held and the test proves nothing), and
- * every hard stop must have been sent.
+ * every hard stop must have reached him, as the health job itself reads it:
+ * sent, or folded into a message that was sent.
  */
 async function proveHardStopTier(mail: Mail, ids: string[]) {
   const write = (id: string, text: string) => {
@@ -40,19 +62,32 @@ async function proveHardStopTier(mail: Mail, ids: string[]) {
   write(control, "Routine control row.");
   for (const id of ids) write(id, `Hard stop ${id}.`);
   await mail.send(AT + M);
-  return { controlHeld: mail.sentAt(control) === null, unsent: ids.filter(id => mail.sentAt(id) === null) };
+  const bridge = healthBridge(mail.path);
+  try {
+    const reached = (id: string) => { const status = bridge.status(id, "Vincent"); return status.state === "delivered" || (status.state === "folded" && status.carried !== null); };
+    return { controlHeld: mail.sentAt(control) === null, unsent: ids.filter(id => !reached(id)) };
+  } finally { bridge.close(); }
 }
 
 describe("hard-stop ids", () => {
-  test("every one the launcher can build reads back as a hard stop of a known kind", () => {
-    const ids = hardStopIds();
+  test("every contract id the launcher can build reads back as a hard stop of a known kind", () => {
+    const ids = contractIds();
     expect(ids).toHaveLength(KINDS.length * Object.keys(SHARED_SUBJECTS).length);
     for (const id of ids) expect(parseOwnerMessageId(id)).toMatchObject({ tier: "hard-stop", day });
     expect(new Set(ids.map(id => parseOwnerMessageId(id)!.conditionKey)).size).toBe(ids.length);
     for (const id of ids) expect(id.startsWith(OWNER_MESSAGE_PREFIXES["hard-stop"])).toBe(true);
   });
-  test("the health job's hard stops are among them", () => {
-    for (const condition of Object.keys(HEALTH_HARD_STOPS) as HealthHardStop[]) expect(hardStopIds()).toContain(healthHardStopId(condition, AT));
+  test("the health job's hard stops are among them, and so is the second id each one's row can carry", () => {
+    const stops = healthStops();
+    expect(stops.map(stop => stop.condition as string).sort()).toEqual(Object.keys(HEALTH_HARD_STOPS).sort());
+    for (const { condition, ids: [contract, own] } of stops) {
+      expect(contract).toBe(healthHardStopId(condition, AT));
+      expect(contractIds()).toContain(contract);
+      // The opening's own id: what a second hard stop for the condition on the same day is written under.
+      expect(own).toBe(`factory-health:${condition}:1:${AT}:opening:Vincent`);
+      expect(hardStopIds()).toContain(own);
+    }
+    expect(hardStopIds()).toHaveLength(contractIds().length + stops.length);
   });
 });
 
@@ -63,7 +98,10 @@ describe("the tier check, against a stand-in gate", () => {
     const path = join(mkdtempSync(join(tmpdir(), "owner-tier-")), "mail.sqlite"), db = new Database(path);
     db.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY,send_id TEXT,created_at INTEGER,sender TEXT,sender_app TEXT,sender_ref TEXT,recipient TEXT,recipient_app TEXT,kind TEXT,reply TEXT,summary TEXT,body TEXT,thread_id TEXT,depth INTEGER,hash TEXT,state TEXT,wake_state TEXT,wake_id TEXT);
       CREATE TABLE telegram_messages(message_id INTEGER PRIMARY KEY,mail_id TEXT,sent_at INTEGER);`);
-    const table = listed.map(kind => `${OWNER_MESSAGE_PREFIXES["hard-stop"]}${kind}:`);
+    // The table lists a kind's contract ids, and the health job's own opening ids for the conditions of that kind.
+    const conditions = healthStops().filter(stop => listed.includes(stop.kind)).map(stop => stop.condition).join("|");
+    const table = [...listed.map(kind => `${OWNER_MESSAGE_PREFIXES["hard-stop"]}${kind}:`), ...(conditions ? [new RegExp(`^factory-health:(${conditions}):\\d+:\\d+:opening:Vincent$`)] : [])];
+    const lists = (id: string) => table.some(entry => typeof entry === "string" ? id.startsWith(entry) : entry.test(id));
     let routine = 2, message = 0;
     return {
       path,
@@ -72,7 +110,7 @@ describe("the tier check, against a stand-in gate", () => {
       // Sends what its table lists, and two routine rows a day; holds the rest.
       send: async now => {
         for (const { id } of db.query("SELECT id FROM messages WHERE wake_state='pending' ORDER BY rowid").all() as { id: string }[]) {
-          if (table.some(prefix => id.startsWith(prefix)) || routine-- > 0) db.query("INSERT INTO telegram_messages VALUES(?,?,?)").run(++message, id, now);
+          if (lists(id) || routine-- > 0) db.query("INSERT INTO telegram_messages VALUES(?,?,?)").run(++message, id, now);
           db.query("UPDATE messages SET wake_state=? WHERE id=?").run(db.query("SELECT 1 FROM telegram_messages WHERE mail_id=?").get(id) ? "woken" : "held", id);
         }
       },
