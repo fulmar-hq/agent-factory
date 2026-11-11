@@ -72,3 +72,26 @@ test('twenty-minute boundary, fresh queue, pause, usage stop and unknown custody
  f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('dormant','example/demo#1','product','codex','waiting-browser','{}');
  expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(false);f.s.set('cleanup-evidence:dormant',{verified:true});expect(observeIdleQueue(f.s.db,f.c,f.now).eligible).toBe(true);
 }finally{f.s.close();f.db.close();}});
+
+test('unavailable queue evidence alerts once after twenty minutes across reason changes and restart',()=>{const f=fixture();try{
+ f.s.set('heartbeat',{at:f.now-300001,status:'ok',ready:0});
+ expect(watchIdleQueue(f.dir,f.mail,f.now)).toMatchObject({eligible:false,observationUnavailable:true,alert:null});
+ // A newer heartbeat with stale inventory is the same observation failure.
+ f.s.set('heartbeat',{at:f.now+20*60000,status:'ok',ready:0});
+ expect(watchIdleQueue(f.dir,f.mail,f.now+20*60000).alert).toBeNull();
+ const r=watchIdleQueue(f.dir,f.mail,f.now+20*60000+1);
+ expect(r.eligible).toBe(false);expect(r.alert).toStartWith('factory-queue-observation:');
+ expect(f.db.query('SELECT kind,summary FROM messages').all()).toEqual([{kind:'action',summary:'Factory queue observation has been unavailable for over 20 minutes. Supply and builder activity need checking.'}]);
+ expect(watchIdleQueue(f.dir,f.mail,f.now+21*60000).alert).toBe(r.alert);
+ expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);
+ // A positive observation ends the episode; it never fabricates idleness.
+ f.s.set('heartbeat',{at:f.now+22*60000,status:'ok',ready:1});
+ expect(watchIdleQueue(f.dir,f.mail,f.now+22*60000).observationUnavailable).toBeUndefined();
+}finally{f.s.close();f.db.close();}});
+test('paused and positively nonempty queues do not accumulate an observation gap',()=>{const f=fixture();try{
+ f.s.set('paused',true);expect(watchIdleQueue(f.dir,f.mail,f.now).alert).toBeNull();
+ expect(watchIdleQueue(f.dir,f.mail,f.now+30*60000).alert).toBeNull();
+ f.s.set('paused',false);f.s.set('heartbeat',{at:f.now,status:'ok',ready:2});
+ expect(watchIdleQueue(f.dir,f.mail,f.now+60*60000)).toMatchObject({reason:'queue has ready work',alert:null});
+ expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(0);
+}finally{f.s.close();f.db.close();}});
