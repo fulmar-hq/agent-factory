@@ -4,9 +4,10 @@ import {mkdtempSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../tracking/store';
-import {Engine} from '../launcher/engine';
+import {TestEngine as Engine} from './fixtures';
 import {config,ticket,admission,qualification} from './fixtures';
-import {queueWake,pendingWakes,dispatchWake,localWakes,githubWakes,recoverWorkers} from '../launcher/wake';
+import {queueWake,pendingWakes,localWakes,githubWakes,recoverWorkers} from '../launcher/wake';
+import {testDispatchWake as dispatchWake} from './fixtures';
 import {ownerSpec,runOwner} from '../launcher/owner';
 import {claimSupervisor,superviseSession} from '../launcher/worker';
 
@@ -21,7 +22,7 @@ test('ready, returned review, completed CI, release window and renewal deduplica
  const execute=async()=>githubPage('pullRequests',[{number:2,url:'https://github.com/example/demo/pull/2',headRefOid:'a'.repeat(40),reviews,statusCheckRollup:checks}]);
  await githubWakes(s,c,execute,now); // Historical baseline causes no model call.
  reviews=[{id:'review-1',state:'CHANGES_REQUESTED',submittedAt:new Date(now).toISOString()}];checks=[{status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/example/demo/actions/runs/1/job/2'}];
- await githubWakes(s,c,execute,now);await githubWakes(s,c,execute,now+60000);
+ await githubWakes(s,c,execute,now+600000);await githubWakes(s,c,execute,now+660000);
  expect(pendingWakes(s).filter(w=>w.kind==='review-returned')).toHaveLength(1);expect(pendingWakes(s).filter(w=>w.kind==='ci-finished')).toHaveLength(1);s.close();
 });
 test('owner resume is read-only and never inherits a signing socket or credentials',()=>{

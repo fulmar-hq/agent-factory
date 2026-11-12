@@ -4,7 +4,7 @@ The controller uses Bun's native SQLite in WAL mode, `BEGIN IMMEDIATE` for reser
 
 ## Policy and evidence
 
-`config.yaml` is read and validated by the controller. Only the explicit owner-run `factory add-project` setup command appends enrollment entries. Schedule is fixed to 20:00 QA and 21:30 Production, America/Toronto; another schedule is refused. Concurrency starts at the configured limit; heavy tests have their own slot. Prefix-overlapping allowed paths conflict. Claims accept printable ASCII paths only, remove `.` segments and compare lowercase paths, including retained claims. Non-ASCII claims (including ß and dotted/dotless I) are refused rather than approximating APFS case folding. Retained non-ASCII claims block admission until their owner reconciles and archives custody. Absolute paths, `..` segments, empty/root paths, backslashes and patterns are refused; spelling variants cannot allocate a second writer. Unsplit work above four helper-hours or spanning backend and screen is refused. Enrollment and owner assignment come from config. GitHub state labels alone cannot supply a bounded brief: Ready also needs the complete `factory` block and exactly one matching `ready:<digest>` label. With the owner token, run `bun scripts/control.ts approve-intake REPO ISSUE OWNER-RECEIPT` after reviewing the block. It validates the intake, creates a repository label and attaches that label plus `state:ready` using the signed-in GitHub account (triage+ authority). SHA-256/base64url binds repo, issue number and exact block bytes; body edits to the block invalidate approval, including edits before the next tick. Remove stale digest labels and reapprove to accept a reviewed edit. The command logs the receipt and undo. Label create/edit interruption fails closed; repeat approval to recover. A final launch reread validates the digest and reconciled ticket before reservation. Read/validation failures reserve nothing. Reservation, start claim and the synchronous supervisor-spawn attempt share a SQLite transaction; a synchronous spawn failure rolls it back so the ticket can retry. The supervisor cannot take custody until that transaction commits. A later label failure is logged without releasing the launched worker’s claim. Public authors cannot attach approval labels without repository label authority; anyone holding that authority can approve work. GitHub refresh follows explicit cursors through all issue and open-PR pages within a two-minute read deadline. No snapshot or owner wake is published before the cursor chain completes with matching totals and unique identities. Missing/repeated cursors, changing totals, partial nested labels/reviews/checks, malformed pages and API errors fail closed; the next tick retries without a model call. API errors keep old snapshots with a visible source error.
+`config.yaml` is read and validated by the controller. Only the explicit owner-run `factory add-project` setup command appends enrollment entries. Schedule is fixed to 20:00 QA and 21:30 Production, America/Toronto; another schedule is refused. Concurrency starts at the configured limit; heavy tests have their own slot. Prefix-overlapping allowed paths conflict. Claims accept printable ASCII paths only, remove `.` segments and compare lowercase paths, including retained claims. Non-ASCII claims (including ß and dotted/dotless I) are refused rather than approximating APFS case folding. Retained non-ASCII claims block admission until their owner reconciles and archives custody. Absolute paths, `..` segments, empty/root paths, backslashes and patterns are refused; spelling variants cannot allocate a second writer. Unsplit work above four helper-hours or spanning backend and screen is refused. Enrollment and owner assignment come from config. GitHub state labels alone cannot supply a bounded brief: Ready also needs the complete `factory` block and exactly one matching `ready:<digest>` label. With the owner token, run `bun scripts/control.ts approve-intake REPO ISSUE OWNER-RECEIPT` after reviewing the block. It validates the intake, creates a repository label and attaches that label plus `state:ready` using the signed-in GitHub account (triage+ authority). SHA-256/base64url binds repo, issue number and exact block bytes; body edits to the block invalidate approval, including edits before the next tick. Remove stale digest labels and reapprove to accept a reviewed edit. The command logs the receipt and undo. Label create/edit interruption fails closed; repeat approval to recover. A final launch reread validates the digest and reconciled ticket before reservation. Read/validation failures reserve nothing. Reservation, start claim and the synchronous supervisor-spawn attempt share a SQLite transaction; a synchronous spawn failure rolls it back so the ticket can retry. The supervisor cannot take custody until that transaction commits. A later label failure is logged without releasing the launched worker’s claim. Public authors cannot attach approval labels without repository label authority; anyone holding that authority can approve work. Scheduling reads the complete REST open-issue inventory through GitHub Link pagination, within a two-minute read deadline. Historical enrollment retains its explicit all-issue GraphQL cursor backfill. Open PR owner/board evidence uses shared ten-minute cached GraphQL pages; the owner poll also waits ten minutes between complete observations. Required launch and merge readbacks remain fresh. An absent previously-open issue requires fresh exact-identity REST closure proof; an issue still open or an unavailable closure read rejects the whole observation and retains previous snapshots. Offset-page absence alone never establishes closure. GraphQL refresh follows explicit cursors through all requested pages within the same deadline. No snapshot or owner wake is published before the cursor chain completes with matching totals and unique identities. Missing/repeated cursors, changing totals, partial nested labels/reviews/checks, malformed pages and API errors fail closed; the next tick retries without an idle polling model call. API errors keep old snapshots with a visible source error.
 
 A private `repositories.json` maps enrolled `owner/repo` names to existing local Git checkouts. Every helper gets a new branch and worktree under the private installation. Existing work is not reset or cleaned. The launcher retains every session claim after completion. A label reset or estimate change alone cannot replay a claim. A new numbered attempt is allowed only when every prior attempt is archived with a recorded custody receipt, its original digest is known, no prior attempt has a recorded PR, and fresh all-state GitHub readback finds no PR for any prior assigned branch. The owner-token approval control must record a receipt for a NEW exact block digest after the latest custody archive. The normal fresh intake reread and all admission gates still apply. A live or unknown prior session, unknown PR readback or reused digest refuses admission. Reservation, attempt number, digest uniqueness, claim and spawn stay in the same immediate transaction, so concurrent ticks can claim a digest once. A synchronous spawn failure rolls that transaction back; uncertain starts retain custody. Each attempt gets its own workspace, logs, claims and conservative debit; no old work, claim or charge is reset. Initial session IDs stay unchanged. The SQLite upgrade retains original rows in `sessions_v1_archive`, preserves their foreign-key claims and derives legacy digests only from approval receipts preceding the original reservation. Missing legacy provenance refuses retry. Undo through a signed revert after reconciling affected attempts; retain the migration archive and operational history.
 
@@ -69,7 +69,7 @@ Primary interface references: [Bun SQLite](https://bun.sh/docs/api/sqlite), [Cod
 
 ## Project enrollment
 
-`factory add-project <owner/repo> [--dry-run]` (or `bun run factory -- add-project <owner/repo>`) uses the signed-in `gh` account for read-only issue backfill. It preserves comments and unrelated policy bytes, requires a block-style `projects:` mapping, and validates the proposed config before writing. A source error or the 1,000-issue cap refuses enrollment. Existing enabled projects are refused; existing read-only entries refresh without duplication. Empty owners prevent admission on future ticks; this command never runs a tick or worker.
+`factory add-project <owner/repo> [--dry-run]` (or `bun run factory -- add-project <owner/repo>`) uses the signed-in `gh` account for read-only issue backfill. It preserves comments and unrelated policy bytes, requires a block-style `projects:` mapping, and validates the proposed config before writing. A source error or incomplete paginated backfill refuses enrollment. Existing enabled projects are refused; existing read-only entries refresh without duplication. Empty owners prevent admission on future ticks; this command never runs a tick or worker.
 
 Run setup with one policy writer at a time. Before replacing config it checks for intervening changes, archives the original under private `archive/add-project-UUID/config.yaml`, then records snapshots and an append-only undo event. Config and SQLite are separate files: interruption between writes can leave an enrolled entry without snapshots; repeat the command to recover. Undo by restoring the archived config after checking for later policy edits; retain the archive, snapshots and events. Dry run uses only an in-memory database and writes nothing, including no receipt; save its output privately when evidence is needed. To rehearse actual writes without live enrollment, copy config into a private staging directory and set `FACTORY_PRIVATE_DIR` to that directory.
 
@@ -102,6 +102,8 @@ A dispatch claim is committed before spawning. An uncertain start is retained, n
 
 ## Executable delivery checks
 
+On macOS, the old Alido `test_calendar_build_diagnostic.py` deliberately calls `os.abort()` in a child. `RLIMIT_CORE=0` prevents core files but does not prevent Apple's crash reports and dialogs. Use SIGTERM for the local integration case, retaining mocked SIGABRT normalization and real SIGABRT coverage on Linux. Worker prompts prohibit intentional macOS crashes. The publisher refuses direct diagnostic tests and unittest discovery against a retained snapshot containing the old abort fixture; repair and approve the source rather than altering the frozen snapshot or silently skipping coverage. Ordinary Apple Python snippets work under the factory profile; denied xcrun cache writes alone do not establish an interpreter crash. Do not widen home reads or change macOS crash-reporting settings.
+
 The approved intake `test` must be an executable local command. Put human acceptance instructions in `outcome`. Delivery rejects prose before native work and runs checks under Bash with `errexit` and `pipefail`, so a later successful whitespace check cannot conceal an earlier failed command. Failed publisher events include the session ID and the private tested-tree receipt path. A publisher refusal remains a failure even after native completion; cleanup-based archive preserves evidence and permits only a separately approved numbered retry.
 
 On macOS, Bun 1.3.14 `bun run` may attempt to list home ancestors outside the restricted command policy and fail with `CouldntReadCurrentDirectory`. Do not grant home access. For a repository whose test script is Vitest, approve the equivalent explicit command `HOME="$PWD/.factory-tmp/home" node node_modules/vitest/vitest.mjs run --configLoader runner --no-cache PATH`. This keeps the test token in scratch, avoids config bundling into read-only dependencies and uses the repository configuration. Validate it against the actual repository before approval; never substitute it silently for a frozen command. Documentation tickets need concrete source assertions plus `git diff --check`, with manual/hosted acceptance reported separately.
@@ -126,13 +128,23 @@ At two hours of continuous idle, exactly one Vincent FYI is inserted into the ex
 
 Failures are classified as budget, sandbox, test, publisher, timeout or unknown. Only the latest unresolved attempt is diagnosed; earlier attempts and tickets with a retained PR are not replayed. Budget/unknown causes require owner decisions. Other causes queue a fresh diagnosis with a one-hour retry/escalation deadline. Its `retry.json` has `session`, `diagnosis`, `estimateBasis`, `test` and `outcome`. The launcher preserves original paths, estimates, provider and wallet; archives only independently stopped, cleaned-up known-native custody; reads all prior branch PRs in every state; then records one automatic retry plan per ticket, changes the block to a fresh digest and approves it after archive. A plan is restartable after interrupted GitHub effects, but no second automatic retry is granted. All earlier receipts, workspaces, sessions, claims and debits remain. A changed intake, live/unknown custody, missing cleanup, recorded/remote PR or missing original digest refuses. Final launch still repeats fresh intake/no-PR readbacks, qualification, usage, path, slot and wallet gates. Three failures for the same repo/provider/cause in an hour hold retries for that cause and queue a repair decision; other causes/projects continue. Expired diagnosis waits escalate once without a synchronous wait.
 
-The optional `capacity.controller` starts with six slots and caps at twelve, independent of legacy `start_parallel`. It adds at most one slot after a full hour with every sampled occupancy above 80%, macOS memory pressure normal and fewer than 30% failed completed workers in the trailing hour (publisher failures included). Only starting/running workers count as busy; retained unknown/paused custody still consumes admission capacity. Unknown pressure, any unhealthy sample or a sample gap over two minutes resets the healthy dwell. The durable state is read by both admission and the board's slot counter. No synthetic pressure reading permits growth. No job is installed or loaded by this feature. The existing scheduler adopts merged source on its next execution. Observe queue and failure latency for 24 hours before asserting the A4 operational endurance criterion.
+The optional `capacity.controller` starts with six slots and caps at twelve, independent of legacy `start_parallel`. It adds at most one slot after a full hour with every sampled occupancy above 80%, macOS memory pressure normal and fewer than 30% failed completed workers in the trailing hour (publisher failures included). Only starting/running workers count as busy. Local builder admission uses the shared slot observation described below; retained unknown custody still consumes capacity. Unknown pressure, any unhealthy sample or a sample gap over two minutes resets the healthy dwell. The durable state is read by both admission and the board's slot counter. No synthetic pressure reading permits growth. No job is installed or loaded by this feature. The existing scheduler adopts merged source on its next execution. Observe queue and failure latency for 24 hours before asserting the A4 operational endurance criterion.
 
 Agent Factory itself uses the same delivery boundary as the existing product: authenticated immutable `main` readback, unsigned worker bundles, exact-tree sandbox checks, launcher signing and PR creation. Enrollment and checkout mapping alone never waive worker or delivery qualification. Undo with a signed revert and a reviewed policy rollback; preserve policy archives and all operational history.
 
 After a cause has been repaired, the owner-token control `clear-restart-hold REPO PROVIDER CAUSE REPAIR-RECEIPT` appends the repair receipt and releases that specific hold. It retains the old hold and failures; further repeated failures may hold the cause again. It does not reset a ticket's single automatic retry allowance.
 
 The factory's own focused publisher checks have been rehearsed under the unchanged native policy using `node node_modules/typescript/bin/tsc --noEmit && HOME="$PWD/.factory-tmp/home" bun --no-env-file test tests/APPROVED.test.ts`. Create scratch before running Bun. Direct Bun startup with the account HOME can fail with `CouldntReadCurrentDirectory`; a scratch HOME avoids that account-directory discovery. Approve the exact focused test path in each intake. The full host integration suite still runs in CI; tests that inspect host process identity or exercise the sandbox itself cannot assert those capabilities from inside an already restricted worker. Unit tests may inject process identity while production defaults retain the real check. No additional filesystem/process permissions are granted by this command.
+
+## Local builder slots
+
+Local builder occupancy is separate from retained custody. `Engine.active()` continues to include every session except finished/archived sessions. The shared `builderSlots` observation frees a normal slot only for paused, waiting-browser, waiting-person, waiting-question or question custody with positively verified cleanup. A null session PID needs that cleanup proof. A retained non-null PID additionally requires a positive changed process identity or both an absent identity and ESRCH from the process-existence check. A null identity alone, denied process access, live supervisor, missing cleanup, unknown/failed status, reservation or uncertain start consumes a slot. No status is archived to free a builder slot.
+
+Dormant sessions keep paths, native IDs, workspaces, frozen budget, usage, ticket/digest claims and append-only debits. Paths remain occupied and heavy-slot reservations remain counted under the existing custody rule. New admission, the board model's slot/free-capacity observation and supply/idle observations use the shared helper. The low-level legacy `/api/state` slot field still reports custody count in this revision; `/api/board` reports builder occupancy. The controller's busy-only growth samples remain unchanged: start six, max twelve; usage stays at 70%/90%, with normal qualification and worker usage checks.
+
+A paused bounded continuation and a returned browser parent reacquire a normal slot inside the same immediate SQLite transaction as their starting claim and synchronous supervisor spawn. Positive stop/cleanup, native custody and the original budget checks still apply. Full capacity leaves the parent dormant. A requested paused extension queues its receipt and exact token bound for the scheduled continuation/browser reconciliation to retry; later calibration changes cannot enlarge that queued extension. Browser results remain attached to the original child and in the parent's scratch while waiting; later ticks admit once. Spawn refusal rolls back the slot/start/extension claim and retains waiting evidence. No new reservation, debit or workspace replaces the parent.
+
+Fictional regressions cover two running plus four dormant sessions under six slots, active/unknown and unavailable process evidence, retained paths/debits, full-capacity continuation across restart, independent-process final-slot races, synchronous spawn rollback, delayed idempotent browser return and unchanged heavy/qualification/usage/budget gates. Focused checks inject process evidence and require no process-table sandbox expansion. Undo behavior through a reviewed source revert after reconciling pending continuations; retain `continuation-slot-wait:*`, browser results, custody and debit history. Publication uses the normal exact-tree launcher checks after cleanup, independent exact-head challenge, Release merge and reviewed Coordinator install. No launchd load or installation change is part of this worker delivery.
 
 ## Question lifecycle
 
@@ -150,7 +162,9 @@ A native-verified Codex worker that needs a web console ends its turn with `.fac
 {"result":"BROWSER_NEEDED","url":"https://console.example.test/settings","goal":"Read the service status","noCliApi":"The console exposes no CLI/API for this setting","expectedEvidence":"The exact visible status text"}
 ```
 
-The strict result requires every field. Only a completed worker with independently verified cleanup can hand off. The launcher retains a local child with `kind: browser` linked to its parent session, stores the parent's `RW` wait and two-hour deadline, and keeps its paths, debit, original budget and native ID. These children are controller work, not new GitHub intake approvals. Repeated identical requests refuse. A browser handoff bypasses delivery publication until its parent has actually continued and completed its approved work.
+The strict result requires every field. BROWSER_NEEDED is reserved for a real signed-in site whose exact goal has no supported CLI/API. It must never request a local preview. Builders prove UI behavior with the cheapest sufficient automated test and publish on required green CI. Changed-UI EN/FR 375/1440 render and keyboard checks run once in nightly hosted acceptance for the frozen batch. Unperformed observations are explicitly noted “browser check deferred to nightly hosted acceptance”.
+
+Only completed workers with verified cleanup may queue browser work. New browser children are detached local checks: no builder slot, path claim or project copy is allocated or retained for them, and results never resume the builder. The child owns its evidence and two-hour deadline separately. The source worker completes its unsigned commit and bundle in the same turn so the normal publisher continues. Local-preview requests from older briefs are retained as pending nightly-ui records and archived in scratch without moving the parent to waiting-browser; Quality receives requests matched to the published PRs in the frozen batch. Existing legacy waiting parents keep their safe reconciliation path until individually drained; never fabricate browser success.
 
 The scheduled tick serializes browser effects with its process-identity lease. One browser job runs at a time, including app fallback and unresolved tab custody. Fresh Claude usage and native subscription checks precede `claude --bg --chrome -n "Alido · #<issue> · browser" --model opus --effort medium`. The dedicated brief exposes only Chrome tools and the exact receipt write, with `dontAsk` permission mode, no shell, no inherited API keys, no project settings or other MCP servers. Unapproved tools are denied without an approval card. This separate browser capability does not qualify ordinary workers or alter their existing isolation, qualification, wallet or literal policy gates. Native background model/effort/accounting evidence is required before accepting its receipt. Each native turn stops at ten minutes or 8M observed tokens; the child retains its original two-hour deadline across replies.
 
@@ -158,8 +172,189 @@ Workers create their own tab, close it with `tabs_close_mcp` and verify closure.
 
 Start refusal, native receipt failure or timeout first verifies the native session has stopped, then sends one idempotent job through Alido Mail to an open idle Codex app chat and uses the bridge's normal app-open path. The app reads the retained fallback brief, reconciles any prior session-owned tabs and writes the same strict nonce-bound receipt. Queueing or opening a chat is never treated as successful execution. No available app, failed bridge or missing result remains visible until the deadline defaults to not done. A late receipt can prove tab cleanup, but cannot turn a returned deadline default into success. Unresolved process/tab custody blocks the next browser and parent continuation while retaining the default receipt.
 
-Both routes return `.factory-tmp/browser-result.json` to the exact waiting parent. Resume preserves its original native Codex session, paths and budget; pause, unknown cleanup or exhausted budget still refuse a new turn. Old returned children cannot resume a parent waiting for a later child. Parent receipt writes reject symlinks. All request/result files, native transcripts, mail receipts and live rehearsal records stay private; only fictional examples belong in Git.
+New detached tasks retain results in their own browser directory. Legacy routes return `.factory-tmp/browser-result.json` to the exact waiting parent. Resume preserves its original native Codex session, paths and budget; pause, unknown cleanup or exhausted budget still refuse a new turn. Old returned children cannot resume a parent waiting for a later child. Parent receipt writes reject symlinks. All request/result files, native transcripts, mail receipts and live rehearsal records stay private; only fictional examples belong in Git.
 
 `bun scripts/rehearse-browser.ts https://console.example.test/status /path/to/existing/trusted/checkout` is an explicit owner-run harmless live check. It records native evidence and stops the exact allocated session, without creating admission or qualification evidence or loading launchd. Supply an actual authorized URL for a live run. Chrome must already have its installed Claude extension connected; a new checkout can require the CLI's normal workspace trust flow. Claude background service versions may allocate their own native UUID even when `--session-id` is supplied: the adapter binds the returned handle to fresh name/workspace/time inventory and retains uncertain custody instead of starting twice. File-history bookkeeping without a native session ID is skipped only for its explicit record types; missing/conflicting model or effort evidence still refuses success. Domain permission denials and authentication redirects are blockers, not board evidence.
 
 Undo with a signed revert after stopping/reconciling all browser and parent custody. Archive private browser assets rather than removing or resetting them; retain questions, default receipts, native IDs, mail rows, claims and debit history. The existing scheduler adopts merged source on its next execution; no job is installed or loaded by this lane.
+
+
+## Mac mini disk capacity — Platform
+
+Nov 10 disk admission: every helper reservation/start and retained continuation
+reads the installation filesystem synchronously. Below 30 GiB (32.2 decimal GB),
+or if capacity is unknown, no additional claim starts. Owner wakes stay queued.
+Existing running/paused/browser custody is preserved. The tick records critical,
+unknown and recovery episodes before GitHub reconciliation and queues one alarm
+per critical/unknown episode through the existing Telegram bridge; failed sends
+retry that same ID. Restoring capacity rearms admission without clearing any
+other gate or a manual pause. No launchd or customer setting changes are needed.
+
+Both worker setup and trusted publisher setup use independent APFS copy-on-write
+Git objects on macOS, with no active alternates or shared writable files before
+handoff. The temporary reference setup remains small retained metadata; other
+platforms retain independent ordinary clones. Dependencies use the existing
+clone-aware copy path. Copy/validation failure retains setup artifacts and never
+hands a partially shared clone to model tools.
+
+Platform owns local disk headroom and cleanup; Coordinator owns launcher enablement. On November 9, 2026 at 23:30 America/Toronto, Vincent authorized thoughtful proactive removal of regenerable junk through verified Telegram, relayed by Coordinator. Incident evidence is [Alido #2480](https://github.com/fulmar-hq/alido/issues/2480); recurring implementation and acceptance are tracked in [factory #138](https://github.com/fulmar-hq/agent-factory/issues/138).
+
+Keep at least 60 GiB available on the Data volume. At 80% used, warn owners with measured free space and a bounded cleanup action, before the launcher can fail on disk exhaustion. Do not change a wallet, qualification, concurrency or unrelated pause to work around disk pressure. Print `df -h /System/Volumes/Data` before and after cleanup. Use the owner-authorized `bun scripts/control.ts resume` only after capacity is restored; pass the existing owner token through the environment without printing it. Confirm a fresh `status: "ok"`, `paused: false`, `claimed > 0` record in the installed `tick.log`; a successful resume command alone is not resumed claims. Report other admission refusals separately.
+
+Until the recurring cleaner is reviewed and installed, Platform performs the bounded sweep when alerted. Under `/Users/vincent/Developer/alido-worktrees` only, clean a worktree only when every observed entry is untouched for at least 12 hours and fresh process arguments, working directories and open files show no running process using it. Unknown activity evidence means skip. Before each deletion, confirm the exact path with `git check-ignore`, refuse any tracked contents with `git ls-files`, and recheck activity. Only remove real, non-symlink directories named `node_modules`, `.next`, `.turbo`, `coverage`, `.nyc_output` or `.vitest`. Dependency symlinks and their shared targets stay intact. Never follow symlinks or expand cleanup to another project. Preserve source, Git metadata/branches, dirty edits, evidence, native transcripts/session history, databases and all of `~/.alido-private`. Never stash, remove worktrees or prune Docker. Record paths, ignore rules, counts, sizes, skips and failures in private incident evidence; publish only the non-sensitive summary on the issue.
+
+Tool caches need a separate activity check. Bun's install cache and npm's `_cacache` are regenerable when no installer or process uses them. Playwright browser revisions are eligible only when proven unused; preserve them when browser custody is unclear. Xcode DerivedData, if present, needs the same unused check. Do not broaden this authority to app caches or user data. Report large retained items and their sizes to Coordinator for a separate decision.
+
+The recurring guard must clean after a verified finished session, **after** publication/tests/browser handoff consumers release the workspace, and run a daily idle sweep with the same protections. Finished native generation alone is insufficient. Waiting-browser, live, recent, unknown or unverified cleanup custody stays intact. All private-root workspaces are excluded under the current cleanup authority; resolving their build-material retention needs explicit scoped policy before enabling deletion there. The job must serialize sweeps, support dry-run, retain deletion intents/results, recheck process/path/ignore evidence immediately before each deletion, and visibly retain failures. The tick records actual disk readings under `disk-capacity` and an append-only event on warning/unknown/recovery transitions. At 80% it emits an actionable stderr warning once per episode; repeated ticks retain updated readings without repeating the warning. Unknown filesystem evidence is visible and never clears a pause. The warning is source-implemented here; installed readback still follows review. No launchd install, live checkout patch, automatic session retry, model call or AWS change is part of this rule. #138 owns implementation, synthetic safety tests, normal signed PR review, Coordinator activation and installed readback; this document does not claim that automation is already active.
+
+### Factory cache lifecycle — archive-only policy (Nov 11)
+
+The current acting instruction, **archive, never delete**, supersedes earlier
+factory-cache removal proposals. The command
+`scripts/cache-retention.py --root "$FACTORY_PRIVATE_DIR"` is an audit only;
+`--apply` is rejected. No automatic cache sweep is added to maintenance; an
+operator may run this read-only audit separately.
+It retains every source, dependency, build output, Git object, log, receipt,
+transcript and database recovery sidecar in place. It creates no eviction marker
+and reports recovered bytes as **zero**; an observation is not cleanup authority.
+
+The auditor opens controller.sqlite read-only with a half-second timeout,
+materializes only the target session/binding/manifest rows, and closes the
+controller before process, Git and filesystem probes. Complete custody,
+provenance, ignore/HEAD and process/cwd/descriptor evidence are still required
+before recording a cache candidate. Unknown or changed evidence refuses that
+observation. Receipts remain under `receipts/cache-retention`; no SQLite writer
+transaction is held across probes. A later archive implementation needs its own
+reviewed scoped policy and undo manifest, never an implicit deletion switch.
+
+Source setup initializes the independent Git index without checking out a
+second source tree in the retained local-clone setup directory. APFS directory
+growth and actual free-space deltas remain separate measurements. This change
+reduces future redundant copies; it makes no physical disk reclamation claim.
+
+New worker and publisher source is materialized from one trusted immutable seed
+per expected base under `runs/source-seeds`. The seed uses independent Git objects
+and a checked-out clean committed tree. Consumers receive independent APFS
+copy-on-write files; dirty canonical source is never copied. Missing, changed or
+incomplete seed custody refuses setup. Other platforms copy independent files.
+Worker setup pins `refs/factory/base` and requests an incremental delivery bundle
+(`HEAD ^refs/factory/base`) so each task retains its new objects rather than a
+second full repository history. Publication still imports against its original
+expected base and checks every intermediate commit and the exact tested tree.
+Existing full bundles, source snapshots and Git objects remain preserved.
+
+Previously recorded dependency-restoration bindings remain fail-closed. If an
+older authorized operation left an eviction marker, resume still verifies the
+original controller installation fingerprint and archives in-cache evidence
+before restoration. Missing provenance or changed canonical dependencies refuse
+resume. This audit creates no new eviction and grants no new restoration scope.
+
+The Nov 10 longer sample also identified `runs/browser-drain` recovery publication
+copies. Their audit uses original session cleanup/status and fresh process
+evidence rather than the unrelated-rehearsal age gate. All publisher
+callers now default to the shared immutable source seed under their enclosing
+`runs`, including recovery scripts using the installed adapter directly. Original
+bundles, Git objects, source and exact-tree test/publication receipts remain.
+
+Publisher dependency provenance records a trusted pre-test inventory for each new checkout under the session’s `runs/delivery` or `runs/browser-drain` path. The launcher binds its exact path and session to an immutable fingerprint in controller state; inventory bytes are shared by fingerprint. Worker-written receipts and legacy clones cannot establish this provenance. Audit observations also require the original supervisor to have exited and no unconsumed browser request, even after `sessions.pid` is cleared. Browser-drain callers must pass `publisherDependencyRecorder` to `testSnapshot`; older callers remain unbound and retained. These trusted source changes invalidate publisher and renewal fingerprints and require normal independent review and qualification before installation.
+
+## GitHub quota and outage recovery
+
+The launcher keeps REST and GraphQL quota accounting distinct. The issue scheduler no longer rereads closed issue bodies and nested labels. Owner/board PR evidence is shared for ten minutes, and already-reviewing publications defer their nontransactional review polling to that shared reader, including at cache-expiry boundaries, instead of rereading every issue and PR each minute. Maintenance caches immutable commit trees and blocked check/base observations for ten minutes; an eligible merge still requires a fresh final PR/check read. A review read failure stops the pass instead of repeating the same failed request for every finished session. A full builder pool stops the admission loop before per-ticket GitHub validation; final atomic admission still rechecks capacity and every other gate after a slot becomes available.
+
+Every trusted `command` GitHub invocation records its source (`tick`, `maintenance`, `builder`, `owner`, `board`, `health`, `control`) in hourly `github-calls:<UTC-hour>:<source>` counters. Commands and actual HTTP requests are separate counters; cached responses add no HTTP requests. Paginated gh requests are counted individually. GraphQL pages also retain only their reported point cost. gh debug output is parsed in memory; raw headers, authentication, bodies and query text are never saved in this ledger. Existing historical logs cannot establish exact retrospective calls per source; estimates must be identified as estimates.
+
+A rate-limit rejection reads the quota endpoint once and persists `github-backoff` through the exhausted resource's reset plus one second. If the reset is unavailable, a fifteen-minute hold applies; network failures use one minute. All command users share that hold across processes/restarts, and idle ticks do not retry the API during it. Qualification/usage accounting and stop controls still run. A failed required observation produces `status:degraded`, `ready:null`, last known readiness and `retryAt`; it cannot staff an empty queue, declare a healthy reconciliation or archive a GitHub-failed worker. Running custody is preserved. A publisher failure after successful native completion retains `finished` and `publisher-pending:<session>` rather than changing it to unknown. Product owns exact tested-tree publication recovery; never rerun its model or clear its claim to replay publication. Original worktrees, bundles, test receipts, signed branches and archives remain evidence.
+
+Inspect the heartbeat, source error, backoff and counters before resuming. Allow the next normal tick after reset; do not clear backoff or loosen admission limits. For a retained publication, verify native completion and cleanup, original tested-tree success, local signed commit and exact remote branch/tree, then create/read back the original PR and append a recovery/publication receipt. Archive records stay archived. Undo source changes through a reviewed signed revert; never restore an old database or delete work.
+## Controller lock recovery and alarms
+
+Owner inspections use read-only SQLite with a one-second timeout, bounded reads and prompt close (see AGENTS.md); mutations use authenticated controls. The writer's ten-second busy timeout is installed before WAL setup. Immediate transactions retry lock acquisition twice with bounded backoff; callbacks and complete ticks are never replayed, preserving exactly-once reservation/spawn and external effects. Persistent contention still fails visibly rather than bypassing custody.
+
+The CLI tick queues a Coordinator **action** on the first error of an episode, without opening the controller database. A successful tick rearms the next error episode. The independent health job retries retained messages before reading the controller and also alerts for a pause lasting five minutes with recently observed ready tasks and no starting/running builders. This closes #188's intentional empty-queue/unpaused-only coverage gap; neither usage availability nor an empty-queue observation is needed for the pause alarm. The read-only controller snapshot closes before mail work. Private `health/controller-alerts.sqlite` retains incidents, stable mail IDs and actual wake receipts; queued is not woken. Bridge outages retain incidents for retry. No alarm clears a pause, starts work or alters admission/release policy. Undo through a reviewed signed revert; archive and retain all state and receipts.
+
+## Daily release rehearsal
+
+Release readiness is collected at **14:00** and **17:40 America/Toronto**, using
+`scripts/release.ts rehearsal 14:00|17:40` from the registered installed checkout.
+The rehearsal plists use the release preflight's executable, WorkingDirectory,
+PATH, private directory and timezone. Rehearsals cannot run the release executor,
+reserve release funds, dispatch acceptance, merge, deploy or observe servers.
+They use the same independent readiness collector and the existing read-only
+AWS Budgets DescribeBudget path. The 14:00 collection imports a fresh billing
+receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
+never manufactures freshness. No Cost Explorer, model or resource calls occur.
+
+Every missing input queues one Alido Mail action per day/input to Release,
+Quality or Platform. Owner-only decisions, including AWS sign-in and latched
+spending stops, plus usage decisions and pauses go to Coordinator.
+Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
+preflight. Repeated observations reuse the immutable action payload and mail ID;
+clean collections are retained as `release-rehearsal` events and are not mailed.
+Factory-native owners also receive the same action through their normal guarded
+owner wake, because an owner need not have an open app chat. Queued mail/wakes
+are not claimed as delivery or completed work.
+The 17:40 collection confirms readiness after source integration freezes.
+Rehearsals grant no exception to gates, holds, spending or release times.
+Install both rehearsal jobs after review, archive prior plists and read back
+loaded arguments/environment. Undo with reviewed source and archived plists;
+retain reports, billing imports and outbox receipts.
+
+### Pauses during the release window
+
+On a day with a valid accepted current-day batch, any pause active or set during
+**17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
+and the accountable pausing role. The authenticated pause control sends directly;
+the 30-second release reconciler catches an earlier pause at freeze start and
+retries retained episode IDs after mail failures. Each real resume-to-pause transition can alert again; repeated pause requests
+retain the same episode. Pending per-recipient actions retry independently even
+after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
+lifts a pause automatically or permits a late release.
+
+`control.ts pause Platform|Release|Quality|Product|Coordinator` and the authenticated
+board's optional `owner` field record the accountable role. Generic and legacy
+owner-token controls belong to Coordinator for escalation; their actual caller
+is explicitly unrecorded and is never represented as a verified human identity.
+A missing owner does not prevent the safety pause. Coordinator identifies and
+contacts the original pausing owner when legacy provenance is incomplete.
+
+### Release usage headroom
+
+The **14:00** rehearsal projects Release and the effective Quality acceptance
+profile's usage at **18:30 Eastern** using the last 15–60 minutes of comparable
+native observations. Every exposed window must project below **0.70**. A
+projection at/above the gate, stale or absent usage, missing burn history,
+changed window/reset identity or decreasing counters is a Coordinator gap.
+The ordinary tick retains at most 72 native metadata observations/provider over
+six hours, normally at five-minute spacing, with intervening discontinuities
+retained immediately, without another model or paid API call. At least 15 minutes
+of continuous comparable evidence is required after the latest discontinuity.
+
+The report retains baseline, current usage, measured hourly burn and target for
+every window. A scheduled reset is labelled a forecast assumption; it never
+creates fresh native zero usage or supplies runtime admission. Coordinator can
+decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
+fresh-read checks remain unchanged. PR #190 is not required or installed.
+
+### Refused and missed nights
+
+The 30-second release reconciler retains one plain incident summary per night
+after a refused window, failed release effect, or a scheduled job absent after
+its fixed minute. It names the input and the earliest recorded time it was
+knowable, using retained 14:00/17:40/19:00 observations, the scheduled 20:00 QA readiness refusal
+causes, and admitted pause events. With no earlier evidence,
+it explicitly uses the first recorded refusal or the missed-minute boundary;
+it never invents an earlier observation. Full reasons remain in the incident.
+
+One immutable Alido Mail action/night goes to Coordinator. Later windows update
+the retained incident, and delivery failures retry that original action ID and
+payload. Existing historical release evidence lets a restarted reconciler
+recover the last two nights, including admitted scheduled refusals that failed
+before a night/report record existed. Pending action retries are independent of
+that discovery horizon and continue after longer outbox outages. CLI errors from
+off-schedule attempts are excluded; original invocation time distinguishes a
+scheduled job whose setup failed later. A prior unshipped night increments the consecutive
+miss count and flags the second consecutive missed night. A later proven ship
+is retained as recovery. Incidents, original messages and old release records
+are archived/retained, never erased. Notification failure cannot suppress other
+release observers or authorize a replay, catch-up or off-schedule release.

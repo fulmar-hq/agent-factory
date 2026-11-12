@@ -1,7 +1,7 @@
 import {githubPage} from './fixtures';
 import { test, expect } from "bun:test";
 import { Store } from "../tracking/store";
-import { Engine } from "../launcher/engine";
+import {TestEngine as Engine} from './fixtures';
 import { boardModel, plainText } from "../board/model";
 import { intakeLabel, reconcile, type Issue } from "../adapters/github";
 import { githubWakes } from "../launcher/wake";
@@ -539,4 +539,14 @@ test('owner run uses task text, real identity, explicit/configured/median estima
     const m=boardModel(e,{},now,'en',{activity:{},ownerRuns:[{id:'launcher/run-example',...ownerSummary(brief),owner:'product',started:now-600000,lastActivity:now-10000,estimateSeconds:1800}]});
     expect(m.running[0].owner).toBe('Product');expect(m.running[0].purpose).toContain('colour system');expect(m.running[0].issue).toContain('/api/owner-work?');
   }finally{s.close();}
+});
+
+test('degraded ticks remain visible and shared PR evidence uses its actual ten-minute polling lifetime',()=>{
+ const {s,e}=fixture();try{
+  s.set('heartbeat',{at:now,status:'degraded',ready:null});
+  expect(boardModel(e,{},now).notice).toContain('needs attention');
+  s.set('heartbeat',{at:now,status:'ok'});s.set('github:example/demo',{observedAt:now,error:null,truncated:false});
+  s.set('board-pulls:example/demo',{at:now-599999,pulls:[]});expect(boardModel(e,{},now).notice).toBeNull();
+  s.set('board-pulls:example/demo',{at:now-600001,pulls:[]});expect(boardModel(e,{},now).notice).toContain('GitHub');
+ }finally{s.close();}
 });
