@@ -43,14 +43,19 @@ test('Quality packet keeps its retained batch when the current same-day file cha
  const batch={version:1 as const,day:'2026-11-10',base:'d'.repeat(40),revision:'a'.repeat(40),tree:'b'.repeat(40),pr:7,ref:'feat/fictional-batch',holdId:'original-hold',sources:[{number:12,head:'e'.repeat(40),ref:'feat/source',title:'Fictional source'}],overlaps:[],review:'Fictional independent review'};
  // Successful QA may have a new merge revision with exactly the frozen tree.
  const context={day:batch.day,revision:'c'.repeat(40),tree:batch.tree,holdId:'qa-hold',artifact:'fictional@sha256:'+'f'.repeat(64),batch};
- s.set(`executor:${batch.day}:qa`,{state:'success',context,evidence:{artifact:context.artifact}});
+ s.set(`executor:${batch.day}:qa`,{state:'success',context,evidence:{artifact:context.artifact,deployedArtifact:'553066147679.dkr.ecr.ca-central-1.amazonaws.com/alido-qa@sha256:'+'1'.repeat(64),qaReadback:{source:context.revision,image:'553066147679.dkr.ecr.ca-central-1.amazonaws.com/alido-qa@sha256:'+'1'.repeat(64)}}});
  for(const [id,pr] of [['a',12],['b',13]] as const){s.set(`nightly-ui:${id}`,{parent:id,repo:'fulmar-hq/alido',issue:pr,request,state:'pending'});s.event(id,'launcher-publish',{id,repo:'fulmar-hq/alido',url:`https://github.com/fulmar-hq/alido/pull/${pr}`},'retain');}
  const current=join(dir,'release-batch.json');writeFileSync(current,JSON.stringify(batch));
  try{
   writeFileSync(current,JSON.stringify({...batch,sources:[{...batch.sources[0],number:13}]}));
+  expect(qualityEvidencePacket(s,context).deployedArtifact).toEndWith('@sha256:'+'1'.repeat(64));
+  expect(qualityEvidencePacket(s,context).artifact).toBe(context.artifact);
   expect(qualityEvidencePacket(s,context).nightlyUi.checks.map(x=>x.issue)).toEqual([12]);
   unlinkSync(current);
   expect(qualityEvidencePacket(s,context).nightlyUi.checks.map(x=>x.issue)).toEqual([12]);
   for(const changed of [{...context,batch:undefined},{...context,batch:{...batch,day:'2026-11-11'}},{...context,batch:{...batch,tree:'f'.repeat(40)}},{...context,batch:{...batch,sources:[{...batch.sources[0],number:13}]}},{...context,revision:'e'.repeat(40)},{...context,artifact:'different-artifact'}])expect(()=>qualityEvidencePacket(s,changed)).toThrow();
+  const retained=s.get<any>(`executor:${batch.day}:qa`);
+  s.set(`executor:${batch.day}:qa`,{...retained,evidence:{...retained.evidence,qaReadback:{...retained.evidence.qaReadback,image:context.artifact}}});
+  expect(()=>qualityEvidencePacket(s,context)).toThrow('deployed QA image');
  }finally{s.close();}
 });
