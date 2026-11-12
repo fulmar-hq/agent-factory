@@ -6,7 +6,7 @@ import { issueTicket, type Issue } from "../adapters/github";
 import type { Engine, Session } from "../launcher/engine";
 import { boardQuestions } from "../launcher/questions";
 import { toronto, deadlineAt } from "../launcher/release";
-import type { Billing, Meter, Ticket } from "../launcher/config";
+import { BillingSchema, MeterSchema, type Billing, type Meter, type Ticket } from "../launcher/config";
 import { monthAt } from "../wallet/ledger";
 
 export type Language = "en" | "fr";
@@ -412,7 +412,10 @@ export function boardModel(
     status += ` (${t.attention})`;
   if (s.get("paused") === true) status = t.paused;
   const usage = (["codex", "claude"] as const).map((provider) => {
-    const meter = readings[provider];
+    // Display-only projection. Retained readings never refresh admission evidence.
+    const parsed = MeterSchema.safeParse(readings[provider]);
+    const meter = parsed.success && parsed.data.observedAt <= now &&
+      (!parsed.data.nativeProvider || parsed.data.nativeProvider === provider) ? parsed.data : undefined;
     const weekly = meter?.windows.find(
       (w) => w.durationMinutes === 10080 || w.name === "seven_day",
     );
@@ -423,9 +426,19 @@ export function boardModel(
       now - meter.observedAt <= e.c.usage_gates.max_meter_age_minutes * 60000 &&
       window &&
       window.resetsAt > now;
-    return { provider, percent: fresh ? Math.floor(window.used * 1000) / 10 : null, resetsAt:fresh ? window.resetsAt : null, tone:usageTone(fresh ? window.used : null,e.c.usage_gates) };
+    const known = !!meter && !!window;
+    const visible = fresh || (provider === "claude" && known);
+    return {
+      provider,
+      percent: visible && window ? Math.floor(window.used * 1000) / 10 : null,
+      resetsAt: visible && window ? window.resetsAt : null,
+      ageSeconds: known ? (now - meter.observedAt) / 1000 : null,
+      freshness: !known ? "unknown" : fresh ? "fresh" : "stale",
+      tone: usageTone(fresh ? window.used : null, e.c.usage_gates),
+    };
   });
-  const billing = readings.billing,
+  const parsedBilling = BillingSchema.safeParse(readings.billing);
+  const billing = parsedBilling.success && parsedBilling.data.observedAt <= now ? parsedBilling.data : undefined,
     freshBilling =
       billing &&
       billing.month === monthAt(now) &&
@@ -439,6 +452,11 @@ export function boardModel(
     ceiling: e.c.wallet.aws.ceiling_usd_month,
     plan: e.c.wallet.aws.planned_usd ?? e.c.wallet.aws.hold_at_projected,
     redAbove: e.c.board.aws_red_above_usd,
+    percent: freshBilling
+      ? Math.round((billing.postedCents + billing.unpostedCents) / (100 * e.c.wallet.aws.ceiling_usd_month) * 1000) / 10
+      : null,
+    freshness: !billing ? "unknown" : freshBilling ? "fresh" : "stale",
+    ageSeconds: billing ? (now - billing.observedAt) / 1000 : null,
   };
   const { day, minute } = toronto(now);
   const releases = (
