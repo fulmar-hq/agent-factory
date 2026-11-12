@@ -1,0 +1,20 @@
+{
+  "note": "Shape of the owner wake recorded on 2026-11-10 at 08:24 Eastern that could not start: its 8 MB event was passed on the command line. The original payload holds private issue text, so the test rebuilds it from these recorded sizes with synthetic filler.",
+  "id": "usage-push-refill-1794317052283",
+  "owner": "product",
+  "kind": "product-intake",
+  "at": 1794317052283,
+  "error": "Error: E2BIG: argument list too long, posix_spawn '<home>/.bun/bin/codex'",
+  "storedBytes": 8161709,
+  "payload": {
+    "round": "usage-push-refill-1794317052283",
+    "ready": 30,
+    "target": 80,
+    "minimumReady": 80,
+    "intake_mode": "build",
+    "free": -4,
+    "briefBytes": 3641,
+    "existing": { "count": 439, "bytes": 8155000, "largestItemBytes": 60573 },
+    "occupied": { "count": 10, "bytes": 1940 }
+  }
+}
