@@ -42,9 +42,11 @@ export function ownerSpec(t:Ticket,workspace:string,scratch:string,native?:strin
 export function qualityEvidencePacket(s:Store,raw:unknown) {
  const sha=z.string().regex(/^[a-f0-9]{40}$/);
  const context=z.object({day:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),revision:sha,tree:sha,holdId:z.string().min(1),artifact:z.string().min(1),batch:ReleaseBatchSchema}).passthrough().parse(raw);
- const qa=s.get<{state:string;context:{day:string;revision:string;tree:string;holdId:string;batch?:unknown};evidence?:{artifact?:string}}>(`executor:${context.day}:qa`);
+ const qa=s.get<{state:string;context:{day:string;revision:string;tree:string;holdId:string;batch?:unknown};evidence?:{artifact?:string;deployedArtifact?:string;qaReadback?:{source?:string;image?:string}}}>(`executor:${context.day}:qa`);
  if(qa?.state!=='success' || qa.context.day!==context.day || qa.context.revision!==context.revision || qa.context.tree!==context.tree || qa.context.holdId!==context.holdId || qa.evidence?.artifact!==context.artifact || context.batch.day!==context.day || context.batch.tree!==context.tree || batchDigest(ReleaseBatchSchema.parse(qa.context.batch))!==batchDigest(context.batch))throw Error('Retained frozen QA batch identity changed or missing');
- return {...context,nightlyUi:{instructions:nightlyUiInstructions,checks:nightlyUiChecklist(s,context.batch)}};
+ const deployedArtifact=qa.evidence.deployedArtifact;
+ if(typeof deployedArtifact!=='string'||!/^553066147679\.dkr\.ecr\.ca-central-1\.amazonaws\.com\/alido-qa@sha256:[a-f0-9]{64}$/.test(deployedArtifact)||qa.evidence.qaReadback?.source!==context.revision||qa.evidence.qaReadback?.image!==deployedArtifact)throw Error('Retained deployed QA image evidence missing or changed');
+ return {...context,deployedArtifact,nightlyUi:{instructions:nightlyUiInstructions,checks:nightlyUiChecklist(s,context.batch)}};
 }
 export async function runOwner(id:string,dir=root) {
  const s=new Store(join(dir,'controller.sqlite')),c=await configAt(join(dir,'config.yaml'));
@@ -67,7 +69,7 @@ export async function runOwner(id:string,dir=root) {
   if(wake.kind==='qa-deployed' && Date.now()>=(wake.payload as {deadline:number}).deadline)throw Error('Quality acceptance deadline expired');
   if(wake.kind==='qa-deployed'){
    const packet=qualityEvidencePacket(s,wake.payload);
-   const context=wake.payload as HostedContext;
+   const context:HostedContext={revision:packet.revision,tree:packet.tree,artifact:packet.artifact,deployedArtifact:packet.deployedArtifact,deadline:(wake.payload as HostedContext).deadline};
    let hosted:unknown;
    try{hosted=await collectHostedAcceptance(context);}catch(error){hosted={passed:false,failure:String(error)};}
    writeFileSync(join(scratch,'qa-evidence.json'),JSON.stringify({...packet,hosted},null,2),{mode:0o600});

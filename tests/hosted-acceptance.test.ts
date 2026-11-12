@@ -1,3 +1,4 @@
+import {spawnSync} from 'node:child_process';
 import {test,expect} from 'bun:test';
 import {collectHostedAcceptance,hostCommand,validHostedResult} from '../adapters/hosted-acceptance';
 const {probe}=require('../scripts/hosted-acceptance.cjs');
@@ -84,4 +85,28 @@ test('incomplete host/source or probe evidence cannot pass',async()=>{
  const r=hostResult(await probe(harness().deps));
  delete r.checks['alido-qa-web:artifact'];expect(validHostedResult(r)).toBe(false);
  expect(validHostedResult({checks:{healthy:true},probe:{checks:{sessionExpired:true}}})).toBe(false);
+});
+
+test('actual host probe checks deployed digest while retaining the distinct candidate tuple',()=>{
+ const deployedArtifact='553066147679.dkr.ecr.ca-central-1.amazonaws.com/alido-qa@sha256:'+'d'.repeat(64);
+ function run(deployed?:string){
+  const command=hostCommand({...context,...(deployed?{deployedArtifact:deployed}:{})},'fictional HTTP probe');
+  const encoded=command.match(/b64decode\('([^']+)'\)/)![1]!;
+  const program=Buffer.from(encoded,'base64').toString();
+  const harness=`import json,subprocess,types
+from unittest.mock import patch
+def fake(args,**kwargs):
+ if args[1]=='exec':return types.SimpleNamespace(returncode=0,stdout='{}')
+ previous=args[-1].endswith('-previous')
+ value={'Config':{'Labels':{'org.opencontainers.image.revision':${JSON.stringify(context.revision)}},'Image':${JSON.stringify(deployedArtifact)}},'State':{'Running':not previous,'Health':{'Status':'healthy'}}}
+ return types.SimpleNamespace(returncode=0,stdout=json.dumps([value]))
+with patch.object(subprocess,'run',side_effect=fake):exec(${JSON.stringify(program)})
+`;
+  const result=spawnSync('python3',['-c',harness],{encoding:'utf8'});
+  expect(result.status).toBe(0);return JSON.parse(result.stdout);
+ }
+ expect(run(deployedArtifact).checks['alido-qa-web:artifact']).toBe(true);
+ expect(run(deployedArtifact).checks['alido-qa-worker:artifact']).toBe(true);
+ expect(run().checks['alido-qa-web:artifact']).toBe(false);
+ expect(run(context.artifact).checks['alido-qa-web:artifact']).toBe(false);
 });
