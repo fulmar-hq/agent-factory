@@ -150,7 +150,7 @@ class SyntheticWindow:
         if path.endswith('/check-runs?per_page=100'):
             if path.startswith('commits/' + self.batch['revision'] + '/'):
                 return self.checks
-            return {'check_runs': [{'id': i, 'name': name, 'status': 'completed', 'conclusion': 'success'} for i, name in enumerate(['Verify', 'Secret scan'])]}
+            return {'total_count': 2, 'check_runs': [{'id': i, 'name': name, 'head_sha': self.qa, 'app': {'slug': 'github-actions'}, 'status': 'completed', 'conclusion': 'success'} for i, name in enumerate(['Verify', 'Secret scan'])]}
         if path.endswith('/status'):
             return {'statuses': list(self.statuses.values())}
         if path.startswith('actions/workflows/ci.yml/runs?'):
@@ -176,9 +176,11 @@ class SyntheticWindow:
         self.hold = {**self.hold, 'id': 'SYNTHETIC-on-hold', 'held': True}
         return self.hold
 
-    def logs(self, ident):
+    def logs(self, ident, job=None):
         if ident == 9:
-            return json.dumps({'adopted': self.artifact}) + '\n' + json.dumps({'qaDeployment': 'SYNTHETIC', 'source': self.qa}, separators=(',', ':'))
+            if job != 'Deploy QA':
+                raise AssertionError('QA receipt requires deployment-only logs')
+            return json.dumps({'adopted': self.artifact}) + '\n' + json.dumps({'qaDeployment': 'SYNTHETIC', 'source': self.qa, 'image': '553066147679.dkr.ecr.ca-central-1.amazonaws.com/alido-qa@sha256:' + '6' * 64}, separators=(',', ':'))
         return self.artifact + '\n' + json.dumps({'deployment': {'source': self.main, 'environmentUnchanged': True, 'previousStopped': True}}, separators=(',', ':'))
 
     def hosted_readback(self, c, revision):

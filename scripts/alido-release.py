@@ -254,12 +254,22 @@ def workflow(c, name, revision, required, run_id=None, attempt=None):
                 return None
             if found[0]['conclusion'] != 'success':
                 raise RuntimeError('Required check failed/skipped: ' + required_name)
+        # Native logs are unavailable until the runner-guard sibling finishes.
+        if run['status'] != 'completed':
+            return None
         return run
     return wait(c, read)
 
 
-def logs(run):
-    return subprocess.run(['gh', 'run', 'view', str(run), '--repo', REPO, '--log'],
+def logs(run, job=None):
+    args = ['gh', 'run', 'view', str(run), '--repo', REPO, '--log']
+    if job is not None:
+        jobs = api('actions/runs/' + str(run) + '/jobs?per_page=100')['jobs']
+        found = [j for j in jobs if j['name'] == job]
+        if len(jobs) >= 100 or len(found) != 1 or found[0]['status'] != 'completed' or found[0]['conclusion'] != 'success':
+            raise RuntimeError('Unique successful native log job missing')
+        args += ['--job', str(found[0]['id'])]
+    return subprocess.run(args,
                           capture_output=True, text=True, check=True, timeout=45).stdout
 
 
@@ -466,10 +476,10 @@ def run(c):
         wait(c, started)
         run = workflow(c, 'ci.yml', c['revision'], ['Verify', 'Secret scan', 'Full test suite', 'Build candidate image / Build', 'Deploy QA'], run_id, original['run_attempt'] + 1)
         # Candidate adoption log is immutable digest evidence for this tree.
-        candidates = re.findall(r'"adopted":\s*"([^"]+@sha256:[a-f0-9]{64})"', logs(run['id']))
+        qa_log = logs(run['id'], 'Deploy QA')
+        candidates = re.findall(r'"adopted":\s*"([^"]+@sha256:[a-f0-9]{64})"', qa_log)
         if len(set(candidates)) != 1:
             raise RuntimeError('Unique immutable QA artifact missing')
-        qa_log = logs(run['id'])
         confirmations = []
         for line in qa_log.splitlines():
             pos = line.find('{"qaDeployment":')
@@ -477,11 +487,14 @@ def run(c):
                 confirmations.append(json.loads(line[pos:]))
         if len(confirmations) != 1 or confirmations[0].get('source') != c['revision']:
             raise RuntimeError('Unique native hosted QA source confirmation missing')
-        result = {'qaRevision': c['revision'], 'qaReadback': confirmations[0], 'artifact': candidates[0], 'qaRun': run['id'], 'qaAttempt': run['run_attempt'], 'holdId': frozen_hold_id, 'previousPin': pin, 'previousRelease': previous}
+        deployed_artifact = confirmations[0].get('image', '')
+        if not re.fullmatch(r'553066147679\.dkr\.ecr\.ca-central-1\.amazonaws\.com/alido-qa@sha256:[a-f0-9]{64}', deployed_artifact):
+            raise RuntimeError('Immutable deployed QA artifact missing')
+        result = {'qaRevision': c['revision'], 'qaReadback': confirmations[0], 'deployedArtifact': deployed_artifact, 'artifact': candidates[0], 'qaRun': run['id'], 'qaAttempt': run['run_attempt'], 'holdId': frozen_hold_id, 'previousPin': pin, 'previousRelease': previous}
     elif c['step'] == 'promote':
         a = accepted(c)
         qa = workflow(c, 'ci.yml', c['revision'], ['Full test suite', 'Deploy QA'], a['qaRun'], a['qaAttempt'])
-        if a['artifact'] not in logs(qa['id']):
+        if a['artifact'] not in logs(qa['id'], 'Deploy QA'):
             raise ValueError('Quality artifact not the deployed QA artifact')
         existing = api('pulls?state=open&base=main&head=fulmar-hq:QA&per_page=100')
         if existing:
@@ -504,14 +517,16 @@ def run(c):
             merge_sha = current.get('merge_commit_sha')
             if not merge_sha or current.get('mergeable_state') not in ('clean', 'unstable'):
                 return None
-            status = api('commits/' + merge_sha + '/check-runs?per_page=100')['check_runs']
-            if len(status) == 100:
+            inventory = api('commits/' + current['head']['sha'] + '/check-runs?per_page=100')
+            status = inventory['check_runs']
+            if len(status) >= 100 or inventory.get('total_count') != len(status):
                 raise RuntimeError('Promotion check inventory truncated')
-            required = [x for x in status if x['name'] in ('Verify', 'Secret scan')]
-            if any(x['status'] != 'completed' for x in required) or len(required) < 2:
-                return None
-            if any(x['conclusion'] != 'success' for x in required):
-                raise RuntimeError('Promotion check failed')
+            for name in ('Verify', 'Secret scan'):
+                found = sorted((x for x in status if x['name'] == name and x.get('app', {}).get('slug') == 'github-actions'), key=lambda x: x['id'], reverse=True)
+                if not found or found[0].get('head_sha') != c['revision'] or found[0]['status'] != 'completed':
+                    return None
+                if found[0]['conclusion'] != 'success':
+                    raise RuntimeError('Promotion check failed: ' + name)
             return current
         wait(c, checks)
         readiness = production_readiness(c)
