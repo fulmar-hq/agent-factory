@@ -137,7 +137,8 @@ class TrustedRelease(unittest.TestCase):
             if path == 'pulls' and method == 'POST': return {'number': 8}
             if path == 'pulls/8': return {'head': {'sha': c['revision']}, 'merge_commit_sha': 'c' * 40, 'mergeable_state': 'clean'}
             if path.startswith('commits/'):
-                order.append('checks'); return {'check_runs': [{'name': n, 'status': 'completed', 'conclusion': 'success'} for n in ['Verify', 'Secret scan']]}
+                self.assertEqual(path, 'commits/' + c['revision'] + '/check-runs?per_page=100')
+                order.append('checks'); return {'total_count': 2, 'check_runs': [{'id': i, 'name': n, 'head_sha': c['revision'], 'app': {'slug': 'github-actions'}, 'status': 'completed', 'conclusion': 'success'} for i, n in enumerate(['Verify', 'Secret scan'])]}
             if path == 'pulls/8/merge' and method == 'PUT': order.append('main-merge'); return {'merged': True, 'sha': 'e' * 40}
             raise AssertionError(path)
         def ready(_): order.append('readiness'); return {'ready': True, 'evidence': 'fictional metadata, not deployment'}
@@ -145,6 +146,28 @@ class TrustedRelease(unittest.TestCase):
             result = f.run(c)
         self.assertEqual(order, ['checks', 'readiness', 'main-merge'])
         self.assertEqual(result['productionReadiness']['ready'], True)
+
+    def test_native_logs_select_deploy_job_and_exclude_full_suite_fixture_receipts(self):
+        jobs = {'jobs': [
+            {'id': 12, 'name': 'Full test suite', 'status': 'completed', 'conclusion': 'success'},
+            {'id': 13, 'name': 'Deploy QA', 'status': 'completed', 'conclusion': 'success'}]}
+        with patch.object(f, 'api', return_value=jobs), patch.object(f.subprocess, 'run', return_value=SimpleNamespace(stdout='native deployment log')) as execute:
+            self.assertEqual(f.logs(7, 'Deploy QA'), 'native deployment log')
+            self.assertEqual(execute.call_args.args[0], ['gh', 'run', 'view', '7', '--repo', f.REPO, '--log', '--job', '13'])
+        with patch.object(f, 'api', return_value={'jobs': [jobs['jobs'][1], jobs['jobs'][1]]}), patch.object(f.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'Unique successful'):
+                f.logs(7, 'Deploy QA')
+            execute.assert_not_called()
+
+    def test_successful_deploy_job_waits_for_terminal_run_before_log_read(self):
+        c = context()
+        run = {'id': 7, 'status': 'in_progress'}
+        jobs = {'jobs': [{'name': 'Deploy QA', 'status': 'completed', 'conclusion': 'success'}]}
+        with patch.object(f, 'api', side_effect=[{'workflow_runs': [run]}, jobs,
+                {'workflow_runs': [{**run, 'status': 'completed'}]}, jobs]), \
+                patch.object(f.time, 'time', return_value=epoch('20:20')), patch.object(f.time, 'sleep') as sleep:
+            self.assertEqual(f.workflow(c, 'ci.yml', c['revision'], ['Deploy QA'])['status'], 'completed')
+            sleep.assert_called_once_with(5)
 
     def test_only_explicit_factory_record_bootstraps_and_reads_back(self):
         with patch.object(f, 'api', side_effect=[{'variables': []}, None, {'value': 'fictional'}]) as api:
