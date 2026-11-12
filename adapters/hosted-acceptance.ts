@@ -2,7 +2,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {command} from './github';
 const ACCOUNT='553066147679',INSTANCE='i-063943f2f032b2903',PROFILE='fisher-acc030',REGION='ca-central-1';
-export type HostedContext={revision:string;tree:string;artifact:string;deadline?:number};
+export type HostedContext={revision:string;tree:string;artifact:string;deployedArtifact?:string;deadline?:number};
 type Options={execute?:typeof command;now?:()=>number;sleep?:(ms:number)=>Promise<void>};
 const sha=/^[a-f0-9]{40}$/;
 const digest=/@sha256:[a-f0-9]{64}$/;
@@ -11,7 +11,7 @@ export function hostCommand(context:HostedContext,script=readFileSync(join(impor
  `expected=json.loads(base64.b64decode('${Buffer.from(JSON.stringify(context)).toString('base64')}'))\n`+
  `def inspect(name):\n r=subprocess.run(['docker','inspect',name],capture_output=True,text=True,timeout=10)\n return json.loads(r.stdout)[0] if r.returncode==0 else None\n`+
  `checks={}\nmetadata={}\n`+
- `for name in ['alido-qa-web','alido-qa-worker']:\n d=inspect(name)\n source=d['Config'].get('Labels',{}).get('org.opencontainers.image.revision') if d else None\n image=d['Config']['Image'] if d else None\n running=bool(d and d['State']['Running'])\n checks[name+':source']=source==expected['revision']\n checks[name+':running']=running\n checks[name+':artifact']=bool(image and image.endswith(expected['artifact'][expected['artifact'].index('@sha256:'):]))\n metadata[name]={'revision':source,'image':image,'running':running,'healthy':bool(d and d['State'].get('Health',{}).get('Status')=='healthy')}\n p=inspect(name+'-previous')\n checks[name+':rollback']=bool(p and p['State']['Running'] is False)\n`+
+ `for name in ['alido-qa-web','alido-qa-worker']:\n d=inspect(name)\n source=d['Config'].get('Labels',{}).get('org.opencontainers.image.revision') if d else None\n image=d['Config']['Image'] if d else None\n running=bool(d and d['State']['Running'])\n checks[name+':source']=source==expected['revision']\n checks[name+':running']=running\n checks[name+':artifact']=bool(image and image.endswith(expected.get('deployedArtifact',expected['artifact'])[expected.get('deployedArtifact',expected['artifact']).index('@sha256:'):]))\n metadata[name]={'revision':source,'image':image,'running':running,'healthy':bool(d and d['State'].get('Health',{}).get('Status')=='healthy')}\n p=inspect(name+'-previous')\n checks[name+':rollback']=bool(p and p['State']['Running'] is False)\n`+
  `checks['webHealthy']=metadata['alido-qa-web']['healthy']\n`+
  `result={'checks':checks,'containers':metadata}\n`+
  `if all(checks.values()):\n p=subprocess.run(['docker','exec','-i','alido-qa-web','node'],input=base64.b64decode('${Buffer.from(script).toString('base64')}').decode(),text=True,capture_output=True,timeout=170)\n try: result['probe']=json.loads(p.stdout) if p.returncode==0 else {'failure':'probe_exit'}\n except Exception: result['probe']={'failure':'probe_output'}\n`+
@@ -25,7 +25,7 @@ export function validHostedResult(raw:any) {
 }
 /** Explicit trusted operator path: one scoped SSM probe; never invoked by dry-run. */
 export async function collectHostedAcceptance(c:HostedContext,o:Options={}) {
- if(!sha.test(c.revision)||!sha.test(c.tree)||!digest.test(c.artifact))throw Error('Exact hosted source/tree/artifact required');
+ if(!sha.test(c.revision)||!sha.test(c.tree)||!digest.test(c.artifact)||(c.deployedArtifact!==undefined&&!digest.test(c.deployedArtifact)))throw Error('Exact hosted source/tree/artifact required');
  const execute=o.execute??command,now=o.now??Date.now,sleep=o.sleep??(ms=>new Promise(r=>setTimeout(r,ms)));
  const startedAt=now();
  if(c.deadline!==undefined&&startedAt+200000>=c.deadline)throw Error('Hosted acceptance needs its bounded probe window');
