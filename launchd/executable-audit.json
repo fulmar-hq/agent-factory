@@ -2,7 +2,7 @@
   "launcher/wake.ts": "fc568b2c14100749a3315ba26d9aa4a319ccf79f3bfda6b1473ab4240f75b35f",
   "launcher/publisher-evidence.ts": "24d1c319314877f7a2de1b82ccf8e3fdcdd7cdca8082bde6cc1c78929baf7fb9",
   "launcher/codex-renewal-evidence.ts": "7434c97ec8dd14e279758b8b09768e479a1864f9e77d6ad9f588b842ac851922",
-  "launcher/release-result.ts": "3706ef3705c08fb9dd71df0fe22047ec36a818df79f2ed9c30e73c80fca7023a",
+  "launcher/release-result.ts": "96c30d6b60c327e342d5e58cd2cf9891a79a671cdcd1cd469d8d308b42a0dead",
   "launcher/delivery-retention.ts": "57ef59d82e3dcd613d3b7db746d221270ede6fd9496c45c77f148fb70bd67a34",
   "launcher/release-readiness.ts": "7cb117ba883f631e1ae8e50cded97a286e5b6cf4f48bdd89b0b2c31b5d23e653",
   "launcher/child.ts": "34e6c01cbf723a62b30d6b4f1c0fc39bf493af4ba1d991c946d1e19d2aaa247a",
@@ -24,7 +24,7 @@
   "adapters/codex-renewal.ts": "14f6a75bd6d2d3241861ce38bf8ad447303a98d8c34ea4f43af56f76daaf4ccf",
   "adapters/browser.ts": "a28b1e3c0ab5b61e1b29d222d066e92b0d89bba73671ee0f423ad94d9b788614",
   "adapters/factory-challenge.ts": "adbc9097f3d3d8ad5f599a3c9266593ddecc763ed25a6ea39433a63a91a93877",
-  "adapters/hosted-acceptance.ts": "b1838ba9b1c476af6868a36182963e7347294339d8ef910252d5978f8567ccdd",
+  "adapters/hosted-acceptance.ts": "52297e16c9aa879fb55c4111d9467c397229028337a566a03af1a137f02abeae",
   "adapters/billing.ts": "b74adf2cb30c4135eae3fc5007ec6ff318ecdda423cdecfa675a266e916c9560",
   "adapters/release.ts": "2464307781fff7bd94ab98dd387a9393c566f3593d2927c95de355eba5282325",
   "adapters/delivery.ts": "8b2f9830fd01b34d9977a4c15d9d1c9647658ff29d0224e9a70a191daad8fd78",
@@ -32,6 +32,6 @@
   "scripts/cache-retention.py": "9b05ebb3d99adaabcaf5c6e0b8d7c83c81a3597c6e872a67df94021ac868937c",
   "scripts/claude-usage.py": "582d30de3a085f32db1f4660de9c199b53090d9019c2e817656db322f8f02b92",
   "scripts/maintain-factory.ts": "ae0735343425bbbb7c979b36deb5f4ef2f4d2dd56ebcc37da30657b803295de8",
-  "scripts/release.ts": "6c8f2442e1bdb1862892b0c4c1aedcaef9533c4a64f2d1c00355531e1ff39839",
-  "scripts/alido-release.py": "957fe2754b2e63b42dd64e08c6d06af08c95eb5e446b758004ad93b00aac9410"
+  "scripts/release.ts": "8841bb987ee3666f49cb3de38702c6a59464ba8e108af2337030c0a8468c2077",
+  "scripts/alido-release.py": "69985930cb6117a1e50b1cc99e811d03ac568b6ad0fd73ef42fd493614899b1d"
 }
