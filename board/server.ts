@@ -1,4 +1,3 @@
-import {pauseOwner} from '../launcher/release-pause';
 import { refreshPulls } from "./pulls";
 import { claudeReading } from "../adapters/usage";
 import { boardEvidence } from "./runtime";
@@ -18,7 +17,7 @@ import {
   optionalJSON,
   QualificationSchema,
 } from "../launcher/config";
-import { Engine, usageGate } from "../launcher/engine";
+import { Engine, usageGate, pauseOwner } from "../launcher/engine";
 import { available } from "../wallet/ledger";
 export const same = (a: string, b: string) => {
   const left = Buffer.from(a), right = Buffer.from(b);

@@ -2,7 +2,7 @@
 
 A small local desk for approved GitHub work. A deterministic Bun launcher reconciles tickets, usage, capacity and a debit-only wallet; native Codex and Claude sessions do the work. A loopback board shows the evidence and the questions that need a person.
 
-The controller starts no model work on idle ticks. Exhausted budgets, duplicate events and missed release windows fail closed. Usage is refreshed without model calls; missing or stale usage permits only one logged, bounded recovery ticket until fresh native evidence arrives. Private installation settings and operational records stay outside this repository.
+The controller starts no model work on idle ticks. Exhausted budgets and duplicate events fail closed. Builders start only for tickets a person approved by label; the factory wakes no owner model turns and runs no release. Usage is refreshed without model calls; missing or stale usage permits only one logged, bounded recovery ticket until fresh native evidence arrives. Private installation settings and operational records stay outside this repository.
 
 Licensed under Apache-2.0. This repository contains original implementation and synthetic examples only.
 
@@ -16,7 +16,7 @@ Keep the installation outside this checkout. Set `FACTORY_PRIVATE_DIR` to that f
 
 The board shows actual local evidence. Missing readings and unverified native/mobile links remain visibly unverified. Use the private `owner-token` file for board controls; keep it out of workers, screenshots and Git. Tailscale and external AWS/release controls are separate setup steps.
 
-Read [operations and limitations](docs/operations.md) before enabling workers. The tests use synthetic data only and include independent-process races for the last slot, last dollar and duplicate event, quota boundaries, stale readings, overrun stops, release windows and persistent restart custody.
+Read [operations and limitations](docs/operations.md) before enabling workers. The tests use synthetic data only and include independent-process races for the last slot, last dollar and duplicate event, quota boundaries, stale readings, overrun stops and persistent restart custody.
 
 ## Add a project in 15 minutes
 

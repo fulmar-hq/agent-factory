@@ -3,6 +3,7 @@ import {Engine} from './engine';
 import {processIdentity} from './process';
 import type {Ticket} from './config';
 import {command,intakeLabel,type Issue} from '../adapters/github';
+import {autonomyEffects} from './effects';
 
 // Queue accounting shares the retained-custody gate with admission. Remote PR,
 // resource, usage and qualification checks still run immediately before launch.
@@ -13,7 +14,6 @@ export function claimableReady(e:Engine,ready:Ticket[]) {
 // Level-triggered recovery covers interruption between publication and labels.
 // A fresh digest or an owner-returned review is never overwritten by old work.
 export async function reviewPublished(e:Engine,execute=command,identity=processIdentity) {
- const {autonomyEffects}=await import('./autonomy');
  return await autonomyEffects(e.s,()=>reconcilePublished(e,execute),identity) ?? 0;
 }
 async function reconcilePublished(e:Engine,execute:typeof command) {
@@ -55,4 +55,20 @@ async function reconcilePublished(e:Engine,execute:typeof command) {
   }
  }
  return changed;
+}
+
+// Archive a verified-stopped worker whose process is gone. Logs and worktree
+// stay; no owner model turn is started for it.
+export function recoverWorkers(e:Engine) {
+ for(const x of e.active()) {
+  if(x.status!=='unknown' || x.pid!==null || !x.native_id)continue;
+  const failure=e.s.db.query("SELECT data FROM events WHERE kind='worker-failure' AND json_extract(data,'$.id')=? ORDER BY at DESC LIMIT 1").get(x.id) as {data:string}|null;
+  if(failure && unavailable(JSON.parse(failure.data).error))continue;
+  if(e.s.get<{verified:boolean}>(`cleanup-evidence:${x.id}`)?.verified!==true)continue;
+  e.s.atomic(()=>{
+   const current=e.sessions().find(y=>y.id===x.id);
+   if(current?.status!=='unknown' || current.pid!==null)return;
+   e.archive(x.id,`launcher verified stopped worker, native ${x.native_id}, retained logs/worktree`,'owner');
+  });
+ }
 }

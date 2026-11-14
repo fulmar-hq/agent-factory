@@ -1,5 +1,9 @@
-import {watchReleasePause,pauseOwner,acceptedPauseDay,capturePauseActions} from './release-pause';
-import type {ReleaseOwner} from './release-actions';
+export type PauseOwner='Coordinator'|'Release'|'Quality'|'Platform'|'Product';
+export function pauseOwner(value:unknown):PauseOwner {
+ if(value===undefined)return 'Coordinator';
+ if(typeof value==='string'&&['Coordinator','Release','Quality','Platform','Product'].includes(value))return value as PauseOwner;
+ throw Error('pause owner must be Coordinator, Release, Quality, Platform or Product');
+}
 import { builderSlots, type SlotProcessEvidence } from "./capacity";
 import {requireDiskCapacity,diskReading,type DiskReading} from './disk';
 import {dirname} from 'node:path';
@@ -137,11 +141,9 @@ export class Engine {
       this.recoveryEligible(t, meter, now);
     }
   }
-  pause(paused: boolean, actor: "owner" | "helper", accountableOwner?:ReleaseOwner) {
+  pause(paused: boolean, actor: "owner" | "helper", accountableOwner?:PauseOwner) {
     const owner=pauseOwner(accountableOwner);
     if (actor !== "owner") blocked("owner only");
-    const noticeDir=this.s.db.filename!==':memory:'?dirname(this.s.db.filename):undefined;
-    const accepted=paused&&noticeDir?acceptedPauseDay(noticeDir):null;
     this.s.atomic(() => {
       const now=Date.now();
       this.s.set("paused", paused);
@@ -151,10 +153,7 @@ export class Engine {
         {owner,ownerSupplied:accountableOwner!==undefined,actor:"owner-control"},
         `Set pause to ${!paused}`,now,
       );
-      if(paused)capturePauseActions(this.s,accepted,now);
     });
-    if(paused&&this.s.db.filename!==':memory:')try{watchReleasePause(this.s,dirname(this.s.db.filename));}
-    catch(error){this.s.event(randomUUID(),'release-pause-alert-failure',{error:String(error)},'Retain pause; the release reconciler retries the same episode alerts');}
   }
   retryPrior(t: Ticket): Session[] {
     const prior = this.sessions().filter(x => x.ticket === ticketId(t)).sort((a,b) => a.attempt-b.attempt);
@@ -486,71 +485,5 @@ export class Engine {
       );
     });
   }
-  release(
-    stage: "qa" | "production",
-    revision: string,
-    receipt: string,
-    actor: string,
-    now = Date.now(),
-  ) {
-    return this.s.atomic(() => {
-      if (actor !== "release" || this.s.get("paused") !== false)
-        blocked("release refused");
-      if (!/^[a-f0-9]{40}$/.test(revision) || !receipt)
-        blocked("revision and receipt required");
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: this.c.timezone,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hourCycle: "h23",
-      }).formatToParts(now);
-      const val = (k: string) => parts.find((x) => x.type === k)!.value;
-      const day = `${val("year")}-${val("month")}-${val("day")}`,
-        time = `${val("hour")}:${val("minute")}`;
-      if (
-        time !==
-        (stage === "qa"
-          ? this.c.schedule.qa_window
-          : this.c.schedule.production_window)
-      )
-        blocked("missed release window");
-      if (
-        stage === "production" &&
-        !this.s.db
-          .query(
-            "SELECT id FROM releases WHERE day=? AND stage='qa' AND revision=?",
-          )
-          .get(day, revision)
-      )
-        blocked("QA revision mismatch");
-      const acceptance = this.s.get<{
-        revision: string;
-        day: string;
-        receipt: string;
-      }>("qa-acceptance");
-      if (
-        stage === "production" &&
-        (!acceptance ||
-          acceptance.revision !== revision ||
-          acceptance.day !== day ||
-          !acceptance.receipt)
-      )
-        blocked("QA acceptance missing");
-      const id = `${day}:${stage}`;
-      this.s.db
-        .query("INSERT INTO releases VALUES(?,?,?,?,?,?)")
-        .run(id, day, stage, revision, receipt, now);
-      this.s.event(
-        id,
-        "release-authorization",
-        { revision, receipt },
-        "Use project containment runbook; no off-window new promotion",
-        now,
-      );
-      return id;
-    });
-  }
+
 }

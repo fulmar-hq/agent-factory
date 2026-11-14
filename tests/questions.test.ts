@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {Store} from '../tracking/store';
 import {TestEngine as Engine} from './fixtures';
 import {resolveQuestions,boardQuestions} from '../launcher/questions';
-import {expireDecisions} from '../launcher/autonomy';
+import {expireDecisions} from '../launcher/questions';
 import {config,ticket,admission,now} from './fixtures';
 
 function setup(){const s=new Store(':memory:'),e=new Engine(s,config());e.pause(false,'owner');return e;}

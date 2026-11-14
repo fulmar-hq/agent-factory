@@ -5,7 +5,7 @@ import type { BoardEvidence } from "./runtime";
 import { issueTicket, type Issue } from "../adapters/github";
 import type { Engine, Session } from "../launcher/engine";
 import { boardQuestions } from "../launcher/questions";
-import { toronto, deadlineAt } from "../launcher/release";
+import { toronto, deadlineAt } from "../launcher/time";
 import { BillingSchema, MeterSchema, type Billing, type Meter, type Ticket } from "../launcher/config";
 import { monthAt } from "../wallet/ledger";
 

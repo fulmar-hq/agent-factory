@@ -42,7 +42,7 @@ test("preparation writes minute plist without loading, preserves existing files 
     ).toBe("preserved unsaved draft");
     const s = new Store(join(dir, "controller.sqlite"));
     expect(s.get("paused")).toBe(true);
-    expect(s.rows("events")).toHaveLength(6);
+    expect(s.rows("events")).toHaveLength(4);
     s.close();
   } finally {
     rmSync(dir, { recursive: true });

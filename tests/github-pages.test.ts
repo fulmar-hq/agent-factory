@@ -1,7 +1,7 @@
 import {test,expect} from 'bun:test';
 import {githubPages} from '../adapters/github-pages';
 import {reconcile,intakeLabel} from '../adapters/github';
-import {githubWakes,pendingWakes} from '../launcher/wake';
+import {refreshPulls} from '../board/pulls';
 import {Store} from '../tracking/store';
 import {githubPage,config,ticket,now} from './fixtures';
 const issue=(number:number)=>({number,title:'Fictional work',body:'',url:`https://github.com/example/demo/issues/${number}`,updatedAt:'2026-11-10',state:'OPEN',labels:[] as {name:string}[]});
@@ -17,16 +17,6 @@ test('scheduler reads only complete open REST inventory while retaining closed h
   expect(JSON.parse((s.rows('tickets') as any[]).find(t=>t.id==='example/demo#1').snapshot).state).toBe('CLOSED');
  }finally{s.close();}
 });
-test('owner reconciliation includes second PR page and deduplicates its review',async()=>{
- const s=new Store(':memory:');s.set('owner-github-primed:example/demo',true);
- const rows=Array.from({length:128},(_,n)=>pr(n+1));(rows[127].reviews as any[]).push({id:'last-review',state:'APPROVED',submittedAt:'2026-11-10'});
- try{for(let repeat=0;repeat<2;repeat++){let n=0;await githubWakes(s,config(),async()=>githubPage('pullRequests',rows.slice(n*100,++n*100),{total:128,next:n===1,cursor:`page-${n}`}),now);}expect(s.get<any>('board-pulls:example/demo').pulls).toHaveLength(128);expect(pendingWakes(s).filter(w=>w.kind==='review-returned')).toHaveLength(1);}finally{s.close();}
-});
-test('late-page failure publishes neither partial tickets nor owner events',async()=>{
- const s=new Store(':memory:');s.set('owner-github-primed:example/demo',true);
- const execute=async()=>{throw Error('second page offline');};
- try{expect(await reconcile(s,config(),now,execute,'open')).toEqual([]);expect(s.rows('tickets')).toEqual([]);expect(s.get<any>('github:example/demo').error).toContain('offline');let p=0;await expect(githubWakes(s,config(),async()=>{if(p++)throw Error('offline');return githubPage('pullRequests',[pr(1)],{total:2,next:true,cursor:'next'});})).rejects.toThrow('offline');expect(pendingWakes(s)).toEqual([]);expect(s.get('board-pulls:example/demo')).toBeNull();}finally{s.close();}
-});
 test('malformed, repeated and missing cursors, GraphQL errors and changed totals refuse',async()=>{
  for(const scenario of ['missing','repeated','total','duplicate','errors','nested']){let n=0;await expect(githubPages('example/demo','issues',async()=>{n++;const raw=JSON.parse(githubPage('issues',[issue(scenario==='duplicate'?1:n)],{total:scenario==='total'?n+2:3,next:true,cursor:scenario==='missing'?null:'same'}));if(scenario==='errors')raw.errors=[{message:'partial'}];if(scenario==='nested')raw.data.repository.issues.nodes[0].labels.pageInfo.hasNextPage=true;return JSON.stringify(raw);})).rejects.toThrow();expect(n).toBeLessThanOrEqual(2);}
 });
@@ -39,7 +29,7 @@ test('issue and PR URL identities must exactly match node number before any effe
   try{
    await expect(githubPages('example/demo',kind,execute)).rejects.toThrow('identity mismatch');
    if(kind==='issues'){expect(await reconcile(s,config(),now,execute,'open')).toEqual([]);expect(s.rows('tickets')).toEqual([]);}
-   else {await expect(githubWakes(s,config(),execute,now)).rejects.toThrow('identity mismatch');expect(s.get('board-pulls:example/demo')).toBeNull();expect(pendingWakes(s)).toEqual([]);}
+   else {await refreshPulls(s,config(),now,execute);expect(s.get('board-pulls:example/demo')).toBeNull();}
   }finally{s.close();}
  }
 });

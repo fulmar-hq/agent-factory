@@ -7,7 +7,7 @@ import {TestEngine as Engine,config,ticket,admission,githubPage} from './fixture
 import {GitHubUnavailable,retryAtFor,githubBudget,githubHttpCounts,githubContext,githubDiagnostic,githubSource,unavailable} from '../adapters/github-budget';
 import {githubHealth} from '../launcher/github-health';
 import {recordWorkerFailure} from '../launcher/worker';
-import {recoverWorkers} from '../launcher/wake';
+import {recoverWorkers} from '../launcher/queue';
 import {tick} from '../launcher/tick';
 import * as github from '../adapters/github';
 
@@ -117,37 +117,35 @@ test('a full tick with occupied capacity does not reread every queued issue or c
  finally{command.mockRestore();s.close();rmSync(dir,{recursive:true});}
 });
 
-for(const phase of ['owner-poll','final-intake'] as const)test(`a full tick keeps late ${phase} GitHub failure degraded and never supplies or dispatches`,async()=>{
- const autonomy=await import('../launcher/autonomy'),wake=await import('../launcher/wake'),workers=await import('../adapters/workers');
+test('a full tick keeps a late final-intake GitHub failure degraded and claims nothing',async()=>{
+ const workers=await import('../adapters/workers');
  const dir=mkdtempSync(join(tmpdir(),'factory-late-gh-')),c=config(),now=Date.now(),retryAt=now+3600000;
  writeFileSync(join(dir,'config.yaml'),JSON.stringify(c));writeFileSync(join(dir,'repositories.json'),JSON.stringify({'example/demo':dir}));
  const s=new Store(join(dir,'controller.sqlite')),e=new Engine(s,c);e.pause(false,'owner');
  const original=e.admit({...ticket(99),estimateSeconds:3600},{...admission(),now,meter:{...admission().meter,observedAt:now,windows:admission().meter.windows.map(w=>({...w,resetsAt:now+3600000}))},qualification:{...admission().qualification,expiresAt:now+3600000}});
  e.claimStart(original.id);s.db.query("UPDATE sessions SET status='running',started=? WHERE id=?").run(now,original.id);
  const claims=s.db.query('SELECT * FROM claims').all();s.set('heartbeat',{at:now,ready:21,status:'ok'});
- wake.queueWake(s,{id:'retained-before-outage',owner:'builder',kind:'ticket-ready',payload:{}},now);
  const t=ticket(3),issue={number:3,title:t.title,body:'```factory\n'+JSON.stringify(t)+'\n```',url:'https://github.com/example/demo/issues/3',state:'OPEN',updatedAt:'2026-11-10',labels:[{name:'kind:unknown'},{name:'area:unknown'},{name:'state:ready'}]};
  issue.labels.push({name:github.intakeLabel('example/demo',issue)});
  let finalReads=0,prReads=0;
  const command=spyOn(github,'command').mockImplementation(async args=>{
   if(args[1]==='--version')return 'fictional-version';if(args[0]==='sysctl')return '1';
   if(args.includes('--paginate'))return JSON.stringify([[{...issue,state:'open',html_url:issue.url,updated_at:issue.updatedAt,closed_at:null}]]);
-  if(args.includes('graphql')){prReads++;if(phase==='owner-poll')throw new GitHubUnavailable('late PR poll rate limit',retryAt);return githubPage('pullRequests',[]);}
+  if(args.includes('graphql')){prReads++;return githubPage('pullRequests',[]);}
   if(args[1]==='issue'&&args[2]==='view'){finalReads++;throw new GitHubUnavailable('late final intake rate limit',retryAt);}
   throw Error('unexpected synthetic command '+args.slice(0,4).join(' '));
  });
- const subscription=spyOn(workers,'verifySubscription').mockResolvedValue(undefined),supply=spyOn(autonomy,'supply'),dispatch=spyOn(wake,'dispatchWake').mockReturnValue(false);
+ const subscription=spyOn(workers,'verifySubscription').mockResolvedValue(undefined);
  try{
   const result=await tick(dir);
   expect(result).toMatchObject({status:'degraded',ready:null,lastKnownReady:21,claimed:0,retryAt});
   expect(s.get('heartbeat')).toMatchObject({status:'degraded',ready:null,lastKnownReady:21,retryAt});
-  expect(prReads).toBe(1);expect(finalReads).toBe(phase==='final-intake'?1:0);
-  expect(supply).not.toHaveBeenCalled();expect(dispatch).not.toHaveBeenCalled();
+  expect(prReads).toBe(0);expect(finalReads).toBe(1);
   expect(e.sessions()).toHaveLength(1);expect(e.sessions()[0]?.status).toBe('running');expect(s.db.query('SELECT * FROM claims').all()).toEqual(claims);
-  expect(s.get<any>('owner-wake:retained-before-outage').state).toBe('queued');expect(s.get('intake-round')).toBeNull();
+  expect(s.get('intake-round')).toBeNull();
   expect(s.get('last-successful-heartbeat')).toBeNull();
   expect(s.rows('events').filter((r:any)=>r.kind==='session-archive')).toHaveLength(0);
- }finally{dispatch.mockRestore();supply.mockRestore();subscription.mockRestore();command.mockRestore();s.close();rmSync(dir,{recursive:true});}
+ }finally{subscription.mockRestore();command.mockRestore();s.close();rmSync(dir,{recursive:true});}
 });
 
 test('HTTP500 backs off the real command path and legacy native completion keeps custody',async()=>{
