@@ -7,8 +7,6 @@ import {TestEngine as Engine} from './fixtures';
 import { builderSlots, reconcileCapacity, slotLimit, type SlotProcessEvidence } from '../launcher/capacity';
 import { ConfigSchema } from '../launcher/config';
 import { boardModel } from '../board/model';
-import { supply } from '../launcher/autonomy';
-import { observeSupplyIdle } from '../launcher/supply-idle';
 import { queueBrowser as queueDetachedBrowser, resumeBrowser, saveBrowser, browserJobs, reconcileBrowsers, type BrowserPorts } from '../launcher/browser';
 import { launchReady } from '../launcher/tick';
 import { intakeLabel, issueTicket, type Issue } from '../adapters/github';
@@ -185,19 +183,6 @@ test('normal launchReady spawn rollback preserves dormant claims and debits, the
   expect(e.sessions()).toEqual([original!]);expect(e.s.rows('debits')).toEqual(before);expect(e.slots().free).toBe(1);
   let starts=0;await launchReady(e,t,admission(),()=>starts++,execute,()=>now);
   expect(starts).toBe(1);expect(e.slots().used).toBe(1);expect(e.active()).toHaveLength(2);
- }finally{e.s.close();}
-});
-
-test('board and idle supply observe free slots while retaining occupied custody paths',()=>{
- const e=setup(1);try{
-  const x=dormant(e,1);e.c=ConfigSchema.parse({...e.c,autonomy:{intake_owner:'builder',ready_buffer:3,auto_approval:{max_minutes:30,max_docs_per_round:1,protected_paths:['launcher/config.ts']},restart:{max_retries:1,causes_per_hour:3}}});
-  expect(boardModel(e,{},now).hero.mode).toBe('idle');
-  expect(observeSupplyIdle(e,0,now,{claimed:0,refusals:[]})).toMatchObject({since:now});
-  supply(e,[],now,{claimed:0,refusals:[]});
-  const round=e.s.get<{wake:string}>('intake-round')!;
-  expect(e.s.get<{payload:{free:number;occupied:unknown[]}}>(`owner-wake:${round.wake}`)?.payload).toMatchObject({free:1,occupied:[{id:x.id,paths:ticket().paths}]});
-  const y=e.admit(ticket(2),admission());expect(observeSupplyIdle(e,0,now+1,{claimed:0,refusals:[]})).toBeNull();expect(e.s.get('supply-idle')).toBeNull();
-  expect(e.active().map(x=>x.id)).toEqual([x.id,y.id]);
  }finally{e.s.close();}
 });
 

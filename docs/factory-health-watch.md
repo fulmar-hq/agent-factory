@@ -1,30 +1,39 @@
 # Independent factory alarm
 
-The deterministic evaluator is #148 part one. This runtime supplies #150's independent read-only controller/native/tick/disk collectors, durable separate health SQLite, and existing Alido Mail bridge. It has no model or AWS call and does not open credential files. Missing evidence remains actionable unknown; neither an owner wake nor a queued outbox row proves a renewal or delivery.
+`bun scripts/factory-health-watch.ts` runs every five minutes from launchd,
+independently of the tick and all chats. It has no model or AWS call, opens the
+controller read-only, keeps its own state in `health/state.sqlite` and
+`health/controller-alerts.sqlite`, and delivers through the existing Alido Mail
+bridge (Vincent by Telegram, Coordinator by wake). Missing evidence is
+actionable unknown, never proof of health.
 
-The same independent five-minute job also checks the idle queue. A successful queue observation at most five minutes old, zero runnable tickets, positively stopped builder custody, an unpaused factory and fresh native usage allowing high-benefit work are required. After more than twenty minutes without actual builder start/exit/cleanup activity it inserts one stable **action** mail to Coordinator. Owner turns and maintenance reviews cannot conceal the stall. The observer opens controller state read-only and keeps observations/incidents in `health/idle-queue.sqlite`. Unknown queue/usage/custody stays visibly ineligible, never healthy proof. If queue/complete inventory evidence remains unavailable for more than twenty minutes, a separate persistent observation-gap episode sends one action to Coordinator, explicitly reporting unknown evidence rather than claiming the queue is empty. A positive paused or nonempty reading ends that observation-gap episode; pending delivery still reconciles after recovery. A bridge insert is queued only; read back `wake_state=woken` and its actual wake ID before claiming Coordinator was woken. Preserve all observations and mail. Later actual builder activity rearms a new episode.
+## What it watches and why
 
-Pending incidents retain their original evidence and retry delivery even after work resumes. The notification describes the past incident and asks Coordinator to verify permanent product supply. When recovering a missed owner-reported incident during installation, retain the original report and real queue/custody/usage readback as incident provenance, separately from automatic observations. Never manufacture a current idle observation or change controller custody to rehearse an alarm.
+| Condition | Prevents | Pages when |
+| --- | --- | --- |
+| disk | a full disk corrupting SQLite and stopping every job | Data volume above 85% used |
+| tick | the controller silently stopping | no successful tick for over ten minutes |
+| controller / pause | an unreadable controller, or a pause nobody owns | controller evidence unavailable; paused by anyone but a verified Vincent pause |
+| qualification | builders admitted with an unverified harness | a required qualification is missing, expired, or expires within three hours without live renewal |
+| tick failures (controller-alerts) | a tick that keeps failing | the second consecutive failed tick; one failure that the next tick repairs never pages |
+| paused with ready work (controller-alerts) | approved work stuck behind a forgotten pause | paused five minutes with ready tasks and no running builder |
 
-After the product-only intake policy is installed, Coordinator can load a separate `com.agent-factory.product-top-up` job for `bun scripts/product-top-up.ts` every 1200 seconds with absolute paths and the existing private directory. This invokes the existing supply/backoff/custody lease and Product owner dispatch; the ordinary tick applies validated results and normal builder admission. It refuses pause, missing/stale usage and 90%, permits only high-benefit work in the 70–90% window, and changes no capacity or spending limit. No review/acceptance tickets are supplied by the installed product-only policy. Installation is distinct from source implementation: lint/bootstrap and read back the loaded interval and one actual run. Undo by booting out that label and archiving its plist; retain rounds, claims and receipts.
+Retired on 2026-11-14 with the machinery they guarded: work-supply and idle-queue
+alarms (the queue is filled only by people now), nightly release, release AWS
+expiry, billing and hold checks.
 
-Run `bun scripts/factory-health-watch.ts` every 300 seconds with launchd, independently of the tick job and all chats. Coordinator installs the private plist only after signed source review, exact-head Codex challenge and green Verify. Use absolute Bun/script/WorkingDirectory/FACTORY_PRIVATE_DIR, RunAtLoad false and private stdout/stderr logs. Align StartCalendarInterval to minutes 0,5,...55 so the release-window check runs at the five-minute boundary; installation requires the existing Toronto system timezone. Read back the loaded job and its next interval. Undo by booting out `com.agent-factory.health`, archiving its plist, and using a signed source revert. Retain health state, controller data and all bridge receipts.
+## Delivery
 
-Existing watchdog silence was structural: it required two hours idle, free capacity and an unpaused launcher, had no recovery message, and no independent watchdog launchd job existed. Qualification alerts ran inside tick at two hours and covered primary providers only. A stopped or paused tick could remove the observer itself. The new process continues to collect even when the controller cannot open or write its DB. Errors in the independent process remain in its own launchd error log; unavailable mail preserves durable pending notifications for retry.
+State is persisted before insertion. Bridge IDs are stable per condition,
+incident and destination; retries reuse the same ID. Only the latest transition
+of a condition is delivered: a superseded opening or recovery stays as history
+and is never drip-fed later. A recovery goes only to a destination that was sent
+its opening. Repeated openings, and repeated recoveries, wait two hours after the
+previous same-kind delivery. A queued insert is not delivery: Vincent needs a
+`telegram_messages` receipt; Coordinator needs a recorded wake.
 
-AWS expiry uses only the existing non-secret original sign-in provenance file `release-auth-session.json`, never SSO tokens or AWS calls. Billing uses the existing cached `release-billing.json` import plus current read-only wallet stops/commitments. Holds use fresh read-only GitHub QA_HOLD and release-board label readback under the existing supported protocol. Missing, malformed or stale evidence remains actionable unknown. The independent watcher observes per-effort qualifications and suppresses a warning only with matching original qualification identity, actual current native model/effort and fresh process identity; a queued wake cannot supply this proof.
+`bun scripts/factory-health-watch.ts --rehearse YYYY-MM-DD` inserts exactly one
+labelled test message to Vincent through the real bridge, with an idempotent ID.
 
-Bridge IDs are stable per condition, incident and destination. State is persisted before insertion. A successful insert means queued only. Vincent delivery needs the bridge's `telegram_messages` receipt; Coordinator delivery needs its recorded native wake. Notification retries reuse the same mail ID after crashes. Separate receipts prevent one destination hiding the other. Recovery requires newer positive evidence and two-hour opening/recovery rate limits remain in the evaluator.
-
-After installation, `bun scripts/factory-health-watch.ts --rehearse YYYY-MM-DD` exercises a synthetic disk incident in memory and inserts exactly one clearly labelled test through the actual bridge, solely to Vincent. Its fixed date ID makes retries idempotent. Run again only to read delivery; no other condition or Coordinator is sent by the rehearsal. Preserve the returned ID and actual Telegram receipt privately. This does not alter controller evidence or manufacture qualification. Full six-condition source tests and real monitoring operation are separate from the single authorized Telegram test.
-
-Product-only intake sees unapproved ready drafts and the open product backlog
-before review/building context; a ready label alone is never counted as runnable.
-Its context includes the reconciler's refusal and a bounded source excerpt.
-Incomplete existing drafts stay with their named owner for correction and normal
-content-bound approval on their original issue. Product reports the issue,
-refusal and next actor; it must not convert owner-only setup into coding work or
-create duplicates. Intake proposals only create genuine new product leaves.
-Existing-issue update fields are rejected before effects: the launcher has no
-proven compare-and-swap path for replacing an author's GitHub issue body.
-Review work remains on its original PR.
+Undo: boot out `com.agent-factory.health`, archive its plist, and install a
+reviewed signed revert. Retain health state, controller data and bridge receipts.

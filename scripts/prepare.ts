@@ -35,8 +35,6 @@ for (const [name, args, extra] of [
   ],
   ["board", [join(repo, "board/server.ts")], "<key>KeepAlive</key><true/>"],
   ["health",[join(repo,"scripts/factory-health-watch.ts")],`<key>StartCalendarInterval</key><array>${Array.from({length:12},(_,i)=>`<dict><key>Minute</key><integer>${i*5}</integer></dict>`).join('')}</array>`],
-  ["product-top-up",[join(repo,"scripts/product-top-up.ts")],"<key>StartInterval</key><integer>1200</integer>"],
-  ["maintenance",[join(repo,"scripts/maintain-factory.ts"),"--once"],"<key>StartInterval</key><integer>300</integer>"],
 ] as const) {
   const path = join(root, `com.agent-factory.${name}.plist`);
   if (existsSync(path)) {

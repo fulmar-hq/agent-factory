@@ -4,7 +4,7 @@ import { Store } from "../tracking/store";
 import {TestEngine as Engine} from './fixtures';
 import { boardModel, plainText } from "../board/model";
 import { intakeLabel, reconcile, type Issue } from "../adapters/github";
-import { githubWakes } from "../launcher/wake";
+import { refreshPulls } from "../board/pulls";
 import { config, ticket, now, billing } from "./fixtures";
 
 function fixture() {
@@ -299,7 +299,7 @@ test("waiting uses the tick’s read-only PR evidence and never invents passing 
           statusCheckRollup: [{ status: "IN_PROGRESS" }],
         },
       ]);
-    await githubWakes(s, e.c, execute, now);
+    await refreshPulls(s, e.c, now, execute);
     expect(boardModel(e, {}, now).waiting[0].status).toBe("Waiting for checks");
     s.set(`board-pr:${url}`, {
       at: now,

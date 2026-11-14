@@ -30,11 +30,15 @@ export function flushControllerAlerts(dir:string,mail:string,now=Date.now()){
 export function recordTickResult(dir:string,mail:string,result:{at:number;status:string}){
  const db=stateAt(dir);
  try{db.transaction(()=>{
-  if(result.status!=='error'){db.query("INSERT OR REPLACE INTO state VALUES('tick-episode',NULL)").run();return;}
+  if(result.status!=='error'){db.query("INSERT OR REPLACE INTO state VALUES('tick-episode',NULL)").run();db.query("INSERT OR REPLACE INTO state VALUES('tick-first-error',NULL)").run();return;}
   const prior=db.query("SELECT value FROM state WHERE key='tick-episode'").get() as {value:string|null}|null;
   if(prior?.value)return;
-  const id=`factory-tick-error:${result.at}`;
-  db.query('INSERT OR IGNORE INTO incidents(id,at,summary,body) VALUES(?,?,?,?)').run(id,result.at,'Factory launcher tick failed; inspect it and restore task claims.','Read tick.log and tick.error.log for the retained failure. Reconcile controller locks and custody with normal controls; preserve work, usage gates and release windows.');
+  // One failed tick that the next tick repairs is not worth a wake-up. Page
+  // only on the second consecutive failure, naming when the episode began.
+  const first=db.query("SELECT value FROM state WHERE key='tick-first-error'").get() as {value:string|null}|null;
+  if(!first?.value){db.query("INSERT OR REPLACE INTO state VALUES('tick-first-error',?)").run(String(result.at));return;}
+  const id=`factory-tick-error:${first.value}`;
+  db.query('INSERT OR IGNORE INTO incidents(id,at,summary,body) VALUES(?,?,?,?)').run(id,result.at,'Factory launcher ticks failed twice in a row; inspect them.','Read tick.log and tick.error.log for the retained failure. Reconcile controller locks and custody with normal controls; preserve work, usage gates and release windows.');
   db.query("INSERT OR REPLACE INTO state VALUES('tick-episode',?)").run(id);
  }).immediate();}finally{db.close();}
  flushControllerAlerts(dir,mail,result.at);

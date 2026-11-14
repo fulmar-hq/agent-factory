@@ -48,13 +48,13 @@ Cleanup keeps collecting descendants while stopping, signals pinned owned proces
 
 Each tick checks qualification expiry before GitHub reconciliation, including while paused or idle. Within two hours (or when already expired), each valid provider qualification queues one line through the existing Telegram bridge's `messages` outbox. Stable provider/expiry IDs prevent duplicate alerts on ticks, restart or a crash between stores. Renewal with a new expiry can alert again. The bridge defaults to `~/.alido-private/mail/mail.sqlite`; `FACTORY_MAIL_DB` selects an existing installation for rehearsals. Missing/failed bridge access records an append-only failure and retries on later ticks. No bot, credentials, model call or replacement mail database is created. Retain queue/delivery receipts; undo policy changes with a signed revert and retain prior alerts. Alerting neither renews qualifications nor admits workers.
 
-## Owner actions and releases
+## Owner actions
 
 Board writes require the private bearer token plus an exact loopback Origin. DNS-rebound Host values are refused; no CORS or schedule/funding operation exists. Reads are loopback-only. Text from GitHub is rendered as text, never HTML. English and French control labels are included.
 
-`FACTORY_OWNER_TOKEN` authorizes `bun scripts/control.ts pause|resume`, `qa-accepted REV DAY RECEIPT`, `release qa|production REV RECEIPT`, or `clear-aws-stop OWNER-DECISION-RECEIPT`. Do not pass this environment to workers. Pause persists and blocks admissions/promotions; active supervisors stop and retain work. Resume does not replay claims or clear an overrun stop. `continue-session SESSION RECEIPT` is the separate owner-authorized bounded Codex continuation: stopped paused custody, exact retained native ID, verified cleanup and a larger calibrated token estimate are required. It spawns the normal supervisor transactionally, resumes the native conversation in the preserved workspace, retains original brief/start/claims/debits and monotonic accounting, and records the explicit extension and prior stop. Paused wall time does not become active usage. The original time bound is unchanged. New attempts retain distinct logs and events; no automatic retry is added. The board can answer questions and request a ticket stop. After reconciling native custody and preserving work, use `bun scripts/control.ts archive SESSION CUSTODY-RECEIPT` with the owner token, or the board's archive form. Only unknown, paused or finished sessions can be archived, and a still-live supervisor refuses archive. Custody records bind PID to boot identity and process start (plus UID on macOS), so a reused PID cannot block archive; ESRCH and EPERM are treated as no owned supervisor. Legacy rows without identity retain the live-PID refusal until custody is reconciled. A stopped supervisor clears its PID only after its child exits. Archive releases slot/heavy-slot/path occupancy, retains session/native IDs, workspace, original claims and irreversible debits, and appends the prior status, receipt and undo guidance. Archive alone never enables replay; a separately approved new digest can qualify for the numbered retry path above. Unknown/paused sessions deliberately keep occupancy until this explicit reconciliation. A crash with starting/running custody still requires native-session investigation; no automatic retry or reset is supplied without the new-digest approval and archived-custody checks above. The source token, not a caller-supplied role name, authorizes these operations.
+`FACTORY_OWNER_TOKEN` authorizes `bun scripts/control.ts pause|resume`, `clear-aws-stop OWNER-DECISION-RECEIPT`, `clear-restart-hold`, `prepare-delivery`, `calibrate-tokens`, `continue-session`, `approve-intake` and `archive`. Do not pass this environment to workers. Pause persists and blocks admissions.
 
-Release authorization refuses any other minute, duplicate daily batch, absent QA acceptance, mismatched revision or paused state. Production requires the same day's independently accepted QA revision. This is a local execution guard and evidence record, **not a deployment receipt**. Integrate it with the private project's protected executor before its effects; separate workflow-side time enforcement and AWS OIDC/brakes belong to the infrastructure setup. No product deployment is performed by this repository. Receipts displayed here are not claimed as independently deployed truth without project readback evidence.
+The nightly release commands (`qa-accepted`, `release`) and owner registration were removed on 2026-11-14 with the nightly release path and owner wakes; releases happen outside the factory.
 
 ## Restart and undo
 
@@ -90,16 +90,6 @@ The deterministic `recent-five-v1` estimator predicts helper-hours, native token
 See [repository enrollment and worker qualification](enrollment.md) for the setup sequence. Every CLI tick writes exactly one timestamped JSON summary to stdout (the installed job’s `tick.log`): `status: "ok"` with ready/claimed counts, persistent `paused` state and per-ticket `refusals` (ticket ID and reason), or `status: "error"` with the failure. The board shows pause state and the last tick's refusals together in its heartbeat card. Errors also go to stderr and exit nonzero.
 
 
-## Owner event wake and recovery
-
-The launcher queues stable events for ready tickets, returned reviews, completed CI checks, exact release windows and qualification renewal two hours before expiry. A first PR reconciliation records a historical baseline without waking everyone for old reviews/checks. The native GitHub IDs and head bind subsequent events; repeats and process restarts cannot dispatch a claimed event twice. Truncated or failed source reads retain the prior successful reconciliation timestamp. The board shows that timestamp separately from tick heartbeat.
-
-Register an owner with the owner-token control: `register-owner ROLE WORKSPACE NATIVE-ID|new PID|0 RECEIPT`. Registration verifies the exact existing native transcript, workspace and optional live process identity. It records the prior registration and undo. Register active external owner sessions with their actual PID so the launcher waits for them instead of duplicating a running owner. Missing registration leaves events queued. New owners start once; later events run `codex exec resume NATIVE-ID` (Claude uses its native `--resume`). The original native ID is retained. No GUI foreground open is counted as a resumed turn.
-
-Owner wakes are bounded read-only reconciliation turns: read-only source/toolchain/dependencies plus per-event scratch, without a signing agent or GitHub/AWS/controller credentials. Launcher-supplied event evidence and the owner record provide context; ticket implementation, publishing and release remain separate admitted effects. Each wake retains native model/counter/cleanup evidence, checks its input+output delta from the pre-resume native baseline and stops at the Day-1 bounds. Older transcript usage is never charged again as this event's work. Model and effort are checked on the new turn after a complete historical baseline read; historical model changes do not masquerade as a current-turn conflict. A conflicting/missing new-turn native receipt blocks completion. Exact retained historical native receipts can be found across their original date, rather than selecting the newest session.
-
-A dispatch claim is committed before spawning. An uncertain start is retained, never automatically retried; an owner with unresolved cleanup prevents later dispatches. A stopped failed worker with a retained native ID and independently verified descendant cleanup can be archived automatically and queues one recovery event for its owner. Archive releases its worker slot/path occupancy, retaining workspace, native ID, ticket claim, debit and all logs. Duplicate recovery events resume the owner once; they never re-run the failed worker or reopen its ticket claim. A live/unknown supervisor, missing native ID or missing cleanup proof keeps custody blocked. Original budget pauses remain owner-reconciled, not auto-archived. Undo source with signed revert; preserve operational evidence and registrations.
-
 ## Executable delivery checks
 
 On macOS, the old Alido `test_calendar_build_diagnostic.py` deliberately calls `os.abort()` in a child. `RLIMIT_CORE=0` prevents core files but does not prevent Apple's crash reports and dialogs. Use SIGTERM for the local integration case, retaining mocked SIGABRT normalization and real SIGABRT coverage on Linux. Worker prompts prohibit intentional macOS crashes. The publisher refuses direct diagnostic tests and unittest discovery against a retained snapshot containing the old abort fixture; repair and approve the source rather than altering the frozen snapshot or silently skipping coverage. Ordinary Apple Python snippets work under the factory profile; denied xcrun cache writes alone do not establish an interpreter crash. Do not widen home reads or change macOS crash-reporting settings.
@@ -110,31 +100,6 @@ On macOS, Bun 1.3.14 `bun run` may attempt to list home ancestors outside the re
 
 New product workers resolve QA through authenticated GitHub readback and fetch that immutable revision before creating their workspace; the existing source checkout is never reset. Continuations preserve their original base. Missing prerequisite files are blockers; an unchanged bundle cannot publish and must not be treated as successful delivery.
 
-Owner wake, qualification-renewal alerts and release-window events originate in the scheduled launcher without a Coordinator turn. Owner wakes are read-only. This repository does not yet execute full qualification renewal or protected project releases from those events. A queued/completed owner wake is not renewal or deployment evidence. Exact-window events cannot provide a catch-up release, and owner execution latency cannot extend the authorized minute.
-
-## Work supply and bounded recovery (A4)
-
-The optional `autonomy` policy opts into launcher-owned intake and rule approvals. Below **current worker slots + 3 unclaimed ready tickets**, the launcher queues a fresh Product intake turn. Intake and failure diagnosis have priority over routine owner notifications and start fresh native sessions. Owner tools retain read-only source and their per-event writable scratch. They write data to `intake.json` or `retry.json`; only the trusted launcher makes GitHub changes. Only native-verified completed wakes with verified cleanup can supply effects. JSON is size bounded, schema validated and opened without following symlinks. Missing evidence never becomes qualification or delivery success.
-
-`autonomy.intake_mode` is `drain` (the default) or `build`. Drain clears existing work before reprioritization: no new Alido product scope, even when the buffer is empty. Intake may create repairs (`kind: fix`) only with `brief.intakeEvidence` referencing an existing open issue/PR in the same repo (`{"kind":"issue","number":123}` or `{"kind":"pr","number":123}`), or a recorded failed session in that repo (`{"kind":"session","session":"ID"}`). A factory self-ticket must target `fulmar-hq/agent-factory` and cite an exact excerpt of an A1–A9 step in the private installation's `autonomy-correction-plan.md` (`{"kind":"factory-plan","step":"A4","quote":"exact source excerpt of at least 20 characters"}`). The private plan is read as bounded data and stays outside Git. Missing, closed, unavailable or mismatched evidence refuses effects. References establish provenance; the owner must still keep the repair within the cited scope. Mode is checked at owner dispatch, draft creation and automatic approval, so a queued build wake cannot bypass a later drain setting. Empty drain intake is valid. Already-running work keeps custody and finishes normally. Existing approved backlog and failure retries retain their normal admission gates. Switch deliberately to `build` when new scope is authorized; undo by restoring `drain`. Archive policy changes and retain all custody and debit history.
-
-An intake result is `{"tickets":[{"repo":"example/demo","title":"Bounded useful task","brief":{...}}]}`. The brief is the normal factory block with explicit `estimateSeconds`, `estimateTokens` and an honest `estimateBasis` explaining the source of the estimate. The launcher supplies owner and provenance. It retains a unique marker for each proposal and searches all-state GitHub readback after uncertain creates. Drafts need exactly matching kind/area labels. Rule approval requires at most 30 minutes, one known area, valid paths disjoint from active custody and approved ready work, no protected paths (including nested AGENTS.md/CLAUDE.md and Git metadata), an executable check, and available wallet authority. At most one docs-only leaf is admitted per intake round, determined from paths rather than the claimed ticket kind. Doc permits are retained conservatively after interrupted writes. Out-of-policy work becomes an owner decision with a two-hour deadline and a not-approved default, visible in questions/events and the owner event packet. A3 will connect the richer decision service to board and Telegram signals. Approval rereads are bound to the exact policy-reviewed digest; source errors or truncation refuse approval. A durable process-identity lease serializes external policy effects across ticks; reservation and all existing final admission checks still apply independently.
-
-An intake round has two bounded owner attempts. Exhausted drain rounds retain `drain-intake-exhausted`; build rounds retain an owner decision whose default remains not approved. Neither ends supply. A durable backoff starts at `autonomy.idle_wake_minutes` (default **10**, configurable from 1 to 60), doubles after exhausted rounds, and caps at 60 minutes. Reaching the buffer closes the round; useful published implementation rearms it after verified owner cleanup. No retry duplicates live or unresolved native custody. Owners should supply useful leaves and respect project contracts, never fill capacity with invented work or padded estimates. This controller cannot prove an estimate honest from text; it requires explicit evidence and leaves the normal frozen accounting/overrun gates in place.
-
-After actual admission attempts, free worker capacity with nothing claimable starts a durable idle episode. Refused ready labels and previously claimed digests cannot conceal it. At the configured idle deadline the launcher queues a fresh bounded intake brief, shortening backoff once if needed; an already queued/live intake turn satisfies the wake without duplication. The packet prioritizes up to 50 existing review issues, includes bounded scope/PR/check evidence and admission refusals, and asks Product to staff review, challenge and fix-up leaves. Review work does not fill the ready buffer or justify waiting. Drain leaves still require `kind: fix`, exact existing-work evidence, executable checks and all normal approval/admission gates; this grants no new product scope or release authority. Empty output remains valid and retries with backoff.
-
-At two hours of continuous idle, exactly one Vincent FYI is inserted into the existing Telegram bridge outbox. The episode ID deduplicates insertion across ticks, restarts and crashes between the bridge write and controller receipt; bridge failures retry that same ID. Successful admission, claimable work, full capacity or a pause ends the episode. The clock and alert are independent of intake-round/decision churn. Undo with a signed source revert; retain idle episodes, outbox receipts, decisions and native custody. No launchd job is loaded or reconfigured.
-
-Failures are classified as budget, sandbox, test, publisher, timeout or unknown. Only the latest unresolved attempt is diagnosed; earlier attempts and tickets with a retained PR are not replayed. Budget/unknown causes require owner decisions. Other causes queue a fresh diagnosis with a one-hour retry/escalation deadline. Its `retry.json` has `session`, `diagnosis`, `estimateBasis`, `test` and `outcome`. The launcher preserves original paths, estimates, provider and wallet; archives only independently stopped, cleaned-up known-native custody; reads all prior branch PRs in every state; then records one automatic retry plan per ticket, changes the block to a fresh digest and approves it after archive. A plan is restartable after interrupted GitHub effects, but no second automatic retry is granted. All earlier receipts, workspaces, sessions, claims and debits remain. A changed intake, live/unknown custody, missing cleanup, recorded/remote PR or missing original digest refuses. Final launch still repeats fresh intake/no-PR readbacks, qualification, usage, path, slot and wallet gates. Three failures for the same repo/provider/cause in an hour hold retries for that cause and queue a repair decision; other causes/projects continue. Expired diagnosis waits escalate once without a synchronous wait.
-
-The optional `capacity.controller` starts with six slots and caps at twelve, independent of legacy `start_parallel`. It adds at most one slot after a full hour with every sampled occupancy above 80%, macOS memory pressure normal and fewer than 30% failed completed workers in the trailing hour (publisher failures included). Only starting/running workers count as busy. Local builder admission uses the shared slot observation described below; retained unknown custody still consumes capacity. Unknown pressure, any unhealthy sample or a sample gap over two minutes resets the healthy dwell. The durable state is read by both admission and the board's slot counter. No synthetic pressure reading permits growth. No job is installed or loaded by this feature. The existing scheduler adopts merged source on its next execution. Observe queue and failure latency for 24 hours before asserting the A4 operational endurance criterion.
-
-Agent Factory itself uses the same delivery boundary as the existing product: authenticated immutable `main` readback, unsigned worker bundles, exact-tree sandbox checks, launcher signing and PR creation. Enrollment and checkout mapping alone never waive worker or delivery qualification. Undo with a signed revert and a reviewed policy rollback; preserve policy archives and all operational history.
-
-After a cause has been repaired, the owner-token control `clear-restart-hold REPO PROVIDER CAUSE REPAIR-RECEIPT` appends the repair receipt and releases that specific hold. It retains the old hold and failures; further repeated failures may hold the cause again. It does not reset a ticket's single automatic retry allowance.
-
-The factory's own focused publisher checks have been rehearsed under the unchanged native policy using `node node_modules/typescript/bin/tsc --noEmit && HOME="$PWD/.factory-tmp/home" bun --no-env-file test tests/APPROVED.test.ts`. Create scratch before running Bun. Direct Bun startup with the account HOME can fail with `CouldntReadCurrentDirectory`; a scratch HOME avoids that account-directory discovery. Approve the exact focused test path in each intake. The full host integration suite still runs in CI; tests that inspect host process identity or exercise the sandbox itself cannot assert those capabilities from inside an already restricted worker. Unit tests may inject process identity while production defaults retain the real check. No additional filesystem/process permissions are granted by this command.
 
 ## Local builder slots
 
@@ -271,90 +236,14 @@ Inspect the heartbeat, source error, backoff and counters before resuming. Allow
 
 Owner inspections use read-only SQLite with a one-second timeout, bounded reads and prompt close (see AGENTS.md); mutations use authenticated controls. The writer's ten-second busy timeout is installed before WAL setup. Immediate transactions retry lock acquisition twice with bounded backoff; callbacks and complete ticks are never replayed, preserving exactly-once reservation/spawn and external effects. Persistent contention still fails visibly rather than bypassing custody.
 
-The CLI tick queues a Coordinator **action** on the first error of an episode, without opening the controller database. A successful tick rearms the next error episode. The independent health job retries retained messages before reading the controller and also alerts for a pause lasting five minutes with recently observed ready tasks and no starting/running builders. This closes #188's intentional empty-queue/unpaused-only coverage gap; neither usage availability nor an empty-queue observation is needed for the pause alarm. The read-only controller snapshot closes before mail work. Private `health/controller-alerts.sqlite` retains incidents, stable mail IDs and actual wake receipts; queued is not woken. Bridge outages retain incidents for retry. No alarm clears a pause, starts work or alters admission/release policy. Undo through a reviewed signed revert; archive and retain all state and receipts.
+The CLI tick queues a Coordinator **action** on the second consecutive failed tick of an episode (one failure that the next tick repairs never pages), without opening the controller database. A successful tick rearms the next error episode. The independent health job retries retained messages before reading the controller and also alerts for a pause lasting five minutes with recently observed ready tasks and no starting/running builders. This closes #188's intentional empty-queue/unpaused-only coverage gap; neither usage availability nor an empty-queue observation is needed for the pause alarm. The read-only controller snapshot closes before mail work. Private `health/controller-alerts.sqlite` retains incidents, stable mail IDs and actual wake receipts; queued is not woken. Bridge outages retain incidents for retry. No alarm clears a pause, starts work or alters admission/release policy. Undo through a reviewed signed revert; archive and retain all state and receipts.
 
-## Daily release rehearsal
+## Retired machinery (2026-11-14)
 
-Release readiness is collected at **14:00** and **17:40 America/Toronto**, using
-`scripts/release.ts rehearsal 14:00|17:40` from the registered installed checkout.
-The rehearsal plists use the release preflight's executable, WorkingDirectory,
-PATH, private directory and timezone. Rehearsals cannot run the release executor,
-reserve release funds, dispatch acceptance, merge, deploy or observe servers.
-They use the same independent readiness collector and the existing read-only
-AWS Budgets DescribeBudget path. The 14:00 collection imports a fresh billing
-receipt, retaining AWS's actual source timestamp; failed refresh is a gap and
-never manufactures freshness. No Cost Explorer, model or resource calls occur.
-
-Every missing input queues one Alido Mail action per day/input to Release,
-Quality or Platform. Owner-only decisions, including AWS sign-in and latched
-spending stops, plus usage decisions and pauses go to Coordinator.
-Actions name the gap and **18:30 Eastern** deadline, before the fixed 19:00
-preflight. Repeated observations reuse the immutable action payload and mail ID;
-clean collections are retained as `release-rehearsal` events and are not mailed.
-Factory-native owners also receive the same action through their normal guarded
-owner wake, because an owner need not have an open app chat. Queued mail/wakes
-are not claimed as delivery or completed work.
-The 17:40 collection confirms readiness after source integration freezes.
-Rehearsals grant no exception to gates, holds, spending or release times.
-Install both rehearsal jobs after review, archive prior plists and read back
-loaded arguments/environment. Undo with reviewed source and archived plists;
-retain reports, billing imports and outbox receipts.
-
-### Pauses during the release window
-
-On a day with a valid accepted current-day batch, any pause active or set during
-**17:30–22:35 Eastern** immediately queues one Alido Mail action to Coordinator
-and the accountable pausing role. The authenticated pause control sends directly;
-the 30-second release reconciler catches an earlier pause at freeze start and
-retries retained episode IDs after mail failures. Each real resume-to-pause transition can alert again; repeated pause requests
-retain the same episode. Pending per-recipient actions retry independently even
-after resume or a later pause. Queue receipts never claim actual delivery. Rehearsals also report an active pause as a readiness gap. Nothing
-lifts a pause automatically or permits a late release.
-
-`control.ts pause Platform|Release|Quality|Product|Coordinator` and the authenticated
-board's optional `owner` field record the accountable role. Generic and legacy
-owner-token controls belong to Coordinator for escalation; their actual caller
-is explicitly unrecorded and is never represented as a verified human identity.
-A missing owner does not prevent the safety pause. Coordinator identifies and
-contacts the original pausing owner when legacy provenance is incomplete.
-
-### Release usage headroom
-
-The **14:00** rehearsal projects Release and the effective Quality acceptance
-profile's usage at **18:30 Eastern** using the last 15–60 minutes of comparable
-native observations. Every exposed window must project below **0.70**. A
-projection at/above the gate, stale or absent usage, missing burn history,
-changed window/reset identity or decreasing counters is a Coordinator gap.
-The ordinary tick retains at most 72 native metadata observations/provider over
-six hours, normally at five-minute spacing, with intervening discontinuities
-retained immediately, without another model or paid API call. At least 15 minutes
-of continuous comparable evidence is required after the latest discontinuity.
-
-The report retains baseline, current usage, measured hourly burn and target for
-every window. A scheduled reset is labelled a forecast assumption; it never
-creates fresh native zero usage or supplies runtime admission. Coordinator can
-decide on work allocation early. Actual 0.70/0.90 gates, capacity and the evening
-fresh-read checks remain unchanged. PR #190 is not required or installed.
-
-### Refused and missed nights
-
-The 30-second release reconciler retains one plain incident summary per night
-after a refused window, failed release effect, or a scheduled job absent after
-its fixed minute. It names the input and the earliest recorded time it was
-knowable, using retained 14:00/17:40/19:00 observations, the scheduled 20:00 QA readiness refusal
-causes, and admitted pause events. With no earlier evidence,
-it explicitly uses the first recorded refusal or the missed-minute boundary;
-it never invents an earlier observation. Full reasons remain in the incident.
-
-One immutable Alido Mail action/night goes to Coordinator. Later windows update
-the retained incident, and delivery failures retry that original action ID and
-payload. Existing historical release evidence lets a restarted reconciler
-recover the last two nights, including admitted scheduled refusals that failed
-before a night/report record existed. Pending action retries are independent of
-that discovery horizon and continue after longer outbox outages. CLI errors from
-off-schedule attempts are excluded; original invocation time distinguishes a
-scheduled job whose setup failed later. A prior unshipped night increments the consecutive
-miss count and flags the second consecutive missed night. A later proven ship
-is retained as recovery. Incidents, original messages and old release records
-are archived/retained, never erased. Notification failure cannot suppress other
-release observers or authorize a replay, catch-up or off-schedule release.
+Removed because their reason was gone: the nightly release executor, rehearsals,
+freeze windows and release preflight; read-only owner wakes for CI checks,
+reviews, ready tickets and decisions (about 860 model turns a day for no reader);
+automatic intake, auto-approval, failure diagnosis and the product top-up job;
+the idle-queue alarm; and the five-minute maintenance job that challenged,
+merged and installed factory PRs and reviewed product PRs. The ticket queue is
+filled only by people setting approval labels. The source is in Git history.

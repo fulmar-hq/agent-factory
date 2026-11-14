@@ -139,12 +139,9 @@ test("stale, missing, wrong-month, projected and actual AWS gates refuse", () =>
     ).toThrow("wallet");
   e.s.close();
 });
-test("helper bypass attempts cannot fund, raise caps, pause or release", () => {
+test("helper bypass attempts cannot fund, raise caps or pause", () => {
   const e = setup();
   expect(() => e.pause(false, "helper")).toThrow("owner");
-  expect(() =>
-    e.release("qa", "a".repeat(40), "fixture", "helper", now),
-  ).toThrow("refused");
   expect(() =>
     e.admit({ ...ticket(), approved: false }, admission()),
   ).toThrow();
@@ -263,56 +260,6 @@ test("pause, custody and debits survive controlled reboot", () => {
   s.close();
   rmSync(dir, { recursive: true });
 });
-test("release windows refuse missed, early and catch-up releases", () => {
-  const e = setup();
-  for (const time of ["19:59", "20:01", "21:29", "21:31"])
-    expect(() =>
-      e.release(
-        time.startsWith("20") || time === "19:59" ? "qa" : "production",
-        "a".repeat(40),
-        "fixture",
-        "release",
-        Date.parse(`2026-11-07T${time}:00-05:00`),
-      ),
-    ).toThrow("window");
-  expect(e.s.rows("releases")).toHaveLength(0);
-  e.s.close();
-});
-test("QA and production enforce one frozen accepted revision per Toronto day", () => {
-  const e = setup(),
-    revision = "a".repeat(40),
-    qa = Date.parse("2026-11-07T20:00:00-05:00"),
-    prod = Date.parse("2026-11-07T21:30:00-05:00");
-  e.release("qa", revision, "qa-run", "release", qa);
-  expect(() => e.release("qa", revision, "duplicate", "release", qa)).toThrow();
-  expect(() =>
-    e.release("production", revision, "prod-run", "release", prod),
-  ).toThrow("acceptance");
-  e.s.set("qa-acceptance", {
-    day: "2026-11-07",
-    revision,
-    receipt: "independent-quality",
-  });
-  expect(() =>
-    e.release("production", "b".repeat(40), "prod-run", "release", prod),
-  ).toThrow("mismatch");
-  expect(e.release("production", revision, "prod-run", "release", prod)).toBe(
-    "2026-11-07:production",
-  );
-  e.pause(true, "owner");
-  expect(() => e.release("qa", revision, "qa", "release", qa)).toThrow(
-    "refused",
-  );
-  e.s.close();
-});
-for (const date of ["2026-07-07T20:00:00-04:00", "2026-11-07T20:00:00-05:00"])
-  test(`Toronto DST window ${date}`, () => {
-    const e = setup();
-    expect(
-      e.release("qa", "a".repeat(40), "fixture", "release", Date.parse(date)),
-    ).toEndWith(":qa");
-    e.s.close();
-  });
 test("AWS actual stop latches across lower subsequent readings", async () => {
   const { observeBilling } = await import("../wallet/ledger");
   const e = setup();

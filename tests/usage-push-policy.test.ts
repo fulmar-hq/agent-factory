@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { ConfigSchema, TicketSchema, QualificationSchema } from "../launcher/config";
 import { readyBuffer, qualificationFor } from "../launcher/usage-push-policy";
-import { supply, type IntakeRound } from "../launcher/autonomy";
 import { usageGate } from "../launcher/engine";
 import {TestEngine as Engine} from "./fixtures";
 import { Store } from "../tracking/store";
@@ -62,41 +61,6 @@ test("optional push accepts exact offset instants and only the bounded buffer", 
   expect(parsed.usage_push).toEqual(c.usage_push);
   expect(parsed.autonomy!.ready_buffer).toBe(3);
   expect(readyBuffer({ ...c, usage_push: undefined }, now)).toBe(3);
-});
-
-test("fake-clock supply uses measured slots plus six, then legacy plus three at the exact deadline", () => {
-  const c = pushConfig();
-  for (const slots of [6, 8, 12]) for (const at of [until - 1, until, until + 1]) {
-    const target = slots + (at < until ? 6 : 3);
-    for (const count of [target - 1, target]) {
-      const s = new Store(":memory:"), e = new Engine(s, c);
-      try {
-        e.pause(false, "owner"); s.set("capacity-controller", { slots });
-        supply(e, Array.from({ length: count }, (_, n) => ticket(n + 1)), at);
-        const round = s.get<IntakeRound>("intake-round");
-        if (count === target) expect(round).toBeNull();
-        else {
-          expect(round).toBeTruthy();
-          expect(s.get<{ payload: { target: number } }>(`owner-wake:${round!.wake}`)!.payload.target).toBe(target);
-        }
-        expect(e.sessions()).toHaveLength(0);
-      } finally { s.close(); }
-    }
-  }
-});
-
-test("expiry closes an existing refill round without replacing queued custody", () => {
-  const s = new Store(":memory:"), e = new Engine(s, pushConfig());
-  try {
-    e.pause(false, "owner");
-    const ready = Array.from({ length: 9 }, (_, n) => ticket(n + 1));
-    supply(e, ready, until - 1);
-    const round = s.get<IntakeRound>("intake-round")!;
-    supply(e, ready, until);
-    expect(s.get<IntakeRound>("intake-round")).toMatchObject({ id: round.id, closed: true });
-    expect(s.get<{ state: string }>(`owner-wake:${round.wake}`)!.state).toBe("queued");
-    expect((s.rows("events") as { kind: string }[]).filter(x => x.kind === "owner-wake-queued")).toHaveLength(1);
-  } finally { s.close(); }
 });
 
 test("retained high primary and medium entry match each ticket without effort overrides or renewal", () => {

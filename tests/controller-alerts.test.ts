@@ -23,20 +23,27 @@ test('recent pause, empty/stale/unknown queue and live workers do not claim paus
  f.s.set('heartbeat',{at:f.now,status:'ok',ready:31});f.s.db.query('INSERT INTO sessions(id,ticket,owner,provider,status,brief) VALUES(?,?,?,?,?,?)').run('live','example/demo#1','product','codex','running','{}');
  expect(watchControllerAlerts(f.dir,f.mail,f.now).pausedReady).toBe(false);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(0);
 }finally{f.s.close();f.db.close();}});
-test('tick error alert survives controller write lock, bridge outage, restart and later success',async()=>{const f=fixture();try{
+test('one self-recovering tick failure never pages; a second consecutive failure pages once and survives bridge outage',async()=>{const f=fixture();try{
  f.s.db.exec('BEGIN IMMEDIATE');
  const lines:string[]=[];
  await expect(tickSummary(async()=>{throw Error('SQLiteError: database is locked')},line=>lines.push(line),r=>recordTickResult(f.dir,f.mail,r))).rejects.toThrow('database is locked');
  expect(lines.map(l=>JSON.parse(l).status)).toEqual(['error']);
- expect(f.db.query('SELECT kind,recipient FROM messages').all()).toEqual([{kind:'action',recipient:'Coordinator'}]);
- recordTickResult(f.dir,f.mail,{at:f.now+1,status:'error'});expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);
- recordTickResult(f.dir,f.mail,{at:f.now+2,status:'ok'});
- expect(()=>recordTickResult(f.dir,join(f.dir,'absent.sqlite'),{at:f.now+3,status:'error'})).toThrow('bridge unavailable');
- flushControllerAlerts(f.dir,f.mail,f.now+4);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(2);
+ expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(0);
+ recordTickResult(f.dir,f.mail,{at:f.now+1,status:'ok'});
+ recordTickResult(f.dir,f.mail,{at:f.now+2,status:'error'});expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(0);
+ recordTickResult(f.dir,f.mail,{at:f.now+3,status:'error'});
+ expect(f.db.query('SELECT id,kind,recipient FROM messages').all()).toEqual([{id:`factory-tick-error:${f.now+2}`,kind:'action',recipient:'Coordinator'}]);
+ f.db.query("UPDATE messages SET wake_state='woken',wake_id='fictional-wake'").run();
+ recordTickResult(f.dir,f.mail,{at:f.now+4,status:'error'});expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(1);
+ recordTickResult(f.dir,f.mail,{at:f.now+5,status:'ok'});
+ recordTickResult(f.dir,join(f.dir,'absent.sqlite'),{at:f.now+6,status:'error'});
+ expect(()=>recordTickResult(f.dir,join(f.dir,'absent.sqlite'),{at:f.now+7,status:'error'})).toThrow('bridge unavailable');
+ flushControllerAlerts(f.dir,f.mail,f.now+8);expect(f.db.query('SELECT id FROM messages').all()).toHaveLength(2);
 }finally{f.s.db.exec('ROLLBACK');f.s.close();f.db.close();}});
 
 test('bridge failure cannot conceal a new pause incident, including when resume precedes recovery',()=>{const f=fixture();try{
  const absent=join(f.dir,'absent.sqlite');
+ recordTickResult(f.dir,absent,{at:f.now-2,status:'error'});
  expect(()=>recordTickResult(f.dir,absent,{at:f.now-1,status:'error'})).toThrow('bridge unavailable');
  f.s.set('paused',true);f.s.set('heartbeat',{at:f.now,status:'ok',ready:31});f.s.event('outage-pause','pause',{},'retain',f.now-6*60000);
  expect(()=>watchControllerAlerts(f.dir,absent,f.now)).toThrow('bridge unavailable');

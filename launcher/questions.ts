@@ -40,3 +40,10 @@ export function boardQuestions(s: Store) {
     resolvedQuestions: rows.filter(q => q.resolved_at !== null && q.resolved_by?.startsWith("auto: ")).sort((a,b) => b.resolved_at! - a.resolved_at!),
   };
 }
+// Retained owner decisions from the retired autonomy loop still default at
+// their deadline so the board does not hold them open forever.
+export function expireDecisions(s:Store,now:number) {
+ for(const r of s.db.query("SELECT key,value FROM kv WHERE key LIKE 'autonomy-decision:%'").all() as {key:string;value:string}[]) {
+  const d=JSON.parse(r.value);if(d.state==='open' && d.deadline<=now){s.set(r.key,{...d,state:'defaulted',outcome:d.default});s.event(`default:${d.id}`,'autonomy-decision-default',d,'Preserve decisions, logs and custody',now);}
+ }
+}

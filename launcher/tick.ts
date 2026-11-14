@@ -1,15 +1,14 @@
-import {observeReleaseUsage} from './release-usage-projection';
 import {githubContext,unavailable} from '../adapters/github-budget';
 import {githubHealth,recordLateGithubFailure} from './github-health';
 import {recordTickResult} from './controller-alerts';
 import {mailPath} from './alerts';
 import {mkdirSync,openSync,closeSync} from "node:fs";
 import {diskReading,observeDisk} from "./disk";
-import { resolveQuestions } from "./questions";
-import {claimableReady,reviewPublished} from './queue';
+import { resolveQuestions, expireDecisions } from "./questions";
+import {claimableReady,reviewPublished,recoverWorkers} from './queue';
 import {observeClaimProgress} from './watchdog';
 import { memoryPressure, reconcileCapacity } from "./capacity";
-import { applyOwnerResults, autoApprove, supply, failures, expireDecisions, autonomyEffects } from "./autonomy";
+import { autonomyEffects } from "./effects";
 import { join } from "node:path";
 import { Engine, type Admission } from "./engine";
 import {
@@ -26,7 +25,6 @@ import { localReadings } from "../adapters/usage";
 import { verifySubscription } from "../adapters/workers";
 import { observeBilling } from "../wallet/ledger";
 import { reconcile, command, validateIntake, setBuilding } from "../adapters/github";
-import {recoverWorkers,localWakes,githubWakes,pendingWakes,dispatchWake,spawnOwner} from "./wake";
 import {qualificationAlerts,watchdogAlert,diskCapacityAlert,healthOwnsAlerts} from "./alerts";
 import {scheduleCodexRenewal} from "./codex-renewal";
 
@@ -86,7 +84,6 @@ async function tickOnce(dir:string) {
     s.set("heartbeat", { at: now, status: "reconciling",lastKnownReady:priorHeartbeat?.ready??priorHeartbeat?.lastKnownReady??null });
     const qualifications = ((await optionalJSON(join(dir, "qualifications.json"))) ?? {}) as Record<string, Qualification>;
     if(!healthOwnsAlerts(dir,now))qualificationAlerts(s, qualifications, now);
-    localWakes(s,c,[],qualifications,now);
 
     const versions: Record<string, string> = { bun: Bun.version };
     for (const cmd of ["codex", "claude", "gh"])
@@ -116,7 +113,6 @@ async function tickOnce(dir:string) {
       if (meter && (!r[provider] || meter.observedAt > r[provider]!.observedAt)) r[provider] = meter;
     }
     s.set("readings", r);
-    observeReleaseUsage(s,r,Date.now());
     for (const provider of ["codex", "claude"] as const) e.refreshUsage(provider, r[provider], Date.now());
     const evaluateRenewal=()=>{try {const renewal=scheduleCodexRenewal(e,dir,join(import.meta.dir,".."),versions.codex!,id=>{
       mkdirSync(join(dir,"logs"),{recursive:true,mode:0o700});const fd=openSync(join(dir,"logs",`codex-renewal-${id}.log`),"ax",0o600);
@@ -128,32 +124,20 @@ async function tickOnce(dir:string) {
     await autonomyEffects(s,()=>reconcileBrowsers(e,dir,nativeBrowserPorts(e,dir,id=>spawnSupervisor(id,dir)),Date.now()));
     reconcileCapacity(s,c,e.active().filter(x=>["starting","running"].includes(x.status)).length,await memoryPressure(),now);
     expireDecisions(s,now);
-    failures(e,now);
     let autoResolved = resolveQuestions(e,now);
     let observed = await reconcile(s,c,now,command,'open');
     let health=githubHealth(s,c,now);
     if(health){s.set('heartbeat',health);return health;}
-    recoverWorkers(e,now);
+    recoverWorkers(e);
     if(await reviewPublished(e))observed=await reconcile(s,c,now,command,'open');
     health=githubHealth(s,c,Date.now());
     if(health){s.set('heartbeat',health);return health;}
-    let ready = claimableReady(e,observed);
-    const autoApproved=c.autonomy && s.get("paused")===false ? await autonomyEffects(s,async()=>{
-      await applyOwnerResults(e,dir,r.billing,now);
-      ready=claimableReady(e,await reconcile(s,c,now,command,'open'));
-      const count=await autoApprove(e,ready,r.billing,now,undefined,dir);
-      if(count)ready=claimableReady(e,await reconcile(s,c,now,command,'open'));
-      return count;
-    }) ?? 0 : 0;
-    health=githubHealth(s,c,Date.now());
-    if(health){s.set('heartbeat',health);return health;}
-    localWakes(s,c,ready,{},now);
-    let ownerReconciled=true;
-    try {await githubWakes(s,c,command,now);}
-    catch(error){ownerReconciled=false;recordLateGithubFailure(s,error);s.event(crypto.randomUUID(),"owner-reconciliation-failure",{error:String(error)},"Retain the last successful timestamp; retry read-only reconciliation");}
-    health=githubHealth(s,c,Date.now());
-    if(health){s.set('heartbeat',health);return health;}
-    if(ownerReconciled && Object.values(c.projects).every(p=>{
+    // Approved tickets are claimed only from labels a person set. The factory
+    // no longer writes, approves or refills its own queue, and wakes no owner
+    // model turns for GitHub events (removed 2026-11-14: ~860 turns a day).
+    const ready = claimableReady(e,observed);
+    const autoApproved = 0;
+    if(Object.values(c.projects).every(p=>{
       const state=s.get<{error?:string;truncated?:boolean}>(`github:${p.repo}`);return state && !state.error && !state.truncated;
     }))s.set("last-successful-reconciliation",Date.now());
     const verified = new Set<string>();
@@ -199,17 +183,9 @@ async function tickOnce(dir:string) {
       const heartbeat={...health,claimed,refusals,autoApproved,autoResolved};
       s.set('heartbeat',heartbeat);return heartbeat;
     };
-    let failed=degraded();if(failed)return failed;
-    // The lease may wait; recheck immediately inside its effects boundary too.
-    await autonomyEffects(s,async()=>{if(!githubHealth(s,c,Date.now()))supply(e,ready,Date.now(),{claimed,refusals});});
-    failed=degraded();if(failed)return failed;
-    if(s.get("paused")===false)for(const w of pendingWakes(s)){
-      failed=degraded();if(failed)return failed;
-      dispatchWake(s,w,id=>spawnOwner(id,dir));
-    }
-    failed=degraded();if(failed)return failed;
+    const failed=degraded();if(failed)return failed;
     autoResolved += resolveQuestions(e);
-    const heartbeat = { at: Date.now(), status: ownerReconciled ? "ok" : "degraded", ready: ready.length,
+    const heartbeat = { at: Date.now(), status: "ok", ready: ready.length,
       paused: s.get("paused") === true, autoApproved, autoResolved, claimed, refusals };
     observeClaimProgress(e,heartbeat);
     watchdogAlert(s,heartbeat.at);
